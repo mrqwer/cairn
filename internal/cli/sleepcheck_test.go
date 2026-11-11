@@ -184,3 +184,35 @@ func TestSleepCheckUntrustedStateDir(t *testing.T) {
 		t.Fatalf("wrote through the symlink: %v", entries)
 	}
 }
+
+func TestSleepCheckPlainRunsWithoutStateDir(t *testing.T) {
+	e := setupSC(t)
+	if err := os.RemoveAll(e.root.Path("/var")); err != nil {
+		t.Fatal(err)
+	}
+	out, errOut, err := runSC(t)
+	if exitCode(err) != 0 || !strings.Contains(out, "Hibernation swap is active") {
+		t.Fatalf("err=%v out=%s", err, out)
+	}
+	if !strings.Contains(errOut, "state directory not trusted or missing") || !strings.Contains(errOut, "built-in defaults") {
+		t.Fatalf("stderr=%s", errOut)
+	}
+	e.off = 999
+	if _, _, err := runSC(t); exitCode(err) != 2 {
+		t.Fatalf("crit exit: %v", err)
+	}
+	if _, _, err := runSC(t, "--record"); exitCode(err) != 1 {
+		t.Fatalf("record must fail closed: %v", err)
+	}
+}
+
+func TestSleepCheckDetectErrorRecorded(t *testing.T) {
+	e := setupSC(t)
+	detectSystem = func(context.Context) (detect.System, error) { return detect.System{}, errors.New("boom") }
+	if _, _, err := runSC(t, "--record"); err == nil {
+		t.Fatal("want error")
+	}
+	if l := eventLog(t, e); !strings.Contains(l, "sleep.check.failed") || !strings.Contains(l, `"error":"boom"`) {
+		t.Fatalf("event: %q", l)
+	}
+}

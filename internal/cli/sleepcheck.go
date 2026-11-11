@@ -101,9 +101,14 @@ func newSleepCheckCmd() *cobra.Command {
 
 func runSleepCheck(cmd *cobra.Command, record bool) error {
 	ctx := ctxOf(cmd)
+	trusted := true
 	if err := plan.CheckTrustedDirs(sysRoot, stateOwnerOf, "/var/lib/cairn", plan.SysStateDir); err != nil {
-		cmd.PrintErrf("state directory not trusted: %v\n", err)
-		return &ExitError{Code: 1}
+		if record {
+			cmd.PrintErrf("state directory not trusted: %v\n", err)
+			return &ExitError{Code: 1}
+		}
+		trusted = false
+		cmd.PrintErrf("note: state directory not trusted or missing (%v); not reading or writing it\n", err)
 	}
 	fail := func(err error) error {
 		if record {
@@ -111,7 +116,17 @@ func runSleepCheck(cmd *cobra.Command, record bool) error {
 		}
 		return err
 	}
-	sc, usedDefaults, err := hostSleepConfig()
+	var sc config.Sleep
+	var usedDefaults bool
+	var err error
+	if trusted {
+		sc, usedDefaults, err = hostSleepConfig()
+	} else {
+		var cfg *config.Config
+		if cfg, err = config.Defaults(); err == nil {
+			sc, usedDefaults = cfg.Host.Sleep, true
+		}
+	}
 	if err != nil {
 		return fail(err)
 	}
