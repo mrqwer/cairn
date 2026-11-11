@@ -15,13 +15,14 @@ import (
 	"github.com/mrqwer/cairn/internal/fsx"
 )
 
-// Tri is a three-valued answer.
+// Tri is a three-valued answer. The zero value is Unknown, so a field left
+// unset never claims a capability.
 type Tri int
 
 const (
-	Yes Tri = iota
+	Unknown Tri = iota
+	Yes
 	No
-	Unknown
 )
 
 // Swap is one entry of /proc/swaps.
@@ -70,7 +71,6 @@ var (
 // values; a present but malformed file is an error naming that file.
 func Detect(ctx context.Context, root fsx.Root, r execx.Runner, getenv func(string) string) (System, error) {
 	var s System
-	s.InitramfsResume = Unknown
 
 	if out, err := r.Run(ctx, "systemctl", "--version"); err == nil {
 		if m := firstNumber.Find(out); m != nil {

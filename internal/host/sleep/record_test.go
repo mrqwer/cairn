@@ -220,12 +220,58 @@ func TestRecentEventsCheck(t *testing.T) {
 
 func TestNotifyFailedIDsListed(t *testing.T) {
 	n := newNotifyEnv(t)
-	n.want("Hibernation unavailable", "sleep.swap.free, sleep.resume.match. Suspended instead. Run: cairn doctor host")
-	if err := n.sys.Append(evt("A", events.KindSleepCheckFailed, 0, map[string]any{"failed": []any{"sleep.swap.free", "sleep.resume.match"}})); err != nil {
+	n.want("Hibernation unavailable", "Swap has room for the hibernation image, Resume device and offset match the hibernation swap, "+
+		"gpu.x. Suspended instead. Run: cairn doctor host")
+	if err := n.sys.Append(evt("A", events.KindSleepCheckFailed, 0, map[string]any{"failed": []any{"sleep.swap.free", "sleep.resume.match", "gpu.x"}})); err != nil {
 		t.Fatal(err)
 	}
 	if c := n.notify(t); c != 1 {
 		t.Fatalf("sent %d", c)
+	}
+	n.want("Hibernation unavailable", "NVIDIA suspend space. Suspended instead. Run: cairn doctor host")
+	if err := n.sys.Append(evt("A", events.KindSleepCheckFailed, 5, map[string]any{
+		"failed": []any{"gpu.nvidia.space"}, "titles": []any{"NVIDIA suspend space"}})); err != nil {
+		t.Fatal(err)
+	}
+	if c := n.notify(t); c != 1 {
+		t.Fatalf("sent %d", c)
+	}
+}
+
+func TestNotifyOneAlertForFailedCheckAndFallback(t *testing.T) {
+	n := newNotifyEnv(t)
+	n.want("Hibernation unavailable", "boom. Suspended instead. Run: cairn doctor host")
+	n.want("Hibernation refused", "Suspended instead of hibernating. Run: cairn doctor host")
+	at := func(sec int, kind string, data map[string]any) events.Event {
+		return events.Event{TS: t0.Add(time.Duration(sec) * time.Second), Boot: "A", Source: "t", Kind: kind, Data: data}
+	}
+	for _, e := range []events.Event{at(0, events.KindSleepCheckFailed, map[string]any{"error": "boom"}), at(2, events.KindSleepFallback, nil)} {
+		if err := n.sys.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c := n.notify(t); c != 1 || n.run.Calls[0][3] != "Hibernation unavailable" {
+		t.Fatalf("same batch: sent %d %v", c, n.run.Calls)
+	}
+	// Across batches: the fallback 10 s after an already notified failure.
+	if err := n.sys.Append(at(100, events.KindSleepCheckFailed, map[string]any{"error": "boom"})); err != nil {
+		t.Fatal(err)
+	}
+	if c := n.notify(t); c != 1 {
+		t.Fatalf("failure: sent %d", c)
+	}
+	if err := n.sys.Append(at(110, events.KindSleepFallback, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if c := n.notify(t); c != 0 {
+		t.Fatalf("fallback after failure: sent %d", c)
+	}
+	// A fallback on its own still alerts.
+	if err := n.sys.Append(at(300, events.KindSleepFallback, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if c := n.notify(t); c != 1 {
+		t.Fatalf("lone fallback: sent %d", c)
 	}
 }
 

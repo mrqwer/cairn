@@ -270,24 +270,14 @@ func TestApplyRootRepairMode(t *testing.T) {
 func TestApplyRootRejectsBadRequests(t *testing.T) {
 	withBuilder(t, returns(plan.Action{Kind: plan.WriteFile, Path: sleepConf, Content: []byte("x"), NeedsRoot: true}))
 	cases := map[string]func(r *plan.RootRequest){
-		"bad version":    func(r *plan.RootRequest) { r.Version = 99 },
-		"bad mode":       func(r *plan.RootRequest) { r.Mode = "yolo" },
-		"extra /etc":     func(r *plan.RootRequest) { r.Extra = []string{"/etc"} },
-		"extra mismatch": func(r *plan.RootRequest) { r.Extra = []string{"/srv/other"} },
-		"bad lid":        func(r *plan.RootRequest) { r.Host.Sleep.Lid = "explode" },
-		"newline in path": func(r *plan.RootRequest) {
-			r.Host.GPU.Nvidia.TemporaryFilePath = "/home/x\n/etc"
-			r.Extra = []string{"/home/x\n/etc"}
-		},
-		"dotdot in path": func(r *plan.RootRequest) {
-			r.Host.GPU.Nvidia.TemporaryFilePath = "/home/../etc"
-			r.Extra = []string{"/home/../etc"}
-		},
-		"swap dotdot": func(r *plan.RootRequest) { r.Host.Sleep.HibernationSwap.Path = "/swap/../etc/shadow" },
-		"system extra": func(r *plan.RootRequest) {
-			r.Host.GPU.Nvidia.TemporaryFilePath = "/etc/x"
-			r.Extra = []string{"/etc/x"}
-		},
+		"bad version":     func(r *plan.RootRequest) { r.Version = 99 },
+		"bad mode":        func(r *plan.RootRequest) { r.Mode = "yolo" },
+		"extra /etc":      func(r *plan.RootRequest) { r.Host.GPU.Nvidia.TemporaryFilePath = "/etc" },
+		"bad lid":         func(r *plan.RootRequest) { r.Host.Sleep.Lid = "explode" },
+		"newline in path": func(r *plan.RootRequest) { r.Host.GPU.Nvidia.TemporaryFilePath = "/home/x\n/etc" },
+		"dotdot in path":  func(r *plan.RootRequest) { r.Host.GPU.Nvidia.TemporaryFilePath = "/home/../etc" },
+		"swap dotdot":     func(r *plan.RootRequest) { r.Host.Sleep.HibernationSwap.Path = "/swap/../etc/shadow" },
+		"system extra":    func(r *plan.RootRequest) { r.Host.GPU.Nvidia.TemporaryFilePath = "/etc/x" },
 	}
 	for name, mutate := range cases {
 		env := rootEnv(t)
@@ -344,8 +334,12 @@ func TestReadRootRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := plan.ReadRootRequest(bytes.NewReader(data))
-	if err != nil || got.Mode != plan.ModeRepair || len(got.Extra) != 1 || got.Extra[0] != nvidiaTmp {
+	if err != nil || got.Mode != plan.ModeRepair || got.Host.GPU.Nvidia.TemporaryFilePath != nvidiaTmp {
 		t.Fatalf("round trip %+v %v", got, err)
+	}
+	withExtra := strings.Replace(string(data), `"mode"`, `"extra":["/srv"],"mode"`, 1)
+	if _, err := plan.ReadRootRequest(strings.NewReader(withExtra)); err == nil {
+		t.Fatal("request with extra paths accepted")
 	}
 	big := append(bytes.Repeat([]byte(" "), plan.MaxRootRequest), data...)
 	if _, err := plan.ReadRootRequest(bytes.NewReader(big)); err == nil {
@@ -432,5 +426,31 @@ func TestApplyRootLogindRestartHint(t *testing.T) {
 	run() // nothing written now
 	if strings.Contains(out.String(), hint) {
 		t.Fatalf("hint printed without a change:\n%s", out.String())
+	}
+}
+
+func TestTrustedDirWalksFromRoot(t *testing.T) {
+	root := fsx.Root{Dir: t.TempDir()}
+	owner := func(fs.FileInfo) (uint32, bool) { return 0, true }
+	if err := plan.TrustedDir(root, plan.SysStateDir, owner); err == nil {
+		t.Fatal("missing directory trusted")
+	}
+	if err := root.MkdirAll(plan.SysStateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := plan.TrustedDir(root, plan.SysStateDir, owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root.Path("/var"), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := plan.TrustedDir(root, plan.SysStateDir, owner); err == nil || !strings.Contains(err.Error(), "/var ") {
+		t.Fatalf("world-writable /var: %v", err)
+	}
+	if err := os.Chmod(root.Path("/var"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := plan.TrustedDir(root, plan.SysStateDir, func(fs.FileInfo) (uint32, bool) { return 1000, true }); err == nil {
+		t.Fatal("user-owned chain trusted")
 	}
 }

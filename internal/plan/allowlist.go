@@ -334,20 +334,3 @@ func trustedNode(root fsx.Root, p string, ownerOf func(fs.FileInfo) (uint32, boo
 	}
 	return st, nil
 }
-
-// CheckTrustedDirs verifies each of dirs with Lstat: a real directory (no
-// symlink), owned by root per ownerOf (nil means the real owner), and not
-// group/world writable. Root-side readers and writers of cairn state use it
-// before touching files there.
-func CheckTrustedDirs(root fsx.Root, ownerOf func(fs.FileInfo) (uint32, bool), dirs ...string) error {
-	for _, d := range dirs {
-		st, err := trustedNode(root, d, ownerOf)
-		if err != nil {
-			return err
-		}
-		if !st.IsDir() {
-			return fmt.Errorf("%s is not a directory", d)
-		}
-	}
-	return nil
-}

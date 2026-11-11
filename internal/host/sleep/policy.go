@@ -75,13 +75,14 @@ func Actions(cfg config.Sleep, sys detect.System, self, userUnitDir string) []pl
 	}
 	rootFile("/etc/systemd/sleep.conf.d/50-cairn.conf", sl, 0o644)
 
-	hook := hdr + "[Unit]\nOnFailure=" + fallbackUnit + "\n\n[Service]\nExecStartPre=" + self + " host sleep-check --record\n"
-	rootFile("/etc/systemd/system/systemd-hibernate.service.d/50-cairn.conf", hook, 0o644)
-	rootFile("/etc/systemd/system/systemd-suspend-then-hibernate.service.d/50-cairn.conf", hook, 0o644)
-
+	// The fallback unit first: the drop-ins below name it in OnFailure=.
 	rootFile("/etc/systemd/system/"+fallbackUnit,
 		hdr+"[Unit]\nDescription=cairn: suspend when hibernation is refused\n\n[Service]\nType=oneshot\nExecStart="+
 			self+" host record-sleep fallback\nExecStart=/usr/bin/systemctl suspend\n", 0o644)
+
+	hook := hdr + "[Unit]\nOnFailure=" + fallbackUnit + "\n\n[Service]\nExecStartPre=" + self + " host sleep-check --record\n"
+	rootFile("/etc/systemd/system/systemd-hibernate.service.d/50-cairn.conf", hook, 0o644)
+	rootFile("/etc/systemd/system/systemd-suspend-then-hibernate.service.d/50-cairn.conf", hook, 0o644)
 
 	rootFile(systemSleepHook,
 		"#!/bin/sh\n"+hdr+"exec "+self+" host record-sleep \"$1\" \"$2\"\n", 0o755)

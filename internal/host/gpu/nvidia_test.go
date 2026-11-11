@@ -115,7 +115,7 @@ func TestForeignMaskBackedUpAndRestored(t *testing.T) {
 		OwnerOf: func(os.FileInfo) (uint32, bool) { return 0, true },
 	}
 	acts := NvidiaActions(cfg(), nv(), vendor(t))
-	p := plan.ResolveAll(acts, root, env.UserInv, env.SysInv)
+	p := plan.Resolve(acts, root, env.SysInv)
 	if p.Actions[0].State != plan.Foreign {
 		t.Fatalf("state %v", p.Actions[0].State)
 	}

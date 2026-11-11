@@ -86,17 +86,17 @@ func NotificationFor(e events.Event) (Notification, bool) {
 	switch e.Kind {
 	case events.KindSleepCheckFailed:
 		what := "unknown"
-		switch f := e.Data["failed"].(type) {
-		case []any:
-			var ids []string
-			for _, v := range f {
-				if s, ok := v.(string); ok {
-					ids = append(ids, s)
+		names := strs(e.Data["titles"])
+		if len(names) == 0 {
+			for _, id := range strs(e.Data["failed"]) {
+				if t, ok := Titles[id]; ok {
+					id = t
 				}
+				names = append(names, id)
 			}
-			if len(ids) > 0 {
-				what = strings.Join(ids, ", ")
-			}
+		}
+		if len(names) > 0 {
+			what = strings.Join(names, ", ")
 		}
 		if what == "unknown" {
 			if s, ok := e.Data["error"].(string); ok && s != "" {
@@ -110,6 +110,18 @@ func NotificationFor(e events.Event) (Notification, bool) {
 		return Notification{"Reboot required", "Kernel or GPU driver was upgraded: reboot before relying on hibernation"}, true
 	}
 	return Notification{}, false
+}
+
+// strs returns the strings of a decoded JSON array.
+func strs(v any) []string {
+	list, _ := v.([]any)
+	var out []string
+	for _, x := range list {
+		if s, ok := x.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // LostNotification is the notification for a boot.lost-during-sleep finding.
@@ -181,6 +193,10 @@ func Notify(ctx context.Context, r execx.Runner, sys events.Log, user fsx.Root, 
 	if err != nil {
 		return 0, err
 	}
+	failedAt, err := failureTimes(sys, evs)
+	if err != nil {
+		return 0, err
+	}
 	last := map[string]int{}
 	notes := make([]Notification, len(evs))
 	for i, e := range evs {
@@ -189,7 +205,8 @@ func Notify(ctx context.Context, r execx.Runner, sys events.Log, user fsx.Root, 
 		case !ok,
 			replaced && e.TS.Before(since),
 			noCursor && (e.Boot != currentBoot || now.Sub(e.TS) > NoCursorWindow),
-			e.Kind == events.KindRebootRequired && e.Boot != currentBoot:
+			e.Kind == events.KindRebootRequired && e.Boot != currentBoot,
+			e.Kind == events.KindSleepFallback && nearFailure(e, failedAt):
 			continue
 		}
 		notes[i] = n
@@ -211,6 +228,46 @@ func Notify(ctx context.Context, r execx.Runner, sys events.Log, user fsx.Root, 
 		}
 	}
 	return sent, nil
+}
+
+// FallbackCoalesce is how close a sleep.fallback may follow (or precede) a
+// sleep.check.failed of the same boot to be covered by its notification.
+const FallbackCoalesce = 30 * time.Second
+
+// failureTimes returns the sleep.check.failed events of the whole log when
+// evs has a fallback that might be covered by one (read only then).
+func failureTimes(sys events.Log, evs []events.Event) ([]events.Event, error) {
+	needed := false
+	for _, e := range evs {
+		needed = needed || e.Kind == events.KindSleepFallback
+	}
+	if !needed {
+		return nil, nil
+	}
+	all, _, err := sys.ReadFrom(0)
+	if err != nil {
+		return nil, err
+	}
+	var out []events.Event
+	for _, e := range all {
+		if e.Kind == events.KindSleepCheckFailed {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// nearFailure reports whether fallback e belongs to one of the failed checks
+// (same boot, within FallbackCoalesce): the "unavailable" notification
+// already says hibernation was replaced by suspend.
+func nearFailure(e events.Event, failed []events.Event) bool {
+	for _, f := range failed {
+		d := e.TS.Sub(f.TS)
+		if f.Boot == e.Boot && d <= FallbackCoalesce && d >= -FallbackCoalesce {
+			return true
+		}
+	}
+	return false
 }
 
 // RecentEvents is the sleep.events.recent doctor check over the log at path

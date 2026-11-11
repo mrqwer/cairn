@@ -175,31 +175,6 @@ func Resolve(desired []Action, root fsx.Root, inv *inventory.Inventory) Plan {
 	return p
 }
 
-// ResolveAll resolves user-level actions against userInv and root actions
-// against sysInv, keeping the original order.
-func ResolveAll(desired []Action, root fsx.Root, userInv, sysInv *inventory.Inventory) Plan {
-	var user, sys []Action
-	for _, a := range desired {
-		if a.NeedsRoot {
-			sys = append(sys, a)
-		} else {
-			user = append(user, a)
-		}
-	}
-	u, s := Resolve(user, root, userInv), Resolve(sys, root, sysInv)
-	out := Plan{Mode: ModeApply}
-	for _, a := range desired {
-		if a.NeedsRoot {
-			out.Actions = append(out.Actions, s.Actions[0])
-			s.Actions = s.Actions[1:]
-		} else {
-			out.Actions = append(out.Actions, u.Actions[0])
-			u.Actions = u.Actions[1:]
-		}
-	}
-	return out
-}
-
 func resolveOne(a Action, root fsx.Root, inv *inventory.Inventory) State {
 	e, managed := inv.Get(a.target())
 	switch a.Kind {

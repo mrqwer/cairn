@@ -173,3 +173,16 @@ func TestCriticalBatteryMapping(t *testing.T) {
 		}
 	}
 }
+
+func TestFallbackUnitWrittenBeforeDropIns(t *testing.T) {
+	idx := map[string]int{}
+	for i, a := range sleep.Actions(defaults(t), fixture(), self, userDir) {
+		idx[a.Path] = i
+	}
+	fb := idx["/etc/systemd/system/cairn-sleep-fallback.service"]
+	for _, d := range []string{"systemd-hibernate.service.d", "systemd-suspend-then-hibernate.service.d"} {
+		if i, ok := idx["/etc/systemd/system/"+d+"/50-cairn.conf"]; !ok || i < fb {
+			t.Errorf("%s at %d, fallback unit at %d", d, i, fb)
+		}
+	}
+}

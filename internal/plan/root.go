@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"path"
-	"slices"
 	"strings"
 
 	"github.com/mrqwer/cairn/internal/config"
@@ -39,12 +38,12 @@ const MaxRootRequest = 64 << 10
 const requestVersion = 1
 
 // RootRequest is the only input apply-root takes from the unprivileged side
-// (on stdin). It carries no actions or file content.
+// (on stdin). It carries no actions, file content or paths beyond the host
+// config; config-derived root paths are recomputed with ExtraPaths.
 type RootRequest struct {
 	Version int         `json:"version"`
 	Mode    string      `json:"mode"`
 	Host    config.Host `json:"host"`
-	Extra   []string    `json:"extra,omitempty"`
 }
 
 // ExtraPaths lists config-derived paths the root side may create: the NVIDIA
@@ -59,7 +58,7 @@ func ExtraPaths(host config.Host) []string {
 
 // NewRootRequest builds the request for mode and host.
 func NewRootRequest(mode string, host config.Host) RootRequest {
-	return RootRequest{Version: requestVersion, Mode: mode, Host: host, Extra: ExtraPaths(host)}
+	return RootRequest{Version: requestVersion, Mode: mode, Host: host}
 }
 
 // Validate checks every field; any failure rejects the whole request.
@@ -75,10 +74,7 @@ func (r RootRequest) Validate() error {
 	for _, e := range cfg.Validate() {
 		errs = append(errs, e)
 	}
-	if want := ExtraPaths(r.Host); !slices.Equal(r.Extra, want) {
-		errs = append(errs, fmt.Errorf("extra paths %q do not match the host config (%q)", r.Extra, want))
-	}
-	errs = append(errs, checkExtra(r.Extra))
+	errs = append(errs, checkExtra(ExtraPaths(r.Host)))
 	return errors.Join(errs...)
 }
 
@@ -152,9 +148,10 @@ func ApplyRoot(ctx context.Context, r RootRequest, env Env, opts RootOptions) er
 	if err != nil {
 		return err
 	}
+	extra := ExtraPaths(r.Host)
 	var errs []error
 	for _, a := range acts {
-		errs = append(errs, CheckRootAction(a, r.Extra, r.Mode))
+		errs = append(errs, CheckRootAction(a, extra, r.Mode))
 		if r.Mode == ModeUninstall && a.Kind == RemoveFile {
 			if _, ok := env.SysInv.Get(a.Path); !ok {
 				errs = append(errs, fmt.Errorf("RemoveFile %q: not recorded in the system inventory", a.Path))
@@ -204,7 +201,7 @@ func ApplyRoot(ctx context.Context, r RootRequest, env Env, opts RootOptions) er
 			return err
 		}
 	}
-	if err := Apply(ctx, p, env, Options{Force: opts.Force, RootOnly: true, Extra: r.Extra}); err != nil {
+	if err := Apply(ctx, p, env, Options{Force: opts.Force, RootOnly: true, Extra: extra}); err != nil {
 		return err
 	}
 	bootChanged, logindChanged := false, false

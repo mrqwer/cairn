@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/mrqwer/cairn/internal/config"
 	"github.com/mrqwer/cairn/internal/detect"
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/plan"
@@ -113,8 +115,13 @@ func TestSleepCheckMalformedConfigFails(t *testing.T) {
 
 func TestSleepCheckValidConfigUsed(t *testing.T) {
 	e := setupSC(t)
-	cfg := `{"Sleep":{"HibernationSwap":{"Path":"/not-active"}}}`
-	if err := e.root.WriteAtomic(plan.HostConfigPath, []byte(cfg), 0o644); err != nil {
+	cfg, err := config.Defaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Host.Sleep.HibernationSwap.Path = "/not-active"
+	snap, _ := plan.HostSnapshot(cfg.Host)
+	if err := e.root.WriteAtomic(plan.HostConfigPath, snap, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out, errOut, err := runSC(t, "--record")
@@ -138,7 +145,8 @@ func TestSleepCheckRecordExitCodes(t *testing.T) {
 	if _, _, err := runSC(t, "--record"); exitCode(err) != 1 {
 		t.Fatalf("crit: %v", err)
 	}
-	if !strings.Contains(eventLog(t, e), "sleep.check.failed") || !strings.Contains(eventLog(t, e), "sleep.resume.match") {
+	if !strings.Contains(eventLog(t, e), "sleep.check.failed") || !strings.Contains(eventLog(t, e), "sleep.resume.match") ||
+		!strings.Contains(eventLog(t, e), "Resume device and offset match the hibernation swap") {
 		t.Fatalf("event: %q", eventLog(t, e))
 	}
 	// Non-record keeps the doctor exit code.
@@ -239,5 +247,41 @@ func TestSleepCheckRootPlainWritesRecord(t *testing.T) {
 	_, _, _ = runSC(t)
 	if e.root.Exists(plan.SysStateDir + "/sleep-check.json") {
 		t.Fatal("non-root plain run wrote the record")
+	}
+}
+
+func TestSleepCheckInvalidSnapshotFailsClosed(t *testing.T) {
+	e := setupSC(t)
+	cfg, err := config.Defaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Host.Sleep.Lid = "explode"
+	snap, _ := plan.HostSnapshot(cfg.Host)
+	if err := e.root.WriteAtomic(plan.HostConfigPath, snap, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runSC(t, "--record"); exitCode(err) == 0 {
+		t.Fatalf("invalid snapshot accepted: %v", err)
+	}
+	if l := eventLog(t, e); !strings.Contains(l, "sleep.check.failed") || !strings.Contains(l, "host.sleep.lid") {
+		t.Fatalf("event: %q", l)
+	}
+}
+
+func TestSleepCheckTimesOut(t *testing.T) {
+	e := setupSC(t)
+	old := sleepCheckTimeout
+	t.Cleanup(func() { sleepCheckTimeout = old })
+	sleepCheckTimeout = 20 * time.Millisecond
+	detectSystem = func(ctx context.Context) (detect.System, error) {
+		time.Sleep(300 * time.Millisecond)
+		return e.sys, nil
+	}
+	if _, _, err := runSC(t, "--record"); exitCode(err) != 1 {
+		t.Fatalf("exit: %v", err)
+	}
+	if l := eventLog(t, e); !strings.Contains(l, `"error":"sleep-check timed out"`) {
+		t.Fatalf("event: %q", l)
 	}
 }

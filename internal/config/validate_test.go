@@ -85,3 +85,14 @@ func TestValidatePathHygiene(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateTemporaryPathWhitespace(t *testing.T) {
+	var cfg config.Config
+	cfg.Host.Sleep.Lid, cfg.Host.Sleep.LidAC = "suspend", "suspend"
+	cfg.Host.Sleep.CriticalBattery, cfg.Host.Sleep.IdleBattery = "hibernate", "hibernate"
+	cfg.Host.Sleep.HibernateAfter, _ = config.ParseDuration("15min")
+	cfg.Host.GPU.Nvidia.TemporaryFilePath = "/home/my dumps"
+	if got := keys(cfg.Validate()); !got["host.gpu.nvidia.temporary_file_path"] || len(got) != 1 {
+		t.Fatalf("errors %v", got)
+	}
+}

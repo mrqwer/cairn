@@ -154,3 +154,10 @@ func TestHibernateSupported(t *testing.T) {
 		}
 	}
 }
+
+func TestTriZeroIsUnknown(t *testing.T) {
+	var s System
+	if s.InitramfsResume != Unknown || s.HibernateSupported != Unknown {
+		t.Fatalf("zero values: %v %v", s.InitramfsResume, s.HibernateSupported)
+	}
+}

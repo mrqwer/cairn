@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // FieldError describes one invalid configuration value.
@@ -55,6 +56,11 @@ func (c *Config) Validate() []FieldError {
 		if msg := checkPath(p.val); msg != "" {
 			errs = append(errs, FieldError{p.key, fmt.Sprintf("%q %s", p.val, msg)})
 		}
+	}
+	// The NVIDIA path goes into a modprobe options line, where whitespace
+	// would split it into separate options.
+	if t := c.Host.GPU.Nvidia.TemporaryFilePath; checkPath(t) == "" && strings.ContainsFunc(t, unicode.IsSpace) {
+		errs = append(errs, FieldError{"host.gpu.nvidia.temporary_file_path", fmt.Sprintf("%q contains whitespace", t)})
 	}
 	return errs
 }

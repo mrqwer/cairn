@@ -55,7 +55,7 @@ func newRecordSleepCmd() *cobra.Command {
 			}
 			// A logging hook must never block sleep: every failure below
 			// warns and exits 0.
-			if err := plan.CheckTrustedDirs(sysRoot, stateOwnerOf, "/var/lib/cairn", plan.SysStateDir); err != nil {
+			if err := plan.TrustedDir(sysRoot, plan.SysStateDir, stateOwnerOf); err != nil {
 				cmd.PrintErrf("warning: state directory not trusted or missing (%v); not recording\n", err)
 				return nil
 			}
@@ -107,13 +107,13 @@ func repeatFailedCheck(cmd *cobra.Command, l events.Log, boot string) {
 		cmd.PrintErrf("warning: not repeating the sleep checks: %v\n", err)
 		return
 	}
-	failed := sleep.FailedIDs(run.results)
-	if len(failed) == 0 {
+	if len(sleep.FailedIDs(run.results)) == 0 {
 		return
 	}
+	data := sleep.FailedEventData(run.results)
+	data["repeat"] = true
 	err = l.Append(events.Event{
-		TS: nowFunc().UTC(), Boot: boot, Source: "record-sleep", Kind: events.KindSleepCheckFailed,
-		Data: map[string]any{"failed": anyList(failed), "repeat": true},
+		TS: nowFunc().UTC(), Boot: boot, Source: "record-sleep", Kind: events.KindSleepCheckFailed, Data: data,
 	})
 	if err != nil {
 		cmd.PrintErrf("warning: not recording event: %v\n", err)

@@ -365,6 +365,24 @@ func RecordedResume(root fsx.Root, now func() time.Time) doctor.Check {
 	}}
 }
 
+// FailedEventData is the data of a sleep.check.failed event for rs: the
+// sorted IDs of the Crit results ("failed") and their titles ("titles"), in
+// the same order.
+func FailedEventData(rs []doctor.Result) map[string]any {
+	crit := map[string]string{}
+	for _, r := range rs {
+		if r.Status == doctor.Crit {
+			crit[r.ID] = r.Title
+		}
+	}
+	ids := FailedIDs(rs)
+	failed, titles := make([]any, len(ids)), make([]any, len(ids))
+	for i, id := range ids {
+		failed[i], titles[i] = id, crit[id]
+	}
+	return map[string]any{"failed": failed, "titles": titles}
+}
+
 // FailedIDs returns the IDs of Crit results, sorted.
 func FailedIDs(rs []doctor.Result) []string {
 	var ids []string

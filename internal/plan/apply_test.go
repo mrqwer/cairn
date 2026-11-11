@@ -77,7 +77,7 @@ func reload(t *testing.T, env *plan.Env) {
 func TestApplyIsIdempotent(t *testing.T) {
 	env, fr := newEnv(t)
 	ctx := context.Background()
-	p := plan.ResolveAll(desired(), env.Root, env.UserInv, env.SysInv)
+	p := resolveAll(desired(), env.Root, env.UserInv, env.SysInv)
 	if len(p.Pending()) != len(desired()) {
 		t.Fatalf("first plan: %d pending, want all %d", len(p.Pending()), len(desired()))
 	}
@@ -103,7 +103,7 @@ func TestApplyIsIdempotent(t *testing.T) {
 	}
 
 	calls := len(fr.Calls)
-	p2 := plan.ResolveAll(desired(), env.Root, env.UserInv, env.SysInv)
+	p2 := resolveAll(desired(), env.Root, env.UserInv, env.SysInv)
 	if pend := p2.Pending(); len(pend) != 0 {
 		t.Fatalf("second plan not empty: %+v", pend)
 	}
@@ -123,7 +123,7 @@ func TestApplyIsIdempotent(t *testing.T) {
 func TestApplyUserOnlyAndRootOnly(t *testing.T) {
 	env, _ := newEnv(t)
 	ctx := context.Background()
-	p := plan.ResolveAll(desired(), env.Root, env.UserInv, env.SysInv)
+	p := resolveAll(desired(), env.Root, env.UserInv, env.SysInv)
 	if err := plan.Apply(ctx, p, env, plan.Options{UserOnly: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -144,11 +144,11 @@ func TestApplyUserOnlyAndRootOnly(t *testing.T) {
 func TestApplyRefusesModifiedByUser(t *testing.T) {
 	env, _ := newEnv(t)
 	ctx := context.Background()
-	if err := plan.Apply(ctx, plan.ResolveAll(desired(), env.Root, env.UserInv, env.SysInv), env, plan.Options{}); err != nil {
+	if err := plan.Apply(ctx, resolveAll(desired(), env.Root, env.UserInv, env.SysInv), env, plan.Options{}); err != nil {
 		t.Fatal(err)
 	}
 	put(t, env.Root, sleepConf, "hand edit\n")
-	p := plan.ResolveAll(desired(), env.Root, env.UserInv, env.SysInv)
+	p := resolveAll(desired(), env.Root, env.UserInv, env.SysInv)
 	err := plan.Apply(ctx, p, env, plan.Options{})
 	if !errors.Is(err, plan.ErrModifiedByUser) || !strings.Contains(err.Error(), sleepConf) {
 		t.Fatalf("err=%v, want ErrModifiedByUser naming %s", err, sleepConf)
@@ -174,7 +174,7 @@ func TestForeignFileBackedUp(t *testing.T) {
 	ctx := context.Background()
 	put(t, env.Root, modprobe, "options nvidia NVreg_TemporaryFilePath=/var/tmp\n")
 	mask := plan.Action{Kind: plan.WriteFile, Path: modprobe, Content: []byte("managed\n"), NeedsRoot: true, Class: inventory.Mask, Policy: "gpu-nvidia"}
-	p := plan.ResolveAll([]plan.Action{mask}, env.Root, env.UserInv, env.SysInv)
+	p := resolveAll([]plan.Action{mask}, env.Root, env.UserInv, env.SysInv)
 	if p.Actions[0].State != plan.Foreign {
 		t.Fatalf("state %q", p.Actions[0].State)
 	}
@@ -195,7 +195,7 @@ func TestForeignFileBackedUp(t *testing.T) {
 
 	// Removing a managed file that has a backup restores the original.
 	rm := plan.Action{Kind: plan.RemoveFile, Path: modprobe, NeedsRoot: true}
-	p = plan.ResolveAll([]plan.Action{rm}, env.Root, env.UserInv, env.SysInv)
+	p = resolveAll([]plan.Action{rm}, env.Root, env.UserInv, env.SysInv)
 	if err := plan.Apply(ctx, p, env, plan.Options{}); err != nil {
 		t.Fatal(err)
 	}
@@ -211,11 +211,11 @@ func TestGSettingRestoreDropsEntry(t *testing.T) {
 	env, _ := newEnv(t)
 	ctx := context.Background()
 	set := []plan.Action{{Kind: plan.SetGSetting, Schema: gsSchema, Key: gsKey, Value: "'hibernate'"}}
-	if err := plan.Apply(ctx, plan.ResolveAll(set, env.Root, env.UserInv, env.SysInv), env, plan.Options{}); err != nil {
+	if err := plan.Apply(ctx, resolveAll(set, env.Root, env.UserInv, env.SysInv), env, plan.Options{}); err != nil {
 		t.Fatal(err)
 	}
 	back := []plan.Action{{Kind: plan.SetGSetting, Schema: gsSchema, Key: gsKey, Value: "'suspend'"}}
-	if err := plan.Apply(ctx, plan.ResolveAll(back, env.Root, env.UserInv, env.SysInv), env, plan.Options{}); err != nil {
+	if err := plan.Apply(ctx, resolveAll(back, env.Root, env.UserInv, env.SysInv), env, plan.Options{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(env.UserInv.Entries) != 0 {
@@ -230,7 +230,7 @@ func TestApplyValidatesBeforeExecuting(t *testing.T) {
 		{Kind: plan.RunCommand, Cmd: []string{"systemctl", "daemon-reload"}, NeedsRoot: true},
 		{Kind: plan.WriteFile, Path: "/etc/passwd", Content: []byte("x"), NeedsRoot: true},
 	}
-	err := plan.Apply(context.Background(), plan.ResolveAll(bad, env.Root, env.UserInv, env.SysInv), env, plan.Options{})
+	err := plan.Apply(context.Background(), resolveAll(bad, env.Root, env.UserInv, env.SysInv), env, plan.Options{})
 	if err == nil || !strings.Contains(err.Error(), "/etc/passwd") {
 		t.Fatalf("err=%v", err)
 	}
@@ -241,7 +241,7 @@ func TestApplyValidatesBeforeExecuting(t *testing.T) {
 		{Kind: plan.WriteFile, Path: userUnit, Content: []byte("x")},
 		{Kind: plan.RunCommand, Cmd: []string{"sh", "-c", "true"}},
 	}
-	if err := plan.Apply(context.Background(), plan.ResolveAll(userBad, env.Root, env.UserInv, env.SysInv), env, plan.Options{}); err == nil {
+	if err := plan.Apply(context.Background(), resolveAll(userBad, env.Root, env.UserInv, env.SysInv), env, plan.Options{}); err == nil {
 		t.Fatal("user-side command outside the allowlist accepted")
 	}
 	if env.Root.Exists(userUnit) {
@@ -255,7 +255,7 @@ func TestApplyRecordsUpstream(t *testing.T) {
 	put(t, env.Root, up, "options nvidia NVreg_TemporaryFilePath=/var/tmp\n")
 	a := plan.Action{Kind: plan.WriteFile, Path: modprobe, Content: []byte("masked\n"), NeedsRoot: true,
 		Class: inventory.Mask, Policy: "gpu-nvidia", Upstream: up}
-	p := plan.ResolveAll([]plan.Action{a}, env.Root, env.UserInv, env.SysInv)
+	p := resolveAll([]plan.Action{a}, env.Root, env.UserInv, env.SysInv)
 	if err := plan.Apply(context.Background(), p, env, plan.Options{}); err != nil {
 		t.Fatal(err)
 	}
@@ -264,5 +264,55 @@ func TestApplyRecordsUpstream(t *testing.T) {
 	want := fsx.SHA256([]byte("options nvidia NVreg_TemporaryFilePath=/var/tmp\n"))
 	if !ok || e.Upstream != up || e.UpstreamSHA256 != want || e.Class != inventory.Mask {
 		t.Fatalf("entry: %+v %v", e, ok)
+	}
+}
+
+// resolveAll resolves user-level actions against userInv and root actions
+// against sysInv, keeping the original order.
+func resolveAll(desired []plan.Action, root fsx.Root, userInv, sysInv *inventory.Inventory) plan.Plan {
+	var user, sys []plan.Action
+	for _, a := range desired {
+		if a.NeedsRoot {
+			sys = append(sys, a)
+		} else {
+			user = append(user, a)
+		}
+	}
+	u, s := plan.Resolve(user, root, userInv), plan.Resolve(sys, root, sysInv)
+	out := plan.Plan{Mode: plan.ModeApply}
+	for _, a := range desired {
+		if a.NeedsRoot {
+			out.Actions, s.Actions = append(out.Actions, s.Actions[0]), s.Actions[1:]
+		} else {
+			out.Actions, u.Actions = append(out.Actions, u.Actions[0]), u.Actions[1:]
+		}
+	}
+	return out
+}
+
+func TestUninstallKeepsPreexistingDir(t *testing.T) {
+	env, _ := newEnv(t)
+	dir := "/home/.nvidia-suspend"
+	if err := env.Root.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mk := []plan.Action{{Kind: plan.MakeDir, Path: dir, Mode: 0o700, NeedsRoot: true, Class: inventory.ManagedDir}}
+	if err := plan.Apply(context.Background(), plan.Resolve(mk, env.Root, env.SysInv), env, plan.Options{Extra: []string{dir}}); err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := env.SysInv.Get(dir); !ok || e.Previous != "preexisting" {
+		t.Fatalf("record %+v", e)
+	}
+	rm := []plan.Action{{Kind: plan.RemoveFile, Path: dir, NeedsRoot: true, Class: inventory.ManagedDir}}
+	p := plan.Resolve(rm, env.Root, env.SysInv)
+	p.Mode = plan.ModeUninstall
+	if err := plan.Apply(context.Background(), p, env, plan.Options{Extra: []string{dir}}); err != nil {
+		t.Fatal(err)
+	}
+	if !env.Root.Exists(dir) {
+		t.Fatal("pre-existing directory removed")
+	}
+	if _, ok := env.SysInv.Get(dir); ok {
+		t.Fatal("record kept")
 	}
 }

@@ -74,6 +74,10 @@ func hostSnapshot() (h config.Host, usedDefaults bool, err error) {
 	if err := json.Unmarshal(data, &h); err != nil {
 		return config.Host{}, false, fmt.Errorf("parse %s: %w", plan.HostConfigPath, err)
 	}
+	// The same validation apply-root applies to the request it came from.
+	if err := plan.NewRootRequest(plan.ModeApply, h).Validate(); err != nil {
+		return config.Host{}, false, fmt.Errorf("invalid %s: %w", plan.HostConfigPath, err)
+	}
 	return h, false, nil
 }
 
@@ -101,6 +105,10 @@ func newSleepCheckCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&record, "record", false, "store the result and log failures (for ExecStartPre)")
 	return cmd
 }
+
+// sleepCheckTimeout bounds detection and checks in sleep-check: it runs at
+// every hibernate entry and must not hang it.
+var sleepCheckTimeout = 20 * time.Second
 
 // errTimedOut is returned by bounded when fn did not finish in time.
 var errTimedOut = errors.New("timed out")
@@ -182,7 +190,7 @@ func rootSleepResults(ctx context.Context, trusted bool) (sleepRun, error) {
 func runSleepCheck(cmd *cobra.Command, record bool) error {
 	ctx := ctxOf(cmd)
 	trusted := true
-	if err := plan.CheckTrustedDirs(sysRoot, stateOwnerOf, "/var/lib/cairn", plan.SysStateDir); err != nil {
+	if err := plan.TrustedDir(sysRoot, plan.SysStateDir, stateOwnerOf); err != nil {
 		if record {
 			cmd.PrintErrf("state directory not trusted: %v\n", err)
 			return &ExitError{Code: 1}
@@ -196,7 +204,17 @@ func runSleepCheck(cmd *cobra.Command, record bool) error {
 		}
 		return err
 	}
-	run, err := rootSleepResults(ctx, trusted)
+	run, err := bounded(ctx, sleepCheckTimeout, func(ctx context.Context) (sleepRun, error) {
+		return rootSleepResults(ctx, trusted)
+	})
+	if errors.Is(err, errTimedOut) {
+		if record {
+			logEvent(cmd, map[string]any{"error": "sleep-check timed out"})
+			cmd.PrintErrln("sleep-check timed out")
+			return &ExitError{Code: 1}
+		}
+		return errors.New("sleep-check timed out")
+	}
 	if err != nil {
 		return fail(err)
 	}
@@ -224,19 +242,11 @@ func runSleepCheck(cmd *cobra.Command, record bool) error {
 	if err := sleep.WriteRecord(sysRoot, sleep.NewRecord(time.Now(), rs)); err != nil {
 		cmd.PrintErrf("warning: not recording result: %v\n", err)
 	}
-	if failed := sleep.FailedIDs(rs); len(failed) > 0 {
-		logEvent(cmd, map[string]any{"failed": anyList(failed)})
+	if len(sleep.FailedIDs(rs)) > 0 {
+		logEvent(cmd, sleep.FailedEventData(rs))
 		return &ExitError{Code: 1}
 	}
 	return nil
-}
-
-func anyList(ss []string) []any {
-	out := make([]any, len(ss))
-	for i, s := range ss {
-		out[i] = s
-	}
-	return out
 }
 
 // logEvent appends a sleep.check.failed event; the state dir was verified

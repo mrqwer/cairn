@@ -11,7 +11,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/mrqwer/cairn/internal/events"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/inventory"
@@ -27,7 +26,6 @@ type Env struct {
 	Runner                  execx.Runner
 	UserInv, SysInv         *inventory.Inventory
 	UserInvPath, SysInvPath string
-	Events                  events.Log
 	// OwnerOf returns the owning uid of a file; nil means the real owner.
 	// Tests inject it because temp dirs cannot be root-owned.
 	OwnerOf func(fs.FileInfo) (uid uint32, ok bool)
@@ -189,6 +187,10 @@ func (env Env) applyOne(ctx context.Context, a Action, inv *inventory.Inventory,
 		inv.Upsert(e)
 	case RemoveFile:
 		if managed && prev.Class == inventory.ManagedDir {
+			if prev.Previous == preexisting {
+				inv.Delete(key) // it existed before cairn: only forget it
+				return nil
+			}
 			return env.removeManagedDir(a.Path, inv, key)
 		}
 		var saved string
@@ -419,24 +421,48 @@ func (env Env) makeDir(a Action, extra []string) error {
 	return nil
 }
 
-// secureDir is the root side's way to reach a directory: it walks from "/"
-// to dir, Lstat-checking each component with trustedNode (no symlinks,
-// root-owned, not group/world writable, a directory). With create, a missing
-// component is made with os.Mkdir(0755) and verified before descending;
-// without, the walk stops quietly at the first missing component.
+// secureDir is the root side's way to reach a directory: walkTrusted from
+// "/" to dir. With create, a missing component is made with os.Mkdir(0755)
+// and verified before descending; without, the walk stops quietly at the
+// first missing component.
 func (env Env) secureDir(dir string, create bool) error {
+	return walkTrusted(env.Root, dir, env.OwnerOf, func(cur string) (bool, error) {
+		if !create {
+			return false, nil
+		}
+		if err := os.Mkdir(env.Root.Path(cur), 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+			return false, err
+		}
+		return true, nil
+	})
+}
+
+// TrustedDir verifies dir and every directory above it, walking from "/"
+// with Lstat: each must exist, be a real directory (no symlink), be owned by
+// root per ownerOf (nil means the real owner) and not be group/world
+// writable. Root-side commands use it before reading or writing cairn's
+// system state (apply-root reaches its directories the same way).
+func TrustedDir(root fsx.Root, dir string, ownerOf func(fs.FileInfo) (uint32, bool)) error {
+	return walkTrusted(root, dir, ownerOf, func(cur string) (bool, error) {
+		return false, fmt.Errorf("%s does not exist", cur)
+	})
+}
+
+// walkTrusted checks each component from "/" to dir with trustedNode and
+// requires a directory. missing decides what happens when a component does
+// not exist: continue (it was created), stop quietly, or fail.
+func walkTrusted(root fsx.Root, dir string, ownerOf func(fs.FileInfo) (uint32, bool),
+	missing func(cur string) (cont bool, err error)) error {
 	cur := "/"
 	for _, c := range append([]string{""}, strings.Split(strings.Trim(path.Clean(dir), "/"), "/")...) {
 		cur = path.Join(cur, c)
-		if _, err := os.Lstat(env.Root.Path(cur)); errors.Is(err, fs.ErrNotExist) {
-			if !create {
-				return nil
-			}
-			if err := os.Mkdir(env.Root.Path(cur), 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+		if _, err := os.Lstat(root.Path(cur)); errors.Is(err, fs.ErrNotExist) {
+			cont, err := missing(cur)
+			if err != nil || !cont {
 				return err
 			}
 		}
-		st, err := trustedNode(env.Root, cur, env.OwnerOf)
+		st, err := trustedNode(root, cur, ownerOf)
 		if err != nil {
 			return err
 		}
