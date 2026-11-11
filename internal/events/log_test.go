@@ -2,6 +2,7 @@ package events_test
 
 import (
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -99,6 +100,13 @@ func TestTruncatedLastLine(t *testing.T) {
 	if next != good {
 		t.Fatalf("next %d, want %d", next, good)
 	}
+	if err := l.Append(ev(events.KindSleepPost)); err != nil {
+		t.Fatal(err)
+	}
+	evs, _, err = l.ReadFrom(0)
+	if err != nil || len(evs) != 2 || evs[1].Kind != events.KindSleepPost {
+		t.Fatalf("after repair: %+v, %v", evs, err)
+	}
 }
 
 func TestSkipsGarbageAndMissingFile(t *testing.T) {
@@ -127,5 +135,21 @@ func TestCurrentBoot(t *testing.T) {
 	got, err := events.CurrentBoot(r)
 	if err != nil || got != "boot-a" {
 		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+func TestAppendModeIgnoresUmask(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	l := newLog(t)
+	if err := l.Append(ev(events.KindSleepPre)); err != nil {
+		t.Fatal(err)
+	}
+	st, err := l.Root.Stat(l.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o644 {
+		t.Fatalf("mode %v, want 0644", st.Mode().Perm())
 	}
 }

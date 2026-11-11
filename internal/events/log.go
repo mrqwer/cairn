@@ -52,9 +52,32 @@ func (l Log) Append(e Event) error {
 	if err := l.Root.MkdirAll(filepath.Dir(l.Path), 0o755); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(l.Root.Path(l.Path), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(l.Root.Path(l.Path), os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o644)
 	if err != nil {
 		return err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	// The log is written by root and read by unprivileged users; undo umask.
+	if st.Mode().Perm() != 0o644 {
+		if err := f.Chmod(0o644); err != nil {
+			_ = f.Close()
+			return err
+		}
+	}
+	// Repair a torn trailing line so the new record is not merged into it.
+	if st.Size() > 0 {
+		last := make([]byte, 1)
+		if _, err := f.ReadAt(last, st.Size()-1); err != nil {
+			_ = f.Close()
+			return err
+		}
+		if last[0] != '\n' {
+			b = append([]byte{'\n'}, b...)
+		}
 	}
 	if _, err := f.Write(b); err != nil {
 		_ = f.Close()
