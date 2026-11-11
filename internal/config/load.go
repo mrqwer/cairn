@@ -221,3 +221,18 @@ func (l *loader) decodeError(err error) error {
 	}
 	return fmt.Errorf("config: %w", err)
 }
+
+// Defaults returns the configuration from the embedded defaults layer alone,
+// with no system, user, profile or environment layers. Root-side code that
+// runs without XDG state uses it when no host snapshot exists.
+func Defaults() (*Config, error) {
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(nest(defaults)); err != nil {
+		return nil, fmt.Errorf("config: encode defaults: %w", err)
+	}
+	var cfg Config
+	if err := toml.NewDecoder(&buf).Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("config: decode defaults: %w", err)
+	}
+	return &cfg, nil
+}

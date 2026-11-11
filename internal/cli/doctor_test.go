@@ -27,6 +27,9 @@ func runDoctor(t *testing.T, args ...string) (string, error) {
 }
 
 func TestDoctorNoChecks(t *testing.T) {
+	old := hostChecks
+	t.Cleanup(func() { hostChecks = old })
+	hostChecks = func(context.Context) ([]doctor.Check, error) { return nil, nil }
 	out, err := runDoctor(t, "doctor", "host")
 	if err != nil || strings.TrimSpace(out) != "no checks registered" {
 		t.Fatalf("out=%q err=%v", out, err)

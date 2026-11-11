@@ -15,8 +15,16 @@ type ExitError struct{ Code int }
 
 func (e *ExitError) Error() string { return fmt.Sprintf("exit status %d", e.Code) }
 
-// hostChecks is the registration point for host checks; later tasks replace it.
-var hostChecks = func(context.Context) ([]doctor.Check, error) { return nil, nil }
+// hostChecks is the registration point for host checks; later tasks append
+// their checks to its result.
+var hostChecks = func(ctx context.Context) ([]doctor.Check, error) {
+	var checks []doctor.Check
+	sc, err := userSleepChecks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return append(checks, sc...), nil
+}
 
 type jsonResult struct {
 	ID       string `json:"id"`
