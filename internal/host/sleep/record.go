@@ -256,3 +256,81 @@ func RecentEvents(root fsx.Root, path string) doctor.Check {
 		return res
 	}}
 }
+
+// IDFindings is the doctor check over silent-failure findings.
+const IDFindings = "host.findings"
+
+// FindingsWindow bounds how old a boot.lost-during-sleep finding may be to
+// be shown by FindingsCheck.
+const FindingsWindow = 14 * 24 * time.Hour
+
+const titleFindings = "Silent sleep failures"
+
+// FindingsCheck is the host.findings doctor check. It warns with the last
+// (up to 3) boot.lost-during-sleep findings of the past FindingsWindow from
+// findingsPath (the user's findings log under root) and when the system
+// event log has a kernel.reboot-required event of the current boot.
+func FindingsCheck(root fsx.Root, findingsPath string, now func() time.Time) doctor.Check {
+	return fnCheck{id: IDFindings, title: titleFindings, run: func() doctor.Result {
+		res := doctor.Result{ID: IDFindings, Title: titleFindings, Evidence: "none"}
+		fs, _, err := events.Log{Root: root, Path: findingsPath}.ReadFrom(0)
+		if err != nil {
+			res.Status, res.Evidence = doctor.Unknown, err.Error()
+			return res
+		}
+		evs, _, err := events.Log{Root: root, Path: EventsPath}.ReadFrom(0)
+		if err != nil {
+			res.Status, res.Evidence = doctor.Unknown, err.Error()
+			return res
+		}
+		var lines []string
+		for i := len(fs) - 1; i >= 0 && len(lines) < 3; i-- {
+			e := fs[i]
+			if e.Kind != events.KindBootLostDuringSleep || now().Sub(e.TS) > FindingsWindow {
+				continue
+			}
+			t, _ := e.Data["type"].(string)
+			if t == "" {
+				t = "sleep"
+			}
+			lines = append(lines, e.TS.UTC().Format(time.RFC3339)+" power lost during "+t)
+		}
+		if len(lines) > 0 {
+			res.Status, res.Fix = doctor.Warn, "check the battery and the hibernation checks above"
+		}
+		if cur, err := events.CurrentBoot(root); err == nil {
+			for _, e := range evs {
+				if e.Kind == events.KindRebootRequired && e.Boot == cur {
+					lines = append(lines, "kernel or GPU driver upgraded: reboot required for safe hibernation")
+					res.Status, res.Fix = doctor.Warn, "reboot"
+					break
+				}
+			}
+		}
+		if len(lines) > 0 {
+			res.Evidence = strings.Join(lines, "; ")
+		}
+		return res
+	}}
+}
+
+// RepeatAfterFailure reports whether the sleep cycle that is ending followed
+// a refused hibernation in currentBoot: walking back over this boot's sleep.*
+// events and skipping sleep.pre (the cycle itself), the first one found is a
+// sleep.fallback or an original (not repeated) sleep.check.failed.
+func RepeatAfterFailure(evs []events.Event, currentBoot string) bool {
+	for i := len(evs) - 1; i >= 0; i-- {
+		e := evs[i]
+		if e.Boot != currentBoot || !strings.HasPrefix(e.Kind, "sleep.") || e.Kind == events.KindSleepPre {
+			continue
+		}
+		switch e.Kind {
+		case events.KindSleepFallback:
+			return true
+		case events.KindSleepCheckFailed:
+			return e.Data["repeat"] != true
+		}
+		return false
+	}
+	return false
+}

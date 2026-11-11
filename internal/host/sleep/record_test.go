@@ -301,3 +301,71 @@ func TestNotifyCoalescesPerTitle(t *testing.T) {
 		t.Fatalf("sent %d calls %v", c, n.run.Calls)
 	}
 }
+
+func TestFindingsCheck(t *testing.T) {
+	now := t0.Add(30 * 24 * time.Hour)
+	run := func(findings, sys []events.Event) doctor.Result {
+		root := fsx.Root{Dir: t.TempDir()}
+		if err := root.WriteAtomic("/proc/sys/kernel/random/boot_id", []byte("B\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		fl := events.Log{Root: root, Path: "/state/host/findings.jsonl"}
+		for _, e := range findings {
+			if err := fl.Append(e); err != nil {
+				t.Fatal(err)
+			}
+		}
+		sl := events.Log{Root: root, Path: EventsPath}
+		for _, e := range sys {
+			if err := sl.Append(e); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return FindingsCheck(root, "/state/host/findings.jsonl", func() time.Time { return now }).Run(context.Background())
+	}
+	if r := run(nil, nil); r.Status != doctor.OK || r.ID != IDFindings {
+		t.Fatalf("empty: %+v", r)
+	}
+	lost := func(day int, typ string) events.Event {
+		return events.Event{TS: now.Add(-time.Duration(day) * 24 * time.Hour), Boot: "B", Source: "boot-check",
+			Kind: events.KindBootLostDuringSleep, Data: map[string]any{"type": typ}}
+	}
+	r := run([]events.Event{lost(20, "old"), lost(10, "s1"), lost(5, "s2"), lost(3, "s3"), lost(1, "s4")}, nil)
+	if r.Status != doctor.Warn || strings.Contains(r.Evidence, "old") || strings.Contains(r.Evidence, "s1") ||
+		!strings.Contains(r.Evidence, "s2") || !strings.Contains(r.Evidence, "s4") {
+		t.Fatalf("lost: %+v", r)
+	}
+	if r := run([]events.Event{lost(20, "old")}, nil); r.Status != doctor.OK {
+		t.Fatalf("old finding: %+v", r)
+	}
+	reboot := func(boot string) events.Event {
+		return events.Event{TS: now, Boot: boot, Source: "package-hook", Kind: events.KindRebootRequired}
+	}
+	if r := run(nil, []events.Event{reboot("B")}); r.Status != doctor.Warn || !strings.Contains(r.Evidence, "reboot") || r.Fix != "reboot" {
+		t.Fatalf("reboot: %+v", r)
+	}
+	if r := run(nil, []events.Event{reboot("A")}); r.Status != doctor.OK {
+		t.Fatalf("reboot of an earlier boot: %+v", r)
+	}
+}
+
+func TestRepeatAfterFailure(t *testing.T) {
+	ev := func(kind string) events.Event { return events.Event{Boot: "B", Kind: kind} }
+	for _, c := range []struct {
+		evs  []events.Event
+		want bool
+	}{
+		{nil, false},
+		{[]events.Event{ev(events.KindSleepCheckFailed), ev(events.KindSleepFallback), ev(events.KindSleepPre)}, true},
+		{[]events.Event{ev(events.KindSleepCheckFailed), ev(events.KindSleepPre)}, true},
+		{[]events.Event{ev(events.KindSleepFallback), ev(events.KindSleepPre), ev(events.KindSleepPost), ev(events.KindSleepPre)}, false},
+		{[]events.Event{{Boot: "A", Kind: events.KindSleepFallback}, ev(events.KindSleepPre)}, false},
+		{[]events.Event{ev(events.KindSleepFallback), ev(events.KindRebootRequired), ev(events.KindSleepPre)}, true},
+		{[]events.Event{ev(events.KindSleepFallback), {Boot: "B", Kind: events.KindSleepCheckFailed,
+			Data: map[string]any{"repeat": true}}, ev(events.KindSleepPre)}, false},
+	} {
+		if got := RepeatAfterFailure(c.evs, "B"); got != c.want {
+			t.Errorf("%+v: got %v", c.evs, got)
+		}
+	}
+}

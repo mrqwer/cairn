@@ -75,12 +75,48 @@ func newRecordSleepCmd() *cobra.Command {
 			}
 			boot, _ := events.CurrentBoot(sysRoot)
 			l := events.Log{Root: sysRoot, Path: sleep.EventsPath}
+			var repeat bool
+			if kind == events.KindSleepPost {
+				prior, _, _ := l.ReadFrom(0)
+				repeat = sleep.RepeatAfterFailure(prior, boot)
+			}
 			err := l.Append(events.Event{TS: nowFunc().UTC(), Boot: boot, Source: source, Kind: kind, Data: data})
 			if err != nil {
 				cmd.PrintErrf("warning: not recording event: %v\n", err)
 			}
+			if repeat {
+				repeatFailedCheck(cmd, l, boot)
+			}
 			return nil
 		},
+	}
+}
+
+// repeatTimeout bounds the re-run of the sleep checks on resume.
+var repeatTimeout = 5 * time.Second
+
+// repeatFailedCheck re-runs the sleep checks after resuming from a sleep that
+// replaced a refused hibernation and, when one is still critical, logs a new
+// sleep.check.failed event (data repeat=true) so the user is warned again
+// (spec 5.2 item 3). Best effort: errors and timeouts only warn.
+func repeatFailedCheck(cmd *cobra.Command, l events.Log, boot string) {
+	run, err := bounded(ctxOf(cmd), repeatTimeout, func(ctx context.Context) (sleepRun, error) {
+		return rootSleepResults(ctx, true)
+	})
+	if err != nil {
+		cmd.PrintErrf("warning: not repeating the sleep checks: %v\n", err)
+		return
+	}
+	failed := sleep.FailedIDs(run.results)
+	if len(failed) == 0 {
+		return
+	}
+	err = l.Append(events.Event{
+		TS: nowFunc().UTC(), Boot: boot, Source: "record-sleep", Kind: events.KindSleepCheckFailed,
+		Data: map[string]any{"failed": anyList(failed), "repeat": true},
+	})
+	if err != nil {
+		cmd.PrintErrf("warning: not recording event: %v\n", err)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/mrqwer/cairn/internal/config"
 	"github.com/mrqwer/cairn/internal/detect"
+	"github.com/mrqwer/cairn/internal/doctor"
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/host/gpu"
 	"github.com/mrqwer/cairn/internal/inventory"
@@ -278,5 +279,44 @@ func TestSleepCheckIgnoresInventoryWhenNvidiaUnmanaged(t *testing.T) {
 	}
 	if out, errOut, err := runSC(t, "--record"); exitCode(err) != 0 {
 		t.Fatalf("err=%v\n%s\n%s", err, out, errOut)
+	}
+}
+
+func TestPolicyAppliedCheck(t *testing.T) {
+	root, _ := wireEnv(t)
+	target := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "systemd/user/cairn-test.service")
+	hostDesired = func(context.Context, *config.Config, detect.System, string) ([]plan.Action, error) {
+		return []plan.Action{{Kind: plan.WriteFile, Path: target, Content: []byte("[Unit]\n"), Mode: 0o644}}, nil
+	}
+	withRootBuilder(t)
+	cfg, err := config.Defaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, _ := plan.HostSnapshot(cfg.Host)
+	if err := root.WriteAtomic(plan.HostConfigPath, snap, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func() doctor.Result { return policyCheck(cfg, detect.System{}).Run(context.Background()) }
+	if r := run(); r.ID != "host.policy.applied" || r.Status != doctor.Warn ||
+		r.Evidence != "1 changes pending — run cairn host apply" {
+		t.Fatalf("pending: %+v", r)
+	}
+	if err := root.WriteAtomic(target, []byte("[Unit]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inv := &inventory.Inventory{}
+	inv.Upsert(inventory.Entry{Path: target, Class: inventory.DropIn, SHA256: fsx.SHA256([]byte("[Unit]\n"))})
+	if err := inv.Save(root, filepath.Join(os.Getenv("XDG_STATE_HOME"), "cairn/host/managed.json")); err != nil {
+		t.Fatal(err)
+	}
+	if r := run(); r.Status != doctor.OK {
+		t.Fatalf("applied: %+v", r)
+	}
+	if err := root.WriteAtomic(target, []byte("[Unit]\n# mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := run(); r.Status != doctor.Crit || !strings.Contains(r.Evidence, target) {
+		t.Fatalf("modified: %+v", r)
 	}
 }

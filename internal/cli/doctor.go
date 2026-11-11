@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -36,8 +39,12 @@ var hostChecks = func(ctx context.Context) ([]doctor.Check, error) {
 	if err != nil {
 		return nil, err
 	}
-	checks := userSleepChecks(cfg.Host.Sleep, sys)
+	checks := []doctor.Check{policyCheck(cfg, sys)}
+	checks = append(checks, userSleepChecks(cfg.Host.Sleep, sys)...)
 	checks = append(checks, sleep.RecentEvents(sysRoot, sleep.EventsPath))
+	if dirs, err := userDirs(); err == nil {
+		checks = append(checks, sleep.FindingsCheck(sysRoot, filepath.Join(dirs.State, "host", "findings.jsonl"), time.Now))
+	}
 	if !cfg.Host.GPU.Nvidia.Manage || sys.GPU != "nvidia" {
 		return checks, nil
 	}
@@ -46,6 +53,54 @@ var hostChecks = func(ctx context.Context) ([]doctor.Check, error) {
 		return nil, err
 	}
 	return append(checks, nvidiaChecks(ctx, cfg.Host.GPU.Nvidia, sys, inv)...), nil
+}
+
+// IDPolicyApplied is the doctor check comparing the host plan with the system.
+const IDPolicyApplied = "host.policy.applied"
+
+const titlePolicyApplied = "Host policy applied"
+
+// policyCheck resolves the apply plan as `cairn host plan` does (user side,
+// with root's preview): OK when nothing is pending, Warn with the number of
+// pending changes, Crit listing managed files changed by hand.
+func policyCheck(cfg *config.Config, sys detect.System) doctor.Check {
+	return check{IDPolicyApplied, titlePolicyApplied, func(ctx context.Context) doctor.Result {
+		if errs := cfg.Validate(); len(errs) > 0 {
+			return doctor.Result{Status: doctor.Unknown, Evidence: "configuration is invalid: " + errs[0].Error(),
+				Fix: "cairn config validate"}
+		}
+		hs, err := resolveHost(ctx, cfg, sys, plan.ModeApply)
+		if err != nil {
+			return doctor.Result{Status: doctor.Unknown, Evidence: err.Error()}
+		}
+		if m := append(hs.user.ModifiedPaths(), hs.root.ModifiedPaths()...); len(m) > 0 {
+			return doctor.Result{Status: doctor.Crit, Evidence: "changed by hand: " + strings.Join(m, ", "),
+				Fix: "review the changes, then cairn host apply --force (a backup is kept)"}
+		}
+		n := len(hs.user.Pending()) + len(hs.root.Pending())
+		if hs.stale {
+			n++
+		}
+		if n > 0 {
+			return doctor.Result{Status: doctor.Warn, Evidence: fmt.Sprintf("%d changes pending — run cairn host apply", n),
+				Fix: "cairn host apply"}
+		}
+		return doctor.Result{Status: doctor.OK, Evidence: "nothing pending"}
+	}}
+}
+
+// check adapts a function to doctor.Check.
+type check struct {
+	id, title string
+	run       func(context.Context) doctor.Result
+}
+
+func (c check) ID() string    { return c.id }
+func (c check) Title() string { return c.title }
+func (c check) Run(ctx context.Context) doctor.Result {
+	r := c.run(ctx)
+	r.ID, r.Title = c.id, c.title
+	return r
 }
 
 // Seams for the NVIDIA space check.

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,6 +91,83 @@ func newSleepCheckCmd() *cobra.Command {
 	return cmd
 }
 
+// errTimedOut is returned by bounded when fn did not finish in time.
+var errTimedOut = errors.New("timed out")
+
+// bounded runs fn with a context that expires after d and returns
+// errTimedOut when fn has not returned by then (fn keeps running in the
+// background; the callers are short-lived processes).
+func bounded[T any](ctx context.Context, d time.Duration, fn func(context.Context) (T, error)) (T, error) {
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	type result struct {
+		v   T
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		v, err := fn(ctx)
+		ch <- result{v, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.v, r.err
+	case <-ctx.Done():
+		var zero T
+		return zero, errTimedOut
+	}
+}
+
+// sleepRun is one root-side run of the sleep checks.
+type sleepRun struct {
+	results      []doctor.Result
+	usedDefaults bool
+}
+
+// rootSleepResults runs the sleep and NVIDIA checks the way the root side
+// sees the system: host config from the snapshot (built-in defaults when it
+// is missing or the state dir is not trusted) and its own detection.
+func rootSleepResults(ctx context.Context, trusted bool) (sleepRun, error) {
+	var run sleepRun
+	var h config.Host
+	var err error
+	inv := &inventory.Inventory{}
+	if trusted {
+		h, run.usedDefaults, err = hostSnapshot()
+	} else {
+		var cfg *config.Config
+		if cfg, err = config.Defaults(); err == nil {
+			h, run.usedDefaults = cfg.Host, true
+		}
+	}
+	if err != nil {
+		return run, err
+	}
+	sys, err := detectSystem(ctx)
+	if err != nil {
+		return run, err
+	}
+	// The inventory only feeds the NVIDIA checks; a damaged one must not
+	// block hibernation on systems where they do not run.
+	if trusted && h.GPU.Nvidia.Manage && sys.GPU == "nvidia" {
+		if inv, err = inventory.Load(sysRoot, plan.SysInventoryPath); err != nil {
+			return run, err
+		}
+	}
+	// NVIDIA checks too: a dump target without room for the VRAM must block
+	// hibernation at entry.
+	checks := append(sleep.Checks(h.Sleep, sys, offsetOf, deviceOf), nvidiaChecks(ctx, h.GPU.Nvidia, sys, inv)...)
+	run.results = doctor.Run(ctx, checks)
+	if run.usedDefaults {
+		for i := range run.results {
+			if run.results[i].ID == sleep.IDSwapPresent {
+				run.results[i].Evidence += " (" + defaultsNote + ")"
+			}
+		}
+	}
+	return run, nil
+}
+
 func runSleepCheck(cmd *cobra.Command, record bool) error {
 	ctx := ctxOf(cmd)
 	trusted := true
@@ -107,51 +185,26 @@ func runSleepCheck(cmd *cobra.Command, record bool) error {
 		}
 		return err
 	}
-	var h config.Host
-	var usedDefaults bool
-	var err error
-	inv := &inventory.Inventory{}
-	if trusted {
-		h, usedDefaults, err = hostSnapshot()
-	} else {
-		var cfg *config.Config
-		if cfg, err = config.Defaults(); err == nil {
-			h, usedDefaults = cfg.Host, true
-		}
-	}
+	run, err := rootSleepResults(ctx, trusted)
 	if err != nil {
 		return fail(err)
 	}
-	if usedDefaults {
+	if run.usedDefaults {
 		cmd.PrintErrf("note: %s\n", defaultsNote)
 	}
-	sys, err := detectSystem(ctx)
-	if err != nil {
-		return fail(err)
-	}
-	// The inventory only feeds the NVIDIA checks; a damaged one must not
-	// block hibernation on systems where they do not run.
-	if trusted && h.GPU.Nvidia.Manage && sys.GPU == "nvidia" {
-		if inv, err = inventory.Load(sysRoot, plan.SysInventoryPath); err != nil {
-			return fail(err)
-		}
-	}
-	// NVIDIA checks too: a dump target without room for the VRAM must block
-	// hibernation at entry.
-	checks := append(sleep.Checks(h.Sleep, sys, offsetOf, deviceOf), nvidiaChecks(ctx, h.GPU.Nvidia, sys, inv)...)
-	rs := doctor.Run(ctx, checks)
-	if usedDefaults {
-		for i := range rs {
-			if rs[i].ID == sleep.IDSwapPresent {
-				rs[i].Evidence += " (" + defaultsNote + ")"
-			}
-		}
-	}
+	rs := run.results
 	if record && isRoot() {
 		failClosed(rs)
 	}
 	doctor.Render(cmd.OutOrStdout(), rs)
 	if !record {
+		// As root the result is stored for doctor (which cannot run FIEMAP
+		// as a user); no event is logged and the exit code is unchanged.
+		if trusted && isRoot() {
+			if err := sleep.WriteRecord(sysRoot, sleep.NewRecord(time.Now(), rs)); err != nil {
+				cmd.PrintErrf("warning: not recording result: %v\n", err)
+			}
+		}
 		if code := doctor.ExitCode(rs); code != 0 {
 			return &ExitError{Code: code}
 		}
@@ -161,14 +214,18 @@ func runSleepCheck(cmd *cobra.Command, record bool) error {
 		cmd.PrintErrf("warning: not recording result: %v\n", err)
 	}
 	if failed := sleep.FailedIDs(rs); len(failed) > 0 {
-		ids := make([]any, len(failed))
-		for i, f := range failed {
-			ids[i] = f
-		}
-		logEvent(cmd, map[string]any{"failed": ids})
+		logEvent(cmd, map[string]any{"failed": anyList(failed)})
 		return &ExitError{Code: 1}
 	}
 	return nil
+}
+
+func anyList(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
 }
 
 // logEvent appends a sleep.check.failed event; the state dir was verified

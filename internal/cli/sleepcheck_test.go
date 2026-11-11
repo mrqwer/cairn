@@ -216,3 +216,27 @@ func TestSleepCheckDetectErrorRecorded(t *testing.T) {
 		t.Fatalf("event: %q", l)
 	}
 }
+
+func TestSleepCheckRootPlainWritesRecord(t *testing.T) {
+	e := setupSC(t)
+	e.off = 999
+	if _, _, err := runSC(t); exitCode(err) != 2 {
+		t.Fatalf("exit: %v", err)
+	}
+	b, err := e.root.ReadFile(plan.SysStateDir + "/sleep-check.json")
+	if err != nil || !strings.Contains(string(b), "sleep.resume.match") {
+		t.Fatalf("record: %v %s", err, b)
+	}
+	if eventLog(t, e) != "" {
+		t.Fatalf("plain run logged an event: %s", eventLog(t, e))
+	}
+	// Not root: nothing is written.
+	if err := e.root.Remove(plan.SysStateDir + "/sleep-check.json"); err != nil {
+		t.Fatal(err)
+	}
+	e.root0 = false
+	_, _, _ = runSC(t)
+	if e.root.Exists(plan.SysStateDir + "/sleep-check.json") {
+		t.Fatal("non-root plain run wrote the record")
+	}
+}

@@ -129,6 +129,15 @@ func loadHost(ctx context.Context, mode string) (*hostState, error) {
 	if err != nil {
 		return nil, err
 	}
+	sys, err := detectSystem(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return resolveHost(ctx, cfg, sys, mode)
+}
+
+// resolveHost resolves both sides of mode for a valid cfg and detected sys.
+func resolveHost(ctx context.Context, cfg *config.Config, sys detect.System, mode string) (*hostState, error) {
 	dirs, err := xdg.Resolve(os.Getenv)
 	if err != nil {
 		return nil, err
@@ -143,10 +152,6 @@ func loadHost(ctx context.Context, mode string) (*hostState, error) {
 		return nil, err
 	}
 	sysInv, err := inventory.Load(sysRoot, plan.SysInventoryPath)
-	if err != nil {
-		return nil, err
-	}
-	sys, err := detectSystem(ctx)
 	if err != nil {
 		return nil, err
 	}

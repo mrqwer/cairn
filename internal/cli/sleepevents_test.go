@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mrqwer/cairn/internal/detect"
 	"github.com/mrqwer/cairn/internal/events"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/fsx"
@@ -169,5 +172,46 @@ func TestBootCheckRetriesAfterFailedSend(t *testing.T) {
 	fs, _, _ := events.Log{Root: e.root, Path: e.st + "/host/findings.jsonl"}.ReadFrom(0)
 	if len(fs) != 1 {
 		t.Fatalf("want exactly one finding, got %+v", fs)
+	}
+}
+
+func TestRecordSleepPostRepeatsFailedCheck(t *testing.T) {
+	e := setupSE(t)
+	oDet, oIs := detectSystem, isRoot
+	t.Cleanup(func() { detectSystem, isRoot = oDet, oIs })
+	isRoot = func() bool { return true }
+	detectSystem = func(context.Context) (detect.System, error) {
+		return detect.System{KernelModulesPresent: true, InitramfsResume: detect.Yes}, nil // no swap: Crit
+	}
+	l := events.Log{Root: e.root, Path: sleep.EventsPath}
+	for _, k := range []string{events.KindSleepCheckFailed, events.KindSleepFallback, events.KindSleepPre} {
+		if err := l.Append(events.Event{TS: time.Now(), Boot: "boot-b", Source: "t", Kind: k}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.exec(t, "record-sleep", "post", "suspend"); err != nil {
+		t.Fatal(err)
+	}
+	evs := e.events(t)
+	last := evs[len(evs)-1]
+	if len(evs) != 5 || evs[3].Kind != events.KindSleepPost || last.Kind != events.KindSleepCheckFailed ||
+		last.Data["repeat"] != true || !strings.Contains(fmt.Sprint(last.Data["failed"]), "sleep.swap.present") {
+		t.Fatalf("%+v", evs)
+	}
+	// The repeat itself does not trigger another one.
+	if _, err := e.exec(t, "record-sleep", "pre", "suspend"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.exec(t, "record-sleep", "post", "suspend"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.exec(t, "record-sleep", "pre", "suspend"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.exec(t, "record-sleep", "post", "suspend"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(e.events(t)); n != 9 {
+		t.Fatalf("want 9 events (no further repeat), got %d: %+v", n, e.events(t))
 	}
 }
