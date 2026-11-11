@@ -111,7 +111,11 @@ func Apply(ctx context.Context, p Plan, env Env, opts Options) error {
 		errs = append(errs, env.UserInv.Save(env.Root, env.UserInvPath))
 	}
 	if needSys {
-		errs = append(errs, env.SysInv.Save(env.Root, env.SysInvPath))
+		if err := env.secureDir(path.Dir(env.SysInvPath), true); err != nil {
+			errs = append(errs, err)
+		} else {
+			errs = append(errs, env.SysInv.Save(env.Root, env.SysInvPath))
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -145,6 +149,11 @@ func systemctl(a Action, verb string) []string {
 func (env Env) applyOne(ctx context.Context, a Action, inv *inventory.Inventory, backupDir string, extra []string) error {
 	key := a.target()
 	prev, managed := inv.Get(key)
+	if a.NeedsRoot && (a.Kind == WriteFile || a.Kind == RemoveFile) {
+		if err := env.secureDir(path.Dir(a.Path), a.Kind == WriteFile); err != nil {
+			return err
+		}
+	}
 	switch a.Kind {
 	case WriteFile:
 		e := inventory.Entry{Path: a.Path, Policy: a.Policy, Class: classOr(a.Class, inventory.DropIn), SHA256: fsx.SHA256(a.Content)}
@@ -153,13 +162,13 @@ func (env Env) applyOne(ctx context.Context, a Action, inv *inventory.Inventory,
 		}
 		switch a.State {
 		case Foreign:
-			b, err := env.backup(a.Path, backupDir)
+			b, err := env.backup(a.Path, backupDir, a.NeedsRoot)
 			if err != nil {
 				return err
 			}
 			e.Backup = b
 		case ModifiedByUser: // keep the user's edit, but uninstall restores the original
-			if _, err := env.backup(a.Path, backupDir); err != nil {
+			if _, err := env.backup(a.Path, backupDir, a.NeedsRoot); err != nil {
 				return err
 			}
 		}
@@ -173,7 +182,7 @@ func (env Env) applyOne(ctx context.Context, a Action, inv *inventory.Inventory,
 		inv.Upsert(e)
 	case RemoveFile:
 		if a.State == Foreign || a.State == ModifiedByUser {
-			if _, err := env.backup(a.Path, backupDir); err != nil {
+			if _, err := env.backup(a.Path, backupDir, a.NeedsRoot); err != nil {
 				return err
 			}
 		}
@@ -267,16 +276,28 @@ func firstLine(b []byte) string {
 // backup copies p into dir as "<p with / replaced by %>" (mode 0600) and
 // returns the backup path. An existing backup with different content is
 // never overwritten; a numbered name is used instead.
-func (env Env) backup(p, dir string) (string, error) {
+func (env Env) backup(p, dir string, asRoot bool) (string, error) {
 	data, err := env.Root.ReadFile(p)
 	if err != nil {
 		return "", fmt.Errorf("backup %s: %w", p, err)
 	}
-	if err := env.Root.MkdirAll(path.Dir(dir), 0o755); err != nil {
-		return "", err
-	}
-	if err := env.Root.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+	if asRoot {
+		if err := env.secureDir(path.Dir(dir), true); err != nil {
+			return "", err
+		}
+		if err := os.Mkdir(env.Root.Path(dir), 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+			return "", err
+		}
+		if err := env.secureDir(dir, false); err != nil {
+			return "", err
+		}
+	} else {
+		if err := env.Root.MkdirAll(path.Dir(dir), 0o755); err != nil {
+			return "", err
+		}
+		if err := env.Root.MkdirAll(dir, 0o700); err != nil {
+			return "", err
+		}
 	}
 	base := dir + "/" + strings.ReplaceAll(p, "/", "%")
 	for i := 0; ; i++ {
@@ -318,13 +339,18 @@ func (env Env) makeDir(a Action, extra []string) error {
 	}
 	missing := err != nil
 	parent := path.Dir(p)
-	if extraPath := a.NeedsRoot && inExtra(p, extra); missing && !extraPath {
+	switch {
+	case !a.NeedsRoot:
 		if err := env.Root.MkdirAll(parent, 0o755); err != nil {
 			return err
 		}
-	}
-	if a.NeedsRoot {
+	case inExtra(p, extra):
+		// Config-derived path: the parent must already exist and be trusted.
 		if err := trustedChain(env.Root, parent, env.OwnerOf); err != nil {
+			return err
+		}
+	default:
+		if err := env.secureDir(parent, true); err != nil {
 			return err
 		}
 	}
@@ -340,6 +366,34 @@ func (env Env) makeDir(a Action, extra []string) error {
 	defer func() { _ = syscall.Close(fd) }()
 	if err := syscall.Fchmod(fd, uint32(mode)); err != nil {
 		return fmt.Errorf("chmod %s: %w", p, err)
+	}
+	return nil
+}
+
+// secureDir is the root side's way to reach a directory: it walks from "/"
+// to dir, Lstat-checking each component with trustedNode (no symlinks,
+// root-owned, not group/world writable, a directory). With create, a missing
+// component is made with os.Mkdir(0755) and verified before descending;
+// without, the walk stops quietly at the first missing component.
+func (env Env) secureDir(dir string, create bool) error {
+	cur := "/"
+	for _, c := range append([]string{""}, strings.Split(strings.Trim(path.Clean(dir), "/"), "/")...) {
+		cur = path.Join(cur, c)
+		if _, err := os.Lstat(env.Root.Path(cur)); errors.Is(err, fs.ErrNotExist) {
+			if !create {
+				return nil
+			}
+			if err := os.Mkdir(env.Root.Path(cur), 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+				return err
+			}
+		}
+		st, err := trustedNode(env.Root, cur, env.OwnerOf)
+		if err != nil {
+			return err
+		}
+		if !st.IsDir() {
+			return fmt.Errorf("%s is not a directory", cur)
+		}
 	}
 	return nil
 }

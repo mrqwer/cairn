@@ -1,11 +1,9 @@
 package plan
 
 import (
+	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,17 +18,14 @@ import (
 )
 
 // RootBuilder generates the root-level actions for mode from the host config
-// and the detected system. Both sides call it: the user side to show the
-// plan, apply-root to regenerate what it executes, so the unprivileged side
-// never hands actions or file content to root. Later tasks register the
+// and the detected system. apply-root calls it with its own detection and
+// shows and confirms the result, so the unprivileged side never hands actions
+// or file content to root; the user side calls it only for a best-effort
+// preview. Later tasks register the
 // sleep, GPU and repair policies here.
 var RootBuilder = func(mode string, host config.Host, sys detect.System, self string) ([]Action, error) {
 	return nil, nil
 }
-
-// ErrPlanChanged is returned by apply-root when the regenerated plan is not
-// the one the user approved.
-var ErrPlanChanged = errors.New("plan changed since you approved it; run cairn host apply again")
 
 // MaxRootRequest bounds the request apply-root reads from stdin.
 const MaxRootRequest = 64 << 10
@@ -117,52 +112,35 @@ func BuildRoot(mode string, host config.Host, sys detect.System, self string) ([
 	return acts, nil
 }
 
-// Hash fingerprints the pending root actions of a resolved plan (kind, path,
-// content, mode, unit, command, in order). The user side passes the hash of
-// what it showed; apply-root refuses to run anything else.
-func Hash(actions []Action) string {
-	h := sha256.New()
-	field := func(b []byte) {
-		var n [8]byte
-		binary.BigEndian.PutUint64(n[:], uint64(len(b)))
-		h.Write(n[:])
-		h.Write(b)
-	}
-	for _, a := range actions {
-		if !a.NeedsRoot || a.State == Unchanged {
-			continue
-		}
-		field([]byte(a.Kind))
-		field([]byte(a.Path))
-		field(a.Content)
-		field(fmt.Appendf(nil, "%d", uint32(a.Mode)))
-		field([]byte(a.Unit))
-		field(fmt.Appendf(nil, "%d", len(a.Cmd)))
-		for _, c := range a.Cmd {
-			field([]byte(c))
-		}
-	}
-	return hex.EncodeToString(h.Sum(nil))
-}
+// ErrRootDeclined is returned when the user answers no at the root prompt.
+var ErrRootDeclined = errors.New("root changes declined")
 
-// RootOptions are the argv-level inputs of apply-root.
+// RootOptions are the argv-level inputs of apply-root plus its terminal.
 type RootOptions struct {
-	Expect string // Hash of the plan the user approved
-	Force  bool
-	Sys    detect.System // detected by apply-root itself
-	Self   string
+	Force bool
+	Yes   bool          // skip the confirmation (user ran apply --yes)
+	Sys   detect.System // detected by apply-root itself
+	Self  string
+	Out   io.Writer // where the root plan and prompt are printed
+	TTY   io.Reader // where the answer is read (never the request's stdin)
 }
 
 // ApplyRoot is the root side of apply: validate the request, regenerate the
-// root actions, validate all of them, resolve against the system inventory,
-// require the plan hash to equal the approved one, then write the host config
-// snapshot and execute. Nothing is written before every check has passed.
+// root actions from root's own view of the system, validate all of them,
+// resolve against the system inventory and check every target directory
+// chain; then show this plan and ask on the TTY (unless Yes); only then write
+// the host config snapshot and execute. Nothing is written before the user
+// has confirmed the plan root will actually run.
 func ApplyRoot(ctx context.Context, r RootRequest, env Env, opts RootOptions) error {
 	if err := r.Validate(); err != nil {
 		return fmt.Errorf("rejected request: %w", err)
 	}
 	if env.SysInv == nil {
 		return errors.New("plan: system inventory not loaded")
+	}
+	out := opts.Out
+	if out == nil {
+		out = io.Discard
 	}
 	acts, err := BuildRoot(r.Mode, r.Host, opts.Sys, opts.Self)
 	if err != nil {
@@ -177,23 +155,53 @@ func ApplyRoot(ctx context.Context, r RootRequest, env Env, opts RootOptions) er
 	}
 	p := Resolve(acts, env.Root, env.SysInv)
 	p.Mode = r.Mode
-	if Hash(p.Actions) != opts.Expect {
-		return ErrPlanChanged
-	}
 	if m := p.ModifiedPaths(); len(m) > 0 && !opts.Force {
 		return fmt.Errorf("%w: %s", ErrModifiedByUser, strings.Join(m, ", "))
+	}
+	if err := env.precheckDirs(p); err != nil {
+		return err
+	}
+	Render(out, p)
+	if len(p.Pending()) > 0 && !opts.Yes {
+		if opts.TTY == nil {
+			return errors.New("no terminal to confirm root changes; re-run cairn host apply with --yes")
+		}
+		_, _ = fmt.Fprint(out, "Apply these root changes? [y/N] ")
+		line, _ := bufio.NewReader(opts.TTY).ReadString('\n')
+		if ans := strings.ToLower(strings.TrimSpace(line)); ans != "y" && ans != "yes" {
+			return ErrRootDeclined
+		}
 	}
 	snap, err := HostSnapshot(r.Host)
 	if err != nil {
 		return err
 	}
-	if err := env.Root.MkdirAll(SysStateDir, 0o755); err != nil {
+	if err := env.secureDir(SysStateDir, true); err != nil {
 		return err
 	}
 	if err := env.Root.WriteAtomic(HostConfigPath, snap, 0o644); err != nil {
 		return err
 	}
 	return Apply(ctx, p, env, Options{Force: opts.Force, RootOnly: true, Extra: r.Extra})
+}
+
+// precheckDirs verifies, without creating anything, the existing part of
+// every directory chain root will write into, so an unsafe chain is refused
+// before the prompt and before any write.
+func (env Env) precheckDirs(p Plan) error {
+	dirs := []string{SysStateDir, BackupDir}
+	for _, a := range p.Pending() {
+		switch a.Kind {
+		case WriteFile, RemoveFile, MakeDir:
+			dirs = append(dirs, path.Dir(path.Clean(a.Path)))
+		}
+	}
+	for _, d := range dirs {
+		if err := env.secureDir(d, false); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // HostSnapshot is the content of HostConfigPath for host.

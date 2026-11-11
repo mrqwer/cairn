@@ -139,9 +139,33 @@ func (hs *hostState) pending() (user, root bool) {
 	return user, root || hs.stale
 }
 
-func (hs *hostState) render(w io.Writer) {
-	if len(hs.plan.Pending()) > 0 || !hs.stale {
-		plan.Render(w, hs.plan)
+// side returns the actions of one side (root or user) as a plan.
+func (hs *hostState) side(root bool) plan.Plan {
+	out := plan.Plan{Mode: hs.plan.Mode}
+	for _, a := range hs.plan.Actions {
+		if a.NeedsRoot == root {
+			out.Actions = append(out.Actions, a)
+		}
+	}
+	return out
+}
+
+func (hs *hostState) renderUser(w io.Writer) {
+	if u := hs.side(false); len(u.Pending()) > 0 {
+		plan.Render(w, u)
+		return
+	}
+	_, _ = fmt.Fprintln(w, "user-level: nothing to do")
+}
+
+// renderRootPreview shows the user side's guess at the root plan. Root
+// recomputes it with its own view of the system and confirms it itself.
+func (hs *hostState) renderRootPreview(w io.Writer) {
+	_, _ = fmt.Fprintln(w, "preview (exact plan is computed by root at apply time):")
+	if r := hs.side(true); len(r.Pending()) > 0 {
+		plan.Render(w, r)
+	} else if !hs.stale {
+		_, _ = fmt.Fprintln(w, "needs root: nothing to do")
 	}
 	if hs.stale {
 		_, _ = fmt.Fprintf(w, "needs root: update host config snapshot %s\n", plan.HostConfigPath)
@@ -155,14 +179,17 @@ func confirm(in io.Reader, out io.Writer) bool {
 	return ans == "y" || ans == "yes"
 }
 
-// sudoApplyRoot runs `sudo <self> host apply-root --mode <m> --expect <hash>`
-// with the request on stdin (sudo reads the password from the tty). This is
-// the one place that uses os/exec instead of execx.Runner: sudo needs the
-// terminal and the root side's output should stream to the user, while
-// Runner only returns combined output after exit. The logic it triggers
-// (plan.ApplyRoot) is Runner-based and tested.
-func sudoApplyRoot(ctx context.Context, cmd *cobra.Command, self, mode, expect string, force bool, request []byte) error {
-	args := []string{self, "host", "apply-root", "--mode", mode, "--expect", expect}
+// sudoApplyRoot runs `sudo <self> host apply-root --mode <m> [--yes]
+// [--force]` with the request on stdin; sudo and apply-root's confirmation
+// both use the terminal directly. This is the one place that uses os/exec
+// instead of execx.Runner: sudo needs the terminal and the root side's output
+// should stream to the user, while Runner only returns combined output after
+// exit. The logic it triggers (plan.ApplyRoot) is Runner-based and tested.
+func sudoApplyRoot(ctx context.Context, cmd *cobra.Command, self, mode string, yes, force bool, request []byte) error {
+	args := []string{self, "host", "apply-root", "--mode", mode}
+	if yes {
+		args = append(args, "--yes")
+	}
 	if force {
 		args = append(args, "--force")
 	}
@@ -190,7 +217,8 @@ func newHostPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			hs.render(cmd.OutOrStdout())
+			hs.renderUser(cmd.OutOrStdout())
+			hs.renderRootPreview(cmd.OutOrStdout())
 			return nil
 		},
 	}
@@ -208,12 +236,12 @@ func newHostApplyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			hs.render(cmd.OutOrStdout())
+			hs.renderUser(cmd.OutOrStdout())
 			userNeeded, rootNeeded := hs.pending()
 			if !userNeeded && !rootNeeded {
 				return nil
 			}
-			if m := hs.plan.ModifiedPaths(); len(m) > 0 && !force {
+			if m := hs.side(false).ModifiedPaths(); len(m) > 0 && !force {
 				return fmt.Errorf("%w: %s", plan.ErrModifiedByUser, strings.Join(m, ", "))
 			}
 			if rootNeeded {
@@ -221,11 +249,11 @@ func newHostApplyCmd() *cobra.Command {
 					return err
 				}
 			}
-			if !yes && !confirm(cmd.InOrStdin(), cmd.OutOrStdout()) {
-				cmd.Println("aborted")
-				return nil
-			}
 			if userNeeded {
+				if !yes && !confirm(cmd.InOrStdin(), cmd.OutOrStdout()) {
+					cmd.Println("aborted")
+					return nil
+				}
 				if err := plan.Apply(ctx, hs.plan, hs.env, plan.Options{Force: force, UserOnly: true}); err != nil {
 					return err
 				}
@@ -233,11 +261,12 @@ func newHostApplyCmd() *cobra.Command {
 			if !rootNeeded {
 				return nil
 			}
+			cmd.Println("Root changes will be shown and confirmed by the privileged step.")
 			req, err := json.Marshal(plan.NewRootRequest(hs.plan.Mode, hs.cfg.Host))
 			if err != nil {
 				return err
 			}
-			return runSudo(ctx, cmd, hs.self, hs.plan.Mode, plan.Hash(hs.plan.Actions), force, req)
+			return runSudo(ctx, cmd, hs.self, hs.plan.Mode, yes, force, req)
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "do not ask for confirmation")
@@ -247,12 +276,12 @@ func newHostApplyCmd() *cobra.Command {
 
 // newHostApplyRootCmd is the root half of apply. It runs under sudo and reads
 // neither XDG directories nor config files. Its only unprivileged input is a
-// small request on stdin (mode, host config) plus the approved plan hash on
-// argv; it regenerates the actions itself and runs them only if their hash
-// matches.
+// small request on stdin (mode, host config). It regenerates the actions with
+// its own detection, prints them and asks on /dev/tty (never stdin) unless
+// --yes.
 func newHostApplyRootCmd() *cobra.Command {
-	var mode, expect string
-	var force bool
+	var mode string
+	var yes, force bool
 	cmd := &cobra.Command{
 		Use:    "apply-root",
 		Short:  "Apply the root part of a host plan (run by cairn host apply)",
@@ -286,7 +315,14 @@ func newHostApplyRootCmd() *cobra.Command {
 				return err
 			}
 			env := plan.Env{Root: sysRoot, Runner: execx.OSRunner{}, SysInv: sysInv, SysInvPath: plan.SysInventoryPath}
-			opts := plan.RootOptions{Expect: expect, Force: force, Sys: sys, Self: self}
+			opts := plan.RootOptions{Yes: yes, Force: force, Sys: sys, Self: self, Out: cmd.ErrOrStderr()}
+			if !yes {
+				// stdin carries the request; the answer comes from the terminal.
+				if tty, err := os.Open("/dev/tty"); err == nil {
+					defer func() { _ = tty.Close() }()
+					opts.TTY = tty
+				}
+			}
 			if err := plan.ApplyRoot(ctx, req, env, opts); err != nil {
 				return err
 			}
@@ -295,9 +331,8 @@ func newHostApplyRootCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&mode, "mode", "", "plan mode (apply or repair)")
-	cmd.Flags().StringVar(&expect, "expect", "", "hash of the approved root plan")
+	cmd.Flags().BoolVar(&yes, "yes", false, "do not ask for confirmation")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite managed files modified by hand")
 	_ = cmd.MarkFlagRequired("mode")
-	_ = cmd.MarkFlagRequired("expect")
 	return cmd
 }

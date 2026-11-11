@@ -13,7 +13,6 @@ import (
 	"github.com/mrqwer/cairn/internal/config"
 	"github.com/mrqwer/cairn/internal/detect"
 	"github.com/mrqwer/cairn/internal/fsx"
-	"github.com/mrqwer/cairn/internal/inventory"
 	"github.com/mrqwer/cairn/internal/plan"
 )
 
@@ -65,19 +64,21 @@ func TestHostPlanAndApply(t *testing.T) {
 	}
 	checkSelf = func(fsx.Root, string) error { return nil }
 	type sudoCall struct {
-		mode, expect string
-		force        bool
-		req          plan.RootRequest
+		mode       string
+		yes, force bool
+		req        plan.RootRequest
 	}
 	var calls []sudoCall
-	runSudo = func(_ context.Context, _ *cobra.Command, _, mode, expect string, force bool, request []byte) error {
+	runSudo = func(_ context.Context, _ *cobra.Command, _, mode string, yes, force bool, request []byte) error {
 		req, err := plan.ReadRootRequest(bytes.NewReader(request))
-		calls = append(calls, sudoCall{mode, expect, force, req})
+		calls = append(calls, sudoCall{mode, yes, force, req})
 		return err
 	}
 
 	out, err := runHost(t, "", "host", "plan")
-	if err != nil || !strings.Contains(out, target) || !strings.Contains(out, "create") || !strings.Contains(out, "needs root") {
+	if err != nil || !strings.Contains(out, target) || !strings.Contains(out, "create") ||
+		!strings.Contains(out, "preview (exact plan is computed by root at apply time):") ||
+		!strings.Contains(out, "/etc/systemd/sleep.conf.d/50-cairn.conf") {
 		t.Fatalf("plan: %v\n%s", err, out)
 	}
 
@@ -92,6 +93,10 @@ func TestHostPlanAndApply(t *testing.T) {
 	if out, err = runHost(t, "", "host", "apply", "--yes", "--force"); err != nil {
 		t.Fatalf("apply: %v\n%s", err, out)
 	}
+	if !strings.Contains(out, "Root changes will be shown and confirmed by the privileged step.") ||
+		strings.Contains(out, "/etc/systemd/sleep.conf.d/50-cairn.conf") {
+		t.Fatalf("apply must not show the root plan itself:\n%s", out)
+	}
 	if _, err := os.Stat(target); err != nil {
 		t.Fatalf("user file not written: %v", err)
 	}
@@ -102,24 +107,19 @@ func TestHostPlanAndApply(t *testing.T) {
 		t.Fatalf("sudo calls: %d", len(calls))
 	}
 	c := calls[0]
-	// The hash covers the shown root action; the state is whatever the real
-	// system gives, so recompute it the same way.
-	shown := plan.Resolve([]plan.Action{rootAct}, fsx.Root{Dir: "/"}, mustSysInv(t))
-	if c.mode != plan.ModeApply || !c.force || c.expect != plan.Hash(shown.Actions) || c.req.Mode != plan.ModeApply {
+	if c.mode != plan.ModeApply || !c.yes || !c.force || c.req.Mode != plan.ModeApply {
 		t.Fatalf("sudo call %+v", c)
+	}
+
+	// With user-level work done, root work alone asks no user-side question.
+	calls = nil
+	out, err = runHost(t, "", "host", "apply")
+	if err != nil || strings.Contains(out, "Apply these changes?") || len(calls) != 1 || calls[0].yes {
+		t.Fatalf("root-only apply: calls=%+v err=%v\n%s", calls, err, out)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "run/cairn/host-plan.json")); err == nil {
 		t.Fatal("a plan file was written")
 	}
-}
-
-func mustSysInv(t *testing.T) *inventory.Inventory {
-	t.Helper()
-	inv, err := inventory.Load(fsx.Root{Dir: "/"}, plan.SysInventoryPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return inv
 }
 
 func TestHostDesiredMustNotReturnRootActions(t *testing.T) {
@@ -139,7 +139,7 @@ func TestApplyRootRequiresRoot(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root")
 	}
-	_, err := runHost(t, "{}", "host", "apply-root", "--mode", "apply", "--expect", "x")
+	_, err := runHost(t, "{}", "host", "apply-root", "--mode", "apply")
 	if err == nil || !strings.Contains(err.Error(), "must run as root") {
 		t.Fatalf("err=%v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
 	"regexp"
 	"slices"
@@ -270,29 +271,39 @@ func statOwner(fi fs.FileInfo) (uint32, bool) {
 	return sys.Uid, true
 }
 
-// trustedChain checks p and each of its parents up to "/": each must be
-// owned by root (per ownerOf; nil means the real owner) and not group/world
-// writable.
+// trustedChain checks p and each of its parents up to "/" with Lstat: none
+// may be a symlink, and each must be owned by root (per ownerOf; nil means
+// the real owner) and not group/world writable.
 func trustedChain(root fsx.Root, p string, ownerOf func(fs.FileInfo) (uint32, bool)) error {
-	if ownerOf == nil {
-		ownerOf = statOwner
-	}
 	for p = path.Clean(p); ; p = path.Dir(p) {
-		st, err := root.Stat(p)
-		if err != nil {
-			return fmt.Errorf("%s is not inspectable (%v)", p, err)
-		}
-		uid, ok := ownerOf(st)
-		switch {
-		case !ok:
-			return fmt.Errorf("%s has an unknown owner", p)
-		case uid != 0:
-			return fmt.Errorf("%s is owned by uid %d, not root", p, uid)
-		case st.Mode().Perm()&0o022 != 0:
-			return fmt.Errorf("%s has group/world-writable mode %v", p, st.Mode().Perm())
+		if _, err := trustedNode(root, p, ownerOf); err != nil {
+			return err
 		}
 		if p == "/" {
 			return nil
 		}
 	}
+}
+
+// trustedNode Lstats p and applies trustedChain's rules to it alone.
+func trustedNode(root fsx.Root, p string, ownerOf func(fs.FileInfo) (uint32, bool)) (fs.FileInfo, error) {
+	if ownerOf == nil {
+		ownerOf = statOwner
+	}
+	st, err := os.Lstat(root.Path(p))
+	if err != nil {
+		return nil, fmt.Errorf("%s is not inspectable (%w)", p, err)
+	}
+	uid, ok := ownerOf(st)
+	switch {
+	case st.Mode()&fs.ModeSymlink != 0:
+		return nil, fmt.Errorf("%s is a symlink; refusing to follow it as root", p)
+	case !ok:
+		return nil, fmt.Errorf("%s has an unknown owner", p)
+	case uid != 0:
+		return nil, fmt.Errorf("%s is owned by uid %d, not root", p, uid)
+	case st.Mode().Perm()&0o022 != 0:
+		return nil, fmt.Errorf("%s has group/world-writable mode %v", p, st.Mode().Perm())
+	}
+	return st, nil
 }

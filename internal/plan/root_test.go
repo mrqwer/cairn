@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"strings"
@@ -57,19 +58,17 @@ func rootEnv(t *testing.T) plan.Env {
 	return env
 }
 
-// expectFor computes what the user side would show for mode and host.
-func expectFor(t *testing.T, env plan.Env, mode string, host config.Host) string {
-	t.Helper()
-	acts, err := plan.BuildRoot(mode, host, detect.System{}, selfBin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return plan.Hash(plan.Resolve(acts, env.Root, env.SysInv).Actions)
+// noTTY fails the test if the confirmation prompt reads from it.
+type noTTY struct{ t *testing.T }
+
+func (n noTTY) Read([]byte) (int, error) {
+	n.t.Error("tty read although --yes was given")
+	return 0, io.EOF
 }
 
-func applyRoot(env plan.Env, mode string, host config.Host, expect string, force bool) error {
+func applyRoot(env plan.Env, mode string, host config.Host, force bool) error {
 	return plan.ApplyRoot(context.Background(), plan.NewRootRequest(mode, host), env,
-		plan.RootOptions{Expect: expect, Force: force, Self: selfBin})
+		plan.RootOptions{Yes: true, Force: force, Self: selfBin, Out: io.Discard})
 }
 
 func nothingWritten(t *testing.T, env plan.Env, paths ...string) {
@@ -97,7 +96,7 @@ func TestApplyRootRegeneratesAndWritesSnapshot(t *testing.T) {
 		}, nil
 	})
 	host := validHost()
-	if err := applyRoot(env, plan.ModeApply, host, expectFor(t, env, plan.ModeApply, host), false); err != nil {
+	if err := applyRoot(env, plan.ModeApply, host, false); err != nil {
 		t.Fatal(err)
 	}
 	if gotMode != plan.ModeApply || gotSelf != selfBin || gotHost.GPU.Nvidia.TemporaryFilePath != nvidiaTmp {
@@ -119,26 +118,119 @@ func TestApplyRootRegeneratesAndWritesSnapshot(t *testing.T) {
 	if err != nil || len(saved.Entries) != 2 {
 		t.Fatalf("saved inventory %+v %v", saved, err)
 	}
-	// Second run: nothing pending, the expected hash is the empty plan's.
-	if err := applyRoot(env, plan.ModeApply, host, expectFor(t, env, plan.ModeApply, host), false); err != nil {
+	// Second run: nothing pending.
+	if err := applyRoot(env, plan.ModeApply, host, false); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestApplyRootExpectMismatchAborts(t *testing.T) {
-	env := rootEnv(t)
+func TestApplyRootConfirmsOnTTY(t *testing.T) {
 	host := validHost()
-	withBuilder(t, returns(plan.Action{Kind: plan.WriteFile, Path: sleepConf, Content: []byte("shown"), NeedsRoot: true}))
-	shown := expectFor(t, env, plan.ModeApply, host)
-	// What root regenerates now differs from what the user approved.
-	withBuilder(t, returns(plan.Action{Kind: plan.WriteFile, Path: sleepConf, Content: []byte("swapped"), NeedsRoot: true}))
-	for _, expect := range []string{shown, "", "deadbeef"} {
-		err := applyRoot(env, plan.ModeApply, host, expect, false)
-		if !errors.Is(err, plan.ErrPlanChanged) || !strings.Contains(err.Error(), "run cairn host apply again") {
-			t.Fatalf("expect %q: err=%v", expect, err)
-		}
-		nothingWritten(t, env, sleepConf)
+	withBuilder(t, returns(plan.Action{Kind: plan.WriteFile, Path: sleepConf, Content: []byte("x"), NeedsRoot: true, Reason: "sleep settings"}))
+	run := func(env plan.Env, tty io.Reader, yes bool) (string, error) {
+		var out bytes.Buffer
+		err := plan.ApplyRoot(context.Background(), plan.NewRootRequest(plan.ModeApply, host), env,
+			plan.RootOptions{Yes: yes, Self: selfBin, Out: &out, TTY: tty})
+		return out.String(), err
 	}
+
+	env := rootEnv(t)
+	out, err := run(env, strings.NewReader("n\n"), false)
+	if !errors.Is(err, plan.ErrRootDeclined) {
+		t.Fatalf("answer n: err=%v", err)
+	}
+	if !strings.Contains(out, sleepConf) || !strings.Contains(out, "sleep settings") || !strings.Contains(out, "Apply these root changes? [y/N]") {
+		t.Fatalf("root did not show its plan and prompt:\n%s", out)
+	}
+	nothingWritten(t, env, sleepConf)
+
+	if _, err := run(env, strings.NewReader(""), false); !errors.Is(err, plan.ErrRootDeclined) {
+		t.Fatalf("no answer (EOF) must decline: %v", err)
+	}
+	nothingWritten(t, env, sleepConf)
+
+	if _, err := run(env, strings.NewReader("y\n"), false); err != nil {
+		t.Fatalf("answer y: %v", err)
+	}
+	if !env.Root.Exists(sleepConf) || !env.Root.Exists(plan.HostConfigPath) {
+		t.Fatal("answer y did not apply")
+	}
+
+	env2 := rootEnv(t)
+	if _, err := run(env2, noTTY{t}, true); err != nil {
+		t.Fatalf("--yes: %v", err)
+	}
+	if !env2.Root.Exists(sleepConf) {
+		t.Fatal("--yes did not apply")
+	}
+
+	// Nothing pending: no question, snapshot still refreshed.
+	env3 := rootEnv(t)
+	withBuilder(t, returns())
+	if _, err := run(env3, noTTY{t}, false); err != nil || !env3.Root.Exists(plan.HostConfigPath) {
+		t.Fatalf("empty plan: %v", err)
+	}
+}
+
+func TestApplyRootRefusesSymlinkedStateDir(t *testing.T) {
+	env := rootEnv(t)
+	if err := env.Root.MkdirAll("/var/lib/cairn", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.Root.MkdirAll("/elsewhere", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(env.Root.Path("/elsewhere"), env.Root.Path("/var/lib/cairn/host")); err != nil {
+		t.Fatal(err)
+	}
+	withBuilder(t, returns(plan.Action{Kind: plan.WriteFile, Path: sleepConf, Content: []byte("x"), NeedsRoot: true}))
+	err := applyRoot(env, plan.ModeApply, validHost(), false)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("err=%v, want symlink refusal", err)
+	}
+	if env.Root.Exists(sleepConf) {
+		t.Fatal("wrote a file before refusing")
+	}
+	if entries, _ := os.ReadDir(env.Root.Path("/elsewhere")); len(entries) != 0 {
+		t.Fatalf("wrote through the symlink: %v", entries)
+	}
+}
+
+func TestApplyRootRefusesUnsafeTargetDirs(t *testing.T) {
+	withBuilder(t, returns(plan.Action{Kind: plan.WriteFile, Path: sleepConf, Content: []byte("x"), NeedsRoot: true}))
+
+	env := rootEnv(t)
+	if err := env.Root.MkdirAll("/etc/systemd", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.Root.MkdirAll("/elsewhere", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(env.Root.Path("/elsewhere"), env.Root.Path("/etc/systemd/sleep.conf.d")); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyRoot(env, plan.ModeApply, validHost(), false); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("symlinked target dir: err=%v", err)
+	}
+	if entries, _ := os.ReadDir(env.Root.Path("/elsewhere")); len(entries) != 0 {
+		t.Fatalf("wrote through the symlink: %v", entries)
+	}
+	nothingWritten(t, env)
+
+	env = rootEnv(t)
+	if err := env.Root.MkdirAll("/etc/systemd", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env.OwnerOf = func(fi fs.FileInfo) (uint32, bool) {
+		if fi.Name() == "systemd" {
+			return 1000, true
+		}
+		return 0, true
+	}
+	if err := applyRoot(env, plan.ModeApply, validHost(), false); err == nil || !strings.Contains(err.Error(), "uid 1000") {
+		t.Fatalf("user-owned target parent: err=%v", err)
+	}
+	nothingWritten(t, env, sleepConf)
 }
 
 func TestApplyRootRepairMode(t *testing.T) {
@@ -147,7 +239,7 @@ func TestApplyRootRepairMode(t *testing.T) {
 	put(t, env.Root, conflicter, "[Service]\nExecStart=/usr/bin/systemctl suspend\n")
 	withBuilder(t, returns(plan.Action{Kind: plan.RemoveFile, Path: conflicter, NeedsRoot: true}))
 
-	if err := applyRoot(env, plan.ModeApply, host, expectFor(t, env, plan.ModeApply, host), false); err == nil {
+	if err := applyRoot(env, plan.ModeApply, host, false); err == nil {
 		t.Fatalf("apply mode accepted removal of %s", conflicter)
 	}
 	if !env.Root.Exists(conflicter) {
@@ -155,7 +247,7 @@ func TestApplyRootRepairMode(t *testing.T) {
 	}
 	nothingWritten(t, env)
 
-	if err := applyRoot(env, plan.ModeRepair, host, expectFor(t, env, plan.ModeRepair, host), false); err != nil {
+	if err := applyRoot(env, plan.ModeRepair, host, false); err != nil {
 		t.Fatal(err)
 	}
 	if env.Root.Exists(conflicter) {
@@ -167,10 +259,10 @@ func TestApplyRootRepairMode(t *testing.T) {
 
 	boot := plan.Action{Kind: plan.WriteFile, Path: "/boot/loader/entries/arch.conf", Content: []byte("options resume_offset=1\n"), NeedsRoot: true}
 	withBuilder(t, returns(boot))
-	if err := applyRoot(env, plan.ModeApply, host, expectFor(t, env, plan.ModeApply, host), false); err == nil {
+	if err := applyRoot(env, plan.ModeApply, host, false); err == nil {
 		t.Fatal("boot entry write accepted in apply mode")
 	}
-	if err := applyRoot(env, plan.ModeRepair, host, expectFor(t, env, plan.ModeRepair, host), false); err != nil {
+	if err := applyRoot(env, plan.ModeRepair, host, false); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -200,9 +292,8 @@ func TestApplyRootRejectsBadRequests(t *testing.T) {
 	for name, mutate := range cases {
 		env := rootEnv(t)
 		req := plan.NewRootRequest(plan.ModeApply, validHost())
-		expect := expectFor(t, env, plan.ModeApply, validHost())
 		mutate(&req)
-		if err := plan.ApplyRoot(context.Background(), req, env, plan.RootOptions{Expect: expect, Self: selfBin}); err == nil {
+		if err := plan.ApplyRoot(context.Background(), req, env, plan.RootOptions{Yes: true, Self: selfBin, Out: io.Discard}); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 		nothingWritten(t, env, sleepConf)
@@ -225,7 +316,7 @@ func TestApplyRootRejectsBadBuilderOutput(t *testing.T) {
 	for name, b := range cases {
 		env := rootEnv(t)
 		withBuilder(t, b)
-		if err := applyRoot(env, plan.ModeApply, validHost(), "", false); err == nil || errors.Is(err, plan.ErrPlanChanged) {
+		if err := applyRoot(env, plan.ModeApply, validHost(), false); err == nil {
 			t.Errorf("%s: err=%v, want a validation error", name, err)
 		}
 		nothingWritten(t, env, sleepConf)
@@ -238,11 +329,10 @@ func TestApplyRootModifiedNeedsForce(t *testing.T) {
 	put(t, env.Root, sleepConf, "hand edit\n")
 	env.SysInv.Upsert(inventory.Entry{Path: sleepConf, SHA256: fsx.SHA256([]byte("old managed"))})
 	withBuilder(t, returns(plan.Action{Kind: plan.WriteFile, Path: sleepConf, Content: []byte("x"), NeedsRoot: true}))
-	expect := expectFor(t, env, plan.ModeApply, host)
-	if err := applyRoot(env, plan.ModeApply, host, expect, false); !errors.Is(err, plan.ErrModifiedByUser) {
+	if err := applyRoot(env, plan.ModeApply, host, false); !errors.Is(err, plan.ErrModifiedByUser) {
 		t.Fatalf("err=%v, want ErrModifiedByUser", err)
 	}
-	if err := applyRoot(env, plan.ModeApply, host, expect, true); err != nil {
+	if err := applyRoot(env, plan.ModeApply, host, true); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -282,7 +372,7 @@ func TestMakeDirRefusesSymlink(t *testing.T) {
 	}
 	withBuilder(t, returns(plan.Action{Kind: plan.MakeDir, Path: nvidiaTmp, Mode: 0o700, NeedsRoot: true}))
 	host := validHost()
-	err := applyRoot(env, plan.ModeApply, host, expectFor(t, env, plan.ModeApply, host), false)
+	err := applyRoot(env, plan.ModeApply, host, false)
 	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("err=%v, want symlink refusal", err)
 	}
@@ -301,7 +391,7 @@ func TestMakeDirRefusesUntrustedParent(t *testing.T) {
 	}
 	withBuilder(t, returns(plan.Action{Kind: plan.MakeDir, Path: nvidiaTmp, Mode: 0o700, NeedsRoot: true}))
 	host := validHost()
-	err := applyRoot(env, plan.ModeApply, host, expectFor(t, env, plan.ModeApply, host), false)
+	err := applyRoot(env, plan.ModeApply, host, false)
 	if err == nil || !strings.Contains(err.Error(), "uid 1000") {
 		t.Fatalf("err=%v, want untrusted parent refusal", err)
 	}
@@ -314,40 +404,10 @@ func TestMakeDirExtraParentMustExist(t *testing.T) {
 	env, _ := newEnv(t) // no /home
 	withBuilder(t, returns(plan.Action{Kind: plan.MakeDir, Path: nvidiaTmp, Mode: 0o700, NeedsRoot: true}))
 	host := validHost()
-	if err := applyRoot(env, plan.ModeApply, host, expectFor(t, env, plan.ModeApply, host), false); err == nil {
+	if err := applyRoot(env, plan.ModeApply, host, false); err == nil {
 		t.Fatal("extra dir created with a missing parent")
 	}
 	if env.Root.Exists("/home") {
 		t.Fatal("parents of an extra path were created")
-	}
-}
-
-func TestHash(t *testing.T) {
-	a := plan.Action{Kind: plan.WriteFile, Path: sleepConf, Content: []byte("a"), NeedsRoot: true, State: plan.Create}
-	b := a
-	b.Content = []byte("b")
-	user := plan.Action{Kind: plan.WriteFile, Path: "/x", Content: []byte("u"), State: plan.Create}
-	same := a
-	same.State = plan.Unchanged
-	h := plan.Hash([]plan.Action{a})
-	if h == plan.Hash([]plan.Action{b}) {
-		t.Error("content not covered")
-	}
-	if h != plan.Hash([]plan.Action{a, user, same}) {
-		t.Error("user-level and unchanged actions must not affect the hash")
-	}
-	m := a
-	m.Mode = 0o600
-	if h == plan.Hash([]plan.Action{m}) {
-		t.Error("mode not covered")
-	}
-	c := plan.Action{Kind: plan.RunCommand, Cmd: []string{"systemctl", "daemon-reload"}, NeedsRoot: true, State: plan.Update}
-	if plan.Hash([]plan.Action{a, c}) == plan.Hash([]plan.Action{c, a}) {
-		t.Error("order not covered")
-	}
-	c2 := c
-	c2.Cmd = []string{"systemctl daemon-reload"}
-	if plan.Hash([]plan.Action{c}) == plan.Hash([]plan.Action{c2}) {
-		t.Error("argv boundaries not covered")
 	}
 }
