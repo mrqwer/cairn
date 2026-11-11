@@ -45,6 +45,27 @@ func FirstPhysicalOffset(path string) (uint64, error) {
 	return physical / uint64(os.Getpagesize()), nil
 }
 
+// RdevOf returns "MAJ:MIN" of the device node at path (a swap partition).
+func RdevOf(path string) (string, error) {
+	var st unix.Stat_t
+	if err := unix.Stat(path, &st); err != nil {
+		return "", fmt.Errorf("stat %s: %w", path, err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFBLK {
+		return "", fmt.Errorf("%s is not a block device", path)
+	}
+	return fmt.Sprintf("%d:%d", unix.Major(st.Rdev), unix.Minor(st.Rdev)), nil
+}
+
+// FSType returns the statfs filesystem magic of the filesystem holding path.
+func FSType(path string) (int64, error) {
+	var st unix.Statfs_t
+	if err := unix.Statfs(path, &st); err != nil {
+		return 0, fmt.Errorf("statfs %s: %w", path, err)
+	}
+	return st.Type, nil
+}
+
 // DeviceOf returns "MAJ:MIN" of the device holding the filesystem of path.
 func DeviceOf(path string) (string, error) {
 	var st unix.Stat_t

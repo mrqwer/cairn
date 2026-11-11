@@ -39,10 +39,11 @@ func setupSC(t *testing.T) *scEnv {
 	if err := e.root.MkdirAll(plan.SysStateDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	oRoot, oDet, oOff, oDev, oIs, oOwn := sysRoot, detectSystem, offsetOf, deviceOf, isRoot, stateOwnerOf
+	oRoot, oDet, oOff, oDev, oIs, oOwn, oFS := sysRoot, detectSystem, offsetOf, deviceOf, isRoot, stateOwnerOf, fsTypeOf
 	t.Cleanup(func() {
-		sysRoot, detectSystem, offsetOf, deviceOf, isRoot, stateOwnerOf = oRoot, oDet, oOff, oDev, oIs, oOwn
+		sysRoot, detectSystem, offsetOf, deviceOf, isRoot, stateOwnerOf, fsTypeOf = oRoot, oDet, oOff, oDev, oIs, oOwn, oFS
 	})
+	fsTypeOf = func(string) (int64, error) { return 0xEF53, nil }
 	sysRoot = e.root
 	detectSystem = func(context.Context) (detect.System, error) { return e.sys, nil }
 	offsetOf = func(string) (uint64, error) { return e.off, e.offE }

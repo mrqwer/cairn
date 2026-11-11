@@ -91,8 +91,10 @@ func UserUnitDir(d xdg.Dirs) string {
 // Build method is what plan.RootBuilder is set to, so it is the one place
 // root actions come from.
 type Builder struct {
-	Root   fsx.Root
-	Offset sleep.OffsetFunc
+	Root fsx.Root
+	// Probes compute the resume target for repair; a nil Offset means
+	// repair cannot compute it.
+	Probes sleep.Probes
 }
 
 // Build returns the root actions for mode: the apply policies, the repair
@@ -110,10 +112,10 @@ func (b Builder) Build(mode string, h config.Host, sys detect.System, self strin
 		}
 		return DesiredActions(&config.Config{Host: h}, sys, self, vendor), nil
 	case plan.ModeRepair:
-		if b.Offset == nil {
+		if b.Probes.Offset == nil {
 			return nil, errors.New("repair needs a resume offset function")
 		}
-		return repair.Plan(b.Root, sys, h.Sleep, b.Offset).Actions, nil
+		return repair.Plan(b.Root, sys, h.Sleep, b.Probes).Actions, nil
 	case plan.ModeUninstall:
 		inv, err := inventory.Load(b.Root, plan.SysInventoryPath)
 		if err != nil {
@@ -139,10 +141,10 @@ func (b Builder) Notes(mode string, h config.Host, sys detect.System) []string {
 	if mode != plan.ModeRepair {
 		return nil
 	}
-	if b.Offset == nil {
+	if b.Probes.Offset == nil {
 		return repair.Report(b.Root, sys)
 	}
-	return repair.Plan(b.Root, sys, h.Sleep, b.Offset).Notes
+	return repair.Plan(b.Root, sys, h.Sleep, b.Probes).Notes
 }
 
 // PlanBoth resolves a host operation for display: userActs against the user

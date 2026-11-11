@@ -15,6 +15,7 @@ import (
 	"github.com/mrqwer/cairn/internal/detect"
 	"github.com/mrqwer/cairn/internal/doctor"
 	"github.com/mrqwer/cairn/internal/events"
+	"github.com/mrqwer/cairn/internal/host/repair"
 	"github.com/mrqwer/cairn/internal/host/sleep"
 	"github.com/mrqwer/cairn/internal/inventory"
 	"github.com/mrqwer/cairn/internal/plan"
@@ -24,7 +25,7 @@ import (
 // running as root it cannot call FIEMAP, so the resume check reads the last
 // sleep-check result instead.
 func userSleepChecks(sc config.Sleep, sys detect.System) []doctor.Check {
-	checks := sleep.Checks(sc, sys, offsetOf, deviceOf)
+	checks := sleep.Checks(sc, sys, sleepProbes(sys))
 	if !isRoot() {
 		for i, c := range checks {
 			if c.ID() == sleep.IDResume {
@@ -41,7 +42,17 @@ var (
 	stateOwnerOf func(fs.FileInfo) (uint32, bool) // nil: the real owner
 	offsetOf     sleep.OffsetFunc                 = sleep.FirstPhysicalOffset
 	deviceOf                                      = sleep.DeviceOf
+	rdevOf                                        = sleep.RdevOf
+	fsTypeOf                                      = sleep.FSType
 )
+
+// sleepProbes are the swap probes behind the resume checks and repair.
+func sleepProbes(sys detect.System) sleep.Probes {
+	return sleep.Probes{
+		Offset: offsetOf, DevOf: deviceOf, RdevOf: rdevOf, FSType: fsTypeOf,
+		Repairable: func() bool { return repair.HasBootEntry(sysRoot, sys) },
+	}
+}
 
 const defaultsNote = "no " + plan.HostConfigPath + ", using built-in defaults"
 
@@ -156,7 +167,7 @@ func rootSleepResults(ctx context.Context, trusted bool) (sleepRun, error) {
 	}
 	// NVIDIA checks too: a dump target without room for the VRAM must block
 	// hibernation at entry.
-	checks := append(sleep.Checks(h.Sleep, sys, offsetOf, deviceOf), nvidiaChecks(ctx, h.GPU.Nvidia, sys, inv)...)
+	checks := append(sleep.Checks(h.Sleep, sys, sleepProbes(sys)), nvidiaChecks(ctx, h.GPU.Nvidia, sys, inv)...)
 	run.results = doctor.Run(ctx, checks)
 	if run.usedDefaults {
 		for i := range run.results {

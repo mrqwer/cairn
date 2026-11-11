@@ -79,9 +79,65 @@ func (c fnCheck) ID() string                        { return c.id }
 func (c fnCheck) Title() string                     { return c.title }
 func (c fnCheck) Run(context.Context) doctor.Result { return c.run() }
 
+// BtrfsMagic is the statfs magic of btrfs. FIEMAP on btrfs reports logical
+// addresses, so a swap file there has no usable resume_offset this way.
+const BtrfsMagic = 0x9123683E
+
+// ErrBtrfsSwap reports a hibernation swap file on btrfs.
+var ErrBtrfsSwap = errors.New("btrfs swap files are not supported yet")
+
+const fixBtrfs = "use a swap partition or a swap file on ext4/xfs"
+
+// Probes are the filesystem queries behind the resume checks; tests replace
+// them.
+type Probes struct {
+	Offset OffsetFunc                        // resume_offset of a swap file
+	DevOf  func(path string) (string, error) // MAJ:MIN of the filesystem holding a file
+	RdevOf func(path string) (string, error) // MAJ:MIN of a device node
+	FSType func(path string) (int64, error)  // statfs magic of the filesystem holding a file
+	// Repairable reports whether cairn host repair can fix the resume
+	// settings (systemd-boot with an entry for the running kernel); nil
+	// means it cannot.
+	Repairable func() bool
+}
+
+// DefaultProbes queries the real filesystem.
+func DefaultProbes() Probes {
+	return Probes{Offset: FirstPhysicalOffset, DevOf: DeviceOf, RdevOf: RdevOf, FSType: FSType}
+}
+
+// Target returns the resume device ("MAJ:MIN") and offset the kernel needs
+// for swap s: a partition's own device number and offset 0, or the device of
+// a swap file's filesystem and its first physical extent. A file on btrfs is
+// ErrBtrfsSwap.
+func (p Probes) Target(s detect.Swap) (dev string, off uint64, err error) {
+	if s.Type == "partition" {
+		if p.RdevOf == nil {
+			return "", 0, errors.New("no device probe")
+		}
+		dev, err = p.RdevOf(s.Path)
+		return dev, 0, err
+	}
+	if p.FSType != nil {
+		if t, err := p.FSType(s.Path); err == nil && t == BtrfsMagic {
+			return "", 0, ErrBtrfsSwap
+		}
+	}
+	if p.DevOf == nil || p.Offset == nil {
+		return "", 0, errors.New("no file probes")
+	}
+	if dev, err = p.DevOf(s.Path); err != nil {
+		return "", 0, err
+	}
+	if off, err = p.Offset(s.Path); err != nil {
+		return "", 0, err
+	}
+	return dev, off, nil
+}
+
 // SelectSwap picks the hibernation swap: the configured path, else the
-// active file swap with the lowest priority. ok is false when that swap is
-// not active.
+// active file or partition swap with the lowest priority, ignoring zram.
+// ok is false when that swap is not active.
 func SelectSwap(cfg config.Sleep, sys detect.System) (swap detect.Swap, ok bool) {
 	s, _, ok := selectSwap(cfg, sys)
 	return s, ok
@@ -99,7 +155,8 @@ func selectSwap(cfg config.Sleep, sys detect.System) (detect.Swap, string, bool)
 	var best *detect.Swap
 	for i := range sys.Swaps {
 		s := &sys.Swaps[i]
-		if s.Type == "file" && (best == nil || s.Priority < best.Priority) {
+		usable := (s.Type == "file" || s.Type == "partition") && !strings.HasPrefix(s.Path, "/dev/zram")
+		if usable && (best == nil || s.Priority < best.Priority) {
 			best = s
 		}
 	}
@@ -111,50 +168,68 @@ func selectSwap(cfg config.Sleep, sys detect.System) (detect.Swap, string, bool)
 
 const (
 	titleSwapPresent = "Hibernation swap is active"
-	titleResume      = "Resume device and offset match the swap file"
+	titleResume      = "Resume device and offset match the hibernation swap"
 	titleSwapFree    = "Swap has room for the hibernation image"
 	titleKernel      = "Running kernel matches installed modules"
 	titleInitramfs   = "Initramfs has the resume hook"
+
+	fixNoSwap     = "create and enable a swap file or partition at least as large as RAM, then set host.sleep.hibernation_swap.path"
+	fixInitramfsA = `add the "resume" hook to HOOKS in /etc/mkinitcpio.conf (after "block") and run: sudo mkinitcpio -P`
+	fixInitramfsG = "add resume support to the initramfs (the resume hook or module of your initramfs generator) and regenerate it"
 )
 
+// Titles maps the sleep check IDs to their titles.
+var Titles = map[string]string{
+	IDSwapPresent: titleSwapPresent,
+	IDResume:      titleResume,
+	IDSwapFree:    titleSwapFree,
+	IDKernel:      titleKernel,
+	IDInitramfs:   titleInitramfs,
+}
+
 // Checks returns the sleep pre-flight checks.
-func Checks(cfg config.Sleep, sys detect.System, offset OffsetFunc, devOf func(path string) (string, error)) []doctor.Check {
+func Checks(cfg config.Sleep, sys detect.System, probes Probes) []doctor.Check {
 	swap, path, found := selectSwap(cfg, sys)
-	noSwap := "no swap file configured or active"
+	noSwap := "no swap file or partition configured or active"
 	if path != "" {
 		noSwap = path + " is not an active swap"
 	}
+	missing := doctor.Result{Status: doctor.Crit, Evidence: noSwap, Fix: fixNoSwap}
 	return []doctor.Check{
 		fnCheck{IDSwapPresent, titleSwapPresent, func() doctor.Result {
 			if !found {
-				return doctor.Result{Status: doctor.Crit, Evidence: noSwap, Fix: "cairn host repair"}
+				return missing
 			}
 			return doctor.Result{Status: doctor.OK, Evidence: path}
 		}},
 		fnCheck{IDResume, titleResume, func() doctor.Result {
 			if !found {
-				return doctor.Result{Status: doctor.Crit, Evidence: noSwap, Fix: "cairn host repair"}
+				return missing
 			}
-			dev, err := devOf(path)
-			if err != nil {
-				return doctor.Result{Status: doctor.Unknown, Evidence: err.Error(), Fix: "sudo cairn host sleep-check"}
+			dev, off, err := probes.Target(swap)
+			if errors.Is(err, ErrBtrfsSwap) {
+				return doctor.Result{Status: doctor.Crit, Evidence: err.Error(), Fix: fixBtrfs}
 			}
-			off, err := offset(path)
 			if err != nil {
 				return doctor.Result{Status: doctor.Unknown, Evidence: err.Error(), Fix: "sudo cairn host sleep-check"}
 			}
 			if dev != sys.Resume.Device || off != sys.Resume.Offset {
+				fix := fmt.Sprintf("set resume= (the UUID of the device holding %s) and resume_offset=%d on the kernel "+
+					"command line of your boot loader, then reboot; sudo cairn host repair prints the exact values", path, off)
+				if probes.Repairable != nil && probes.Repairable() {
+					fix = "sudo cairn host repair"
+				}
 				return doctor.Result{
 					Status:   doctor.Crit,
 					Evidence: fmt.Sprintf("expected %s/%d, kernel has %s/%d", dev, off, sys.Resume.Device, sys.Resume.Offset),
-					Fix:      "cairn host repair",
+					Fix:      fix,
 				}
 			}
 			return doctor.Result{Status: doctor.OK, Evidence: fmt.Sprintf("%s/%d", dev, off)}
 		}},
 		fnCheck{IDSwapFree, titleSwapFree, func() doctor.Result {
 			if !found {
-				return doctor.Result{Status: doctor.Crit, Evidence: noSwap, Fix: "cairn host repair"}
+				return missing
 			}
 			img, err := imageSizeBytes()
 			if err != nil {
@@ -164,7 +239,7 @@ func Checks(cfg config.Sleep, sys detect.System, offset OffsetFunc, devOf func(p
 			free := swap.SizeKiB - swap.UsedKiB
 			ev := fmt.Sprintf("image %d KiB, free %d KiB", imgKiB, free)
 			if free < imgKiB {
-				return doctor.Result{Status: doctor.Crit, Evidence: ev, Fix: "enlarge the swap file or free memory"}
+				return doctor.Result{Status: doctor.Crit, Evidence: ev, Fix: "enlarge the hibernation swap or free memory"}
 			}
 			return doctor.Result{Status: doctor.OK, Evidence: ev}
 		}},
@@ -179,7 +254,11 @@ func Checks(cfg config.Sleep, sys detect.System, offset OffsetFunc, devOf func(p
 			case detect.Yes:
 				return doctor.Result{Status: doctor.OK}
 			case detect.No:
-				return doctor.Result{Status: doctor.Crit, Evidence: "no resume hook in the initramfs config", Fix: "cairn host repair"}
+				fix := fixInitramfsG
+				if sys.PkgManager == "pacman" {
+					fix = fixInitramfsA
+				}
+				return doctor.Result{Status: doctor.Crit, Evidence: "no resume hook in the initramfs config", Fix: fix}
 			default:
 				return doctor.Result{Status: doctor.Unknown, Evidence: "could not determine"}
 			}

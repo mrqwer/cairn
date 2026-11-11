@@ -2,6 +2,7 @@ package repair
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/mrqwer/cairn/internal/detect"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/fsx"
+	"github.com/mrqwer/cairn/internal/host/sleep"
 	"github.com/mrqwer/cairn/internal/inventory"
 	"github.com/mrqwer/cairn/internal/plan"
 )
@@ -40,14 +42,8 @@ func fixture(t *testing.T) (fsx.Root, detect.System, *execx.FakeRunner) {
 	fr := &execx.FakeRunner{Responses: map[string]execx.Response{
 		"blkid -s UUID -o value /dev/nvme0n1p2": {Out: []byte("x\n")},
 	}}
-	oldDev, oldRun := deviceOf, runner
-	t.Cleanup(func() { deviceOf, runner = oldDev, oldRun })
-	deviceOf = func(p string) (string, error) {
-		if p != swapPath {
-			t.Errorf("deviceOf(%q)", p)
-		}
-		return "259:2", nil
-	}
+	oldRun := runner
+	t.Cleanup(func() { runner, testDev = oldRun, "259:2" })
 	runner = fr
 	sys := detect.System{
 		BootLoader:    "systemd-boot",
@@ -60,8 +56,31 @@ func fixture(t *testing.T) (fsx.Root, detect.System, *execx.FakeRunner) {
 	return root, sys, fr
 }
 
-func offsetFn(v uint64) func(string) (uint64, error) {
-	return func(string) (uint64, error) { return v, nil }
+// testDev is the device the test probes report for the swap file.
+var testDev = "259:2"
+
+func offsetFn(v uint64) sleep.Probes {
+	return sleep.Probes{
+		Offset: func(string) (uint64, error) { return v, nil },
+		DevOf: func(p string) (string, error) {
+			if p != swapPath {
+				return "", errors.New("unexpected path " + p)
+			}
+			return testDev, nil
+		},
+		RdevOf: func(p string) (string, error) {
+			if p == "/dev/nvme0n1p3" {
+				return "259:3", nil
+			}
+			return "", errors.New("not a device")
+		},
+		FSType: func(p string) (int64, error) {
+			if strings.HasPrefix(p, "/btrfs/") {
+				return sleep.BtrfsMagic, nil
+			}
+			return 0xEF53, nil
+		},
+	}
 }
 
 // apply resolves and applies p as root against root, like apply-root does.
@@ -180,7 +199,7 @@ func TestRepairReportsWithoutActions(t *testing.T) {
 func TestRepairNoDeviceIsReported(t *testing.T) {
 	root, sys, _ := fixture(t)
 	put(t, root, entry, "linux /vmlinuz-linux\noptions rw resume_offset=1\n")
-	deviceOf = func(string) (string, error) { return "0:45", nil } // btrfs: no block node
+	testDev = "0:45" // no block node
 	p := Plan(root, sys, config.Sleep{}, offsetFn(9))
 	if len(p.Actions) != 0 || !strings.Contains(strings.Join(p.Notes, "\n"), "0:45") {
 		t.Fatalf("actions %+v notes %q", p.Actions, p.Notes)
@@ -217,5 +236,65 @@ func TestRepairLeavesCorrectEntryAlone(t *testing.T) {
 	put(t, root, entry, "linux /vmlinuz-linux\noptions  rw   resume=UUID=x\tresume_offset=7  \n")
 	if p := Plan(root, sys, config.Sleep{}, offsetFn(7)); len(p.Actions) != 0 {
 		t.Fatalf("rewrote an entry that already has the right values: %+v", p.Actions)
+	}
+}
+
+func TestRepairPartitionSwap(t *testing.T) {
+	root, sys, fr := fixture(t)
+	put(t, root, "/sys/dev/block/259:3/uevent", "MAJOR=259\nMINOR=3\nDEVNAME=nvme0n1p3\nDEVTYPE=partition\n")
+	fr.Responses["blkid -s UUID -o value /dev/nvme0n1p3"] = execx.Response{Out: []byte("part\n")}
+	sys.Swaps = []detect.Swap{{Path: "/dev/zram0", Type: "partition", Priority: -100}, {Path: "/dev/nvme0n1p3", Type: "partition", Priority: -2}}
+	put(t, root, entry, "linux /vmlinuz-linux\noptions rw resume_offset=61112320\n")
+	p := Plan(root, sys, config.Sleep{}, offsetFn(5))
+	if len(p.Actions) != 1 || string(p.Actions[0].Content) != "linux /vmlinuz-linux\noptions rw resume_offset=0 resume=UUID=part\n" {
+		t.Fatalf("actions %+v notes %q", p.Actions, p.Notes)
+	}
+}
+
+func TestRepairBtrfsSwapNote(t *testing.T) {
+	root, sys, _ := fixture(t)
+	sys.Swaps = []detect.Swap{{Path: "/btrfs/swapfile", Type: "file"}}
+	put(t, root, entry, "linux /vmlinuz-linux\noptions rw\n")
+	p := Plan(root, sys, config.Sleep{}, offsetFn(5))
+	notes := strings.Join(p.Notes, "\n")
+	if len(p.Actions) != 0 || !strings.Contains(notes, "btrfs swap files are not supported yet") ||
+		!strings.Contains(notes, "use a swap partition or a swap file on ext4/xfs") {
+		t.Fatalf("actions %+v notes %q", p.Actions, notes)
+	}
+}
+
+func TestRepairNoEntryForKernelNote(t *testing.T) {
+	root, sys, _ := fixture(t)
+	put(t, root, "/boot/loader/entries/other.conf", "linux /vmlinuz-linux-lts\noptions rw\n")
+	p := Plan(root, sys, config.Sleep{}, offsetFn(42))
+	want := "no boot entry for kernel " + kernel + ": set resume=UUID=x resume_offset=42 in /etc/kernel/cmdline and rebuild the UKI"
+	if len(p.Actions) != 0 || !strings.Contains(strings.Join(p.Notes, "\n"), want) {
+		t.Fatalf("actions %+v notes %q", p.Actions, p.Notes)
+	}
+	if HasBootEntry(root, sys) {
+		t.Fatal("HasBootEntry without a matching entry")
+	}
+	put(t, root, entry, "linux /vmlinuz-linux\noptions rw\n")
+	if !HasBootEntry(root, sys) {
+		t.Fatal("HasBootEntry with a matching entry")
+	}
+}
+
+func TestRepairRemovesOnlyUnitsNamedByConflicts(t *testing.T) {
+	root, sys, _ := fixture(t)
+	sys.BootLoader = "grub"
+	put(t, root, hibD+"/hook.conf", "[Unit]\nOnFailure=my-fallback.service cairn-sleep-fallback.service\n")
+	for _, u := range []string{"my-fallback.service", "sleep-fallback.service", "cairn-sleep-fallback.service"} {
+		put(t, root, "/etc/systemd/system/"+u, "[Service]\n")
+	}
+	p := Plan(root, sys, config.Sleep{}, offsetFn(1))
+	var removed []string
+	for _, a := range p.Actions {
+		if a.Kind == plan.RemoveFile {
+			removed = append(removed, a.Path)
+		}
+	}
+	if strings.Join(removed, " ") != hibD+"/hook.conf /etc/systemd/system/my-fallback.service" {
+		t.Fatalf("removed %q", removed)
 	}
 }

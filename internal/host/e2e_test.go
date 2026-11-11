@@ -14,6 +14,7 @@ import (
 	"github.com/mrqwer/cairn/internal/detect"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/fsx"
+	"github.com/mrqwer/cairn/internal/host/sleep"
 	"github.com/mrqwer/cairn/internal/inventory"
 	"github.com/mrqwer/cairn/internal/plan"
 )
@@ -82,7 +83,7 @@ func newRoundTrip(t *testing.T) *roundTrip {
 	}
 	old := plan.RootBuilder
 	t.Cleanup(func() { plan.RootBuilder = old })
-	plan.RootBuilder = Builder{Root: rt.sysRoot, Offset: func(string) (uint64, error) { return 0, errors.New("unused") }}.Build
+	plan.RootBuilder = Builder{Root: rt.sysRoot, Probes: sleep.Probes{Offset: func(string) (uint64, error) { return 0, errors.New("unused") }}}.Build
 	return rt
 }
 
@@ -263,7 +264,9 @@ func TestApplyRootRepairPrintsBuilderNotes(t *testing.T) {
 	if err := os.WriteFile(swap, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	b := Builder{Root: root, Offset: func(string) (uint64, error) { return 7, nil }}
+	probes := sleep.DefaultProbes()
+	probes.Offset = func(string) (uint64, error) { return 7, nil }
+	b := Builder{Root: root, Probes: probes}
 	oldB, oldN := plan.RootBuilder, plan.RootNotes
 	t.Cleanup(func() { plan.RootBuilder, plan.RootNotes = oldB, oldN })
 	plan.RootBuilder, plan.RootNotes = b.Build, b.Notes

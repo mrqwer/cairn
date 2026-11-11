@@ -12,11 +12,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mrqwer/cairn/internal/config"
 	"github.com/mrqwer/cairn/internal/detect"
+	"github.com/mrqwer/cairn/internal/doctor"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/host"
@@ -41,10 +43,10 @@ var hostDesired = func(_ context.Context, cfg *config.Config, sys detect.System,
 // the same policies.
 func init() {
 	plan.RootBuilder = func(mode string, h config.Host, sys detect.System, self string) ([]plan.Action, error) {
-		return host.Builder{Root: sysRoot, Offset: offsetOf}.Build(mode, h, sys, self)
+		return host.Builder{Root: sysRoot, Probes: sleepProbes(sys)}.Build(mode, h, sys, self)
 	}
 	plan.RootNotes = func(mode string, h config.Host, sys detect.System) []string {
-		return host.Builder{Root: sysRoot, Offset: offsetOf}.Notes(mode, h, sys)
+		return host.Builder{Root: sysRoot, Probes: sleepProbes(sys)}.Notes(mode, h, sys)
 	}
 }
 
@@ -69,6 +71,7 @@ type hostState struct {
 	env  plan.Env
 	user plan.Plan // user-level actions, resolved
 	root plan.Plan // preview of root's plan
+	sys  detect.System
 	// stale: the root-side host config snapshot differs from cfg.Host.
 	stale bool
 }
@@ -175,7 +178,7 @@ func resolveHost(ctx context.Context, cfg *config.Config, sys detect.System, mod
 		return nil, err
 	}
 	return &hostState{
-		cfg: cfg, self: self, env: env, user: user, root: root,
+		cfg: cfg, self: self, env: env, user: user, root: root, sys: sys,
 		stale: mode == plan.ModeApply && plan.SnapshotStale(sysRoot, cfg.Host),
 	}, nil
 }
@@ -205,6 +208,26 @@ func (hs *hostState) renderRootPreview(w io.Writer) {
 	}
 	if hs.stale {
 		_, _ = fmt.Fprintf(w, "needs root: update host config snapshot %s\n", plan.HostConfigPath)
+	}
+}
+
+// blockerTimeout bounds the sleep checks printed by plan and apply.
+var blockerTimeout = 10 * time.Second
+
+// renderSleepBlockers runs the user-side sleep checks (best effort) and
+// prints each critical one as a reason hibernation will be refused at sleep
+// entry. It never fails the command.
+func (hs *hostState) renderSleepBlockers(ctx context.Context, w io.Writer) {
+	rs, err := bounded(ctx, blockerTimeout, func(ctx context.Context) ([]doctor.Result, error) {
+		return doctor.Run(ctx, userSleepChecks(hs.cfg.Host.Sleep, hs.sys)), nil
+	})
+	if err != nil {
+		return
+	}
+	for _, r := range rs {
+		if r.Status == doctor.Crit {
+			_, _ = fmt.Fprintf(w, "hibernation will be refused at sleep entry until: %s — %s\n", r.Title, r.Fix)
+		}
 	}
 }
 
@@ -256,6 +279,7 @@ func newHostPlanCmd() *cobra.Command {
 			}
 			hs.renderUser(cmd.OutOrStdout())
 			hs.renderRootPreview(cmd.OutOrStdout())
+			hs.renderSleepBlockers(ctxOf(cmd), cmd.OutOrStdout())
 			return nil
 		},
 	}
@@ -273,6 +297,9 @@ func runHostOp(cmd *cobra.Command, mode string, yes, force bool) error {
 		return err
 	}
 	hs.renderUser(cmd.OutOrStdout())
+	if mode == plan.ModeApply {
+		hs.renderSleepBlockers(ctx, cmd.OutOrStdout())
+	}
 	userNeeded := len(hs.user.Pending()) > 0
 	rootNeeded := hs.rootStep()
 	if !userNeeded && !rootNeeded {

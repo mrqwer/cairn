@@ -165,3 +165,17 @@ func TestHostApplyRootFailureLeavesUserSideAlone(t *testing.T) {
 		t.Fatal("user file written although the root step failed")
 	}
 }
+
+func TestHostPlanAndApplyPrintSleepBlockers(t *testing.T) {
+	_, _ = wireEnv(t)
+	hostDesired = func(context.Context, *config.Config, detect.System, string) ([]plan.Action, error) { return nil, nil }
+	withRootBuilder(t, plan.Action{Kind: plan.RunCommand, Cmd: []string{"systemctl", "daemon-reload"}, NeedsRoot: true})
+	want := "hibernation will be refused at sleep entry until: Hibernation swap is active — " +
+		"create and enable a swap file or partition at least as large as RAM, then set host.sleep.hibernation_swap.path"
+	for _, args := range [][]string{{"host", "plan"}, {"host", "apply", "--yes"}} {
+		out, err := runHost(t, "", args...)
+		if err != nil || !strings.Contains(out, want) || !strings.Contains(out, "until: Running kernel matches installed modules — reboot") {
+			t.Fatalf("%v: err=%v\n%s", args, err, out)
+		}
+	}
+}

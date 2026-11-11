@@ -5,9 +5,11 @@ package repair
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,12 +27,11 @@ import (
 const Policy = "repair"
 
 const (
-	unitDir      = "/etc/systemd/system"
-	ourDropIn    = "50-cairn.conf"
-	fallbackUnit = unitDir + "/sleep-fallback.service"
-	bootDir      = "/boot"
-	entriesDir   = bootDir + "/loader/entries"
-	loaderConf   = bootDir + "/loader/loader.conf"
+	unitDir    = "/etc/systemd/system"
+	ourDropIn  = "50-cairn.conf"
+	bootDir    = "/boot"
+	entriesDir = bootDir + "/loader/entries"
+	loaderConf = bootDir + "/loader/loader.conf"
 )
 
 var dropInDirs = []string{
@@ -38,17 +39,18 @@ var dropInDirs = []string{
 	unitDir + "/systemd-suspend-then-hibernate.service.d",
 }
 
-// Seams for tests: the block device of a file and the command runner (blkid).
-var (
-	deviceOf              = sleep.DeviceOf
-	runner   execx.Runner = execx.OSRunner{}
-)
+// runner runs blkid; tests replace it.
+var runner execx.Runner = execx.OSRunner{}
+
+// unitNameRe is the shape of a unit name repair may remove.
+var unitNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9@_.\-]*\.service$`)
 
 // Plan returns the repair actions for the system under root plus report-only
-// notes. Conflicting OnFailure= hooks and sleep-fallback.service are removed
-// (apply backs them up first); on systemd-boot, entries for the running
-// kernel get resume= and resume_offset= for the hibernation swap file.
-func Plan(root fsx.Root, sys detect.System, cfg config.Sleep, offset sleep.OffsetFunc) plan.Plan {
+// notes. Foreign hibernate drop-ins with OnFailure= and the top-level units
+// they name are removed (apply backs them up first); on systemd-boot, entries
+// for the running kernel get resume= and resume_offset= for the hibernation
+// swap.
+func Plan(root fsx.Root, sys detect.System, cfg config.Sleep, probes sleep.Probes) plan.Plan {
 	p := plan.Plan{Mode: plan.ModeRepair}
 	p.Actions = conflicts(root)
 	if len(p.Actions) > 0 {
@@ -57,41 +59,55 @@ func Plan(root fsx.Root, sys detect.System, cfg config.Sleep, offset sleep.Offse
 		})
 	}
 	if sys.BootLoader == "systemd-boot" {
-		acts, notes := bootEntries(root, sys, cfg, offset)
+		acts, notes := bootEntries(root, sys, cfg, probes)
 		p.Actions = append(acts, p.Actions...)
 		p.Notes = notes
 	} else {
-		p.Notes = otherLoader(root, sys, cfg, offset)
+		p.Notes = otherLoader(root, sys, cfg, probes)
 	}
 	p.Notes = append(p.Notes, Report(root, sys)...)
 	return p
 }
 
 // conflicts finds foreign hibernate drop-ins that set OnFailure= and the
-// generic sleep-fallback.service.
+// top-level unit files they name (never cairn's own units).
 func conflicts(root fsx.Root) []plan.Action {
-	var out []plan.Action
+	var out, units []plan.Action
+	seen := map[string]bool{}
 	for _, dir := range dropInDirs {
 		for _, name := range regularFiles(root, dir, "") {
 			if name == ourDropIn {
 				continue
 			}
 			p := dir + "/" + name
-			if data, err := root.ReadFile(p); err == nil && setsOnFailure(string(data)) {
-				out = append(out, plan.Action{
-					Kind: plan.RemoveFile, Path: p, NeedsRoot: true, Policy: Policy,
-					Reason: "OnFailure= hook conflicts with cairn's fallback",
-				})
+			data, err := root.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			named, ok := onFailure(string(data))
+			if !ok {
+				continue
+			}
+			out = append(out, plan.Action{
+				Kind: plan.RemoveFile, Path: p, NeedsRoot: true, Policy: Policy,
+				Reason: "OnFailure= hook conflicts with cairn's fallback",
+			})
+			for _, u := range named {
+				up := unitDir + "/" + u
+				if seen[up] || strings.HasPrefix(u, "cairn-") || !unitNameRe.MatchString(u) {
+					continue
+				}
+				if st, err := os.Lstat(root.Path(up)); err == nil && st.Mode().IsRegular() {
+					seen[up] = true
+					units = append(units, plan.Action{
+						Kind: plan.RemoveFile, Path: up, NeedsRoot: true, Policy: Policy,
+						Reason: "OnFailure= target of " + p + "; replaced by cairn-sleep-fallback.service",
+					})
+				}
 			}
 		}
 	}
-	if st, err := os.Lstat(root.Path(fallbackUnit)); err == nil && st.Mode().IsRegular() {
-		out = append(out, plan.Action{
-			Kind: plan.RemoveFile, Path: fallbackUnit, NeedsRoot: true, Policy: Policy,
-			Reason: "replaced by cairn-sleep-fallback.service",
-		})
-	}
-	return out
+	return append(out, units...)
 }
 
 // regularFiles lists the regular, non-hidden files in dir with suffix, sorted.
@@ -111,13 +127,15 @@ func regularFiles(root fsx.Root, dir, suffix string) []string {
 	return out
 }
 
-func setsOnFailure(content string) bool {
+// onFailure reports whether content sets OnFailure= and the units it names.
+func onFailure(content string) (units []string, ok bool) {
 	for _, l := range strings.Split(content, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(l), "OnFailure=") {
-			return true
+		if v, found := strings.CutPrefix(strings.TrimSpace(l), "OnFailure="); found {
+			ok = true
+			units = append(units, strings.Fields(v)...)
 		}
 	}
-	return false
+	return units, ok
 }
 
 // entryLine is one "key value" line of a systemd-boot entry.
@@ -130,16 +148,20 @@ func entryLine(l string) (key, value string) {
 }
 
 // resumeTarget returns the resume= and resume_offset= values for the
-// hibernation swap file.
-func resumeTarget(root fsx.Root, sys detect.System, cfg config.Sleep, offset sleep.OffsetFunc) (uuid string, off uint64, err error) {
+// hibernation swap (file or partition).
+func resumeTarget(root fsx.Root, sys detect.System, cfg config.Sleep, probes sleep.Probes) (uuid string, off uint64, err error) {
 	swap, ok := sleep.SelectSwap(cfg, sys)
 	if !ok {
-		return "", 0, fmt.Errorf("no active hibernation swap file")
+		return "", 0, fmt.Errorf("no active hibernation swap")
 	}
-	if off, err = offset(swap.Path); err != nil {
-		return "", 0, fmt.Errorf("resume offset of %s: %w", swap.Path, err)
+	dev, off, err := probes.Target(swap)
+	if errors.Is(err, sleep.ErrBtrfsSwap) {
+		return "", 0, fmt.Errorf("%s: %w; use a swap partition or a swap file on ext4/xfs", swap.Path, err)
 	}
-	if uuid, err = swapUUID(root, swap.Path); err != nil {
+	if err != nil {
+		return "", 0, fmt.Errorf("resume target of %s: %w", swap.Path, err)
+	}
+	if uuid, err = swapUUID(root, swap.Path, dev); err != nil {
 		return "", 0, err
 	}
 	return uuid, off, nil
@@ -147,14 +169,14 @@ func resumeTarget(root fsx.Root, sys detect.System, cfg config.Sleep, offset sle
 
 // otherLoader explains what to set by hand on boot loaders repair does not
 // edit, with the values when they are known.
-func otherLoader(root fsx.Root, sys detect.System, cfg config.Sleep, offset sleep.OffsetFunc) []string {
+func otherLoader(root fsx.Root, sys detect.System, cfg config.Sleep, probes sleep.Probes) []string {
 	name := sys.BootLoader
 	if name == "" {
 		name = "unknown"
 	}
 	uuid, off := "<uuid>", "<offset>"
 	var notes []string
-	if u, o, err := resumeTarget(root, sys, cfg, offset); err != nil {
+	if u, o, err := resumeTarget(root, sys, cfg, probes); err != nil {
 		notes = append(notes, err.Error())
 	} else {
 		uuid, off = u, strconv.FormatUint(o, 10)
@@ -162,9 +184,33 @@ func otherLoader(root fsx.Root, sys detect.System, cfg config.Sleep, offset slee
 	return append(notes, fmt.Sprintf("boot loader %s: set resume=UUID=%s resume_offset=%s on the kernel command line manually", name, uuid, off))
 }
 
+// HasBootEntry reports whether repair can edit the resume settings: the boot
+// loader is systemd-boot and a Type #1 entry boots the running kernel.
+func HasBootEntry(root fsx.Root, sys detect.System) bool {
+	if sys.BootLoader != "systemd-boot" {
+		return false
+	}
+	match, err := kernelMatcher(root, sys.KernelRunning)
+	if err != nil {
+		return false
+	}
+	for _, name := range regularFiles(root, entriesDir, ".conf") {
+		data, err := root.ReadFile(entriesDir + "/" + name)
+		if err != nil {
+			continue
+		}
+		for _, l := range strings.Split(string(data), "\n") {
+			if k, v := entryLine(l); k == "linux" && match(v) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // bootEntries rewrites the options of the entries for the running kernel.
-func bootEntries(root fsx.Root, sys detect.System, cfg config.Sleep, offset sleep.OffsetFunc) ([]plan.Action, []string) {
-	uuid, off, err := resumeTarget(root, sys, cfg, offset)
+func bootEntries(root fsx.Root, sys detect.System, cfg config.Sleep, probes sleep.Probes) ([]plan.Action, []string) {
+	uuid, off, err := resumeTarget(root, sys, cfg, probes)
 	if err != nil {
 		return nil, []string{err.Error() + "; boot entries not updated"}
 	}
@@ -175,6 +221,7 @@ func bootEntries(root fsx.Root, sys detect.System, cfg config.Sleep, offset slee
 	want := map[string]string{"resume": "UUID=" + uuid, "resume_offset": strconv.FormatUint(off, 10)}
 	var out []plan.Action
 	var notes []string
+	matched := false
 	for _, name := range regularFiles(root, entriesDir, ".conf") {
 		p := entriesDir + "/" + name
 		st, err := root.Stat(p)
@@ -186,6 +233,7 @@ func bootEntries(root fsx.Root, sys detect.System, cfg config.Sleep, offset slee
 			continue
 		}
 		content, ok, err := rewriteEntry(string(data), match, want)
+		matched = matched || ok
 		if err != nil {
 			notes = append(notes, fmt.Sprintf("%s: %v; not changed, fix it by hand", p, err))
 			continue
@@ -199,18 +247,19 @@ func bootEntries(root fsx.Root, sys detect.System, cfg config.Sleep, offset slee
 			Reason: "resume=" + want["resume"] + " resume_offset=" + want["resume_offset"],
 		})
 	}
+	if !matched {
+		notes = append(notes, fmt.Sprintf("no boot entry for kernel %s: set resume=%s resume_offset=%s in "+
+			"/etc/kernel/cmdline and rebuild the UKI", sys.KernelRunning, want["resume"], want["resume_offset"]))
+	}
 	return out, notes
 }
 
-// swapUUID returns the filesystem UUID of the block device holding file.
-func swapUUID(root fsx.Root, file string) (string, error) {
-	majmin, err := deviceOf(file)
-	if err != nil {
-		return "", err
-	}
+// swapUUID returns the UUID blkid reports for the block device majmin, the
+// device holding the hibernation swap.
+func swapUUID(root fsx.Root, swap, majmin string) (string, error) {
 	ue, err := root.ReadFile("/sys/dev/block/" + majmin + "/uevent")
 	if err != nil {
-		return "", fmt.Errorf("no block device node for %s (device %s)", file, majmin)
+		return "", fmt.Errorf("no block device node for %s (device %s)", swap, majmin)
 	}
 	var name string
 	for _, l := range strings.Split(string(ue), "\n") {
@@ -219,7 +268,7 @@ func swapUUID(root fsx.Root, file string) (string, error) {
 		}
 	}
 	if name == "" || strings.Contains(name, "..") {
-		return "", fmt.Errorf("no device name for %s (device %s)", file, majmin)
+		return "", fmt.Errorf("no device name for %s (device %s)", swap, majmin)
 	}
 	dev := "/dev/" + name
 	b, err := runner.Run(context.Background(), "blkid", "-s", "UUID", "-o", "value", dev)
