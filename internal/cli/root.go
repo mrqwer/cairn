@@ -24,5 +24,6 @@ func NewRootCmd() *cobra.Command {
 			cmd.Printf("cairn %s\n", Version)
 		},
 	})
+	root.AddCommand(newConfigCmd())
 	return root
 }
