@@ -1,5 +1,5 @@
 .superpowers/
 node_modules/
 dist/
-bin/
+/bin/
 *.log
