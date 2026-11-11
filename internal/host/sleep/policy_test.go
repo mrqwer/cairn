@@ -123,14 +123,31 @@ func TestNoGSettingOutsideGnome(t *testing.T) {
 			t.Error("gsetting generated outside gnome")
 		}
 	}
-	var got *plan.Action
-	for _, a := range sleep.Actions(defaults(t), fixture(), self, userDir) {
-		if a.Kind == plan.SetGSetting {
-			got = &a
+	got := gsetting(sleep.Actions(defaults(t), fixture(), self, userDir), "sleep-inactive-battery-type")
+	if got == nil || got.Value != "'hibernate'" || got.NeedsRoot {
+		t.Errorf("gsetting = %+v", got)
+	}
+}
+
+func gsetting(acts []plan.Action, key string) *plan.Action {
+	for i := range acts {
+		if acts[i].Kind == plan.SetGSetting && acts[i].Key == key {
+			return &acts[i]
 		}
 	}
-	if got == nil || got.Value != "'hibernate'" || got.Key != "sleep-inactive-battery-type" || got.NeedsRoot {
-		t.Errorf("gsetting = %+v", got)
+	return nil
+}
+
+func TestIdleACFollowsLidAC(t *testing.T) {
+	for lidAC, want := range map[string]string{
+		"suspend-then-hibernate": "'suspend'", "suspend": "'suspend'", "hibernate": "'hibernate'", "ignore": "'nothing'",
+	} {
+		cfg := defaults(t)
+		cfg.LidAC = lidAC
+		got := gsetting(sleep.Actions(cfg, fixture(), self, userDir), "sleep-inactive-ac-type")
+		if got == nil || got.Value != want || got.Schema != "org.gnome.settings-daemon.plugins.power" || got.NeedsRoot {
+			t.Errorf("%s: %+v", lidAC, got)
+		}
 	}
 }
 

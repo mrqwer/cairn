@@ -263,3 +263,56 @@ func TestVRAMBytesTimesOut(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+func TestVendorUnitActions(t *testing.T) {
+	root := fsx.Root{Dir: t.TempDir()}
+	for _, u := range []string{"nvidia-suspend.service", "nvidia-resume.service"} {
+		if err := root.WriteAtomic("/usr/lib/systemd/system/"+u, []byte("[Unit]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	present := PresentUnits(root)
+	if strings.Join(present, " ") != "nvidia-suspend.service nvidia-resume.service" {
+		t.Fatalf("present %q", present)
+	}
+	acts := VendorUnitActions(cfg(), nv(), present)
+	if len(acts) != 2 {
+		t.Fatalf("acts %+v", acts)
+	}
+	for _, a := range acts {
+		if a.Kind != plan.EnableUnit || !a.NeedsRoot || a.UserUnit || a.Policy != Policy || a.Class != inventory.UnitEnable {
+			t.Errorf("action %+v", a)
+		}
+		if err := plan.CheckRootAction(a, nil, plan.ModeApply); err != nil {
+			t.Error(err)
+		}
+	}
+	c := cfg()
+	c.Manage = false
+	if len(VendorUnitActions(c, nv(), present)) != 0 || len(VendorUnitActions(cfg(), detect.System{}, present)) != 0 {
+		t.Fatal("units enabled without a managed NVIDIA GPU")
+	}
+}
+
+func TestUnitsCheck(t *testing.T) {
+	root := fsx.Root{Dir: t.TempDir()}
+	state := map[string]string{"nvidia-suspend.service": "enabled", "nvidia-hibernate.service": "disabled"}
+	isEnabled := func(u string) string { return state[u] }
+	if r := UnitsCheck(root, isEnabled).Run(context.Background()); r.Status != doctor.OK {
+		t.Fatalf("none installed: %+v", r)
+	}
+	for u := range state {
+		if err := root.WriteAtomic("/usr/lib/systemd/system/"+u, []byte("[Unit]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := UnitsCheck(root, isEnabled).Run(context.Background())
+	if r.Status != doctor.Warn || r.ID != IDUnits || !strings.Contains(r.Evidence, "nvidia-hibernate.service") ||
+		strings.Contains(r.Evidence, "nvidia-suspend.service") || r.Fix != "cairn host apply" {
+		t.Fatalf("disabled: %+v", r)
+	}
+	state["nvidia-hibernate.service"] = "enabled"
+	if r := UnitsCheck(root, isEnabled).Run(context.Background()); r.Status != doctor.OK {
+		t.Fatalf("enabled: %+v", r)
+	}
+}

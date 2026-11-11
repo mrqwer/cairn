@@ -231,6 +231,9 @@ func resolveOne(a Action, root fsx.Root, inv *inventory.Inventory) State {
 	case RemoveFile:
 		data, err := root.ReadFile(a.Path)
 		if errors.Is(err, fs.ErrNotExist) {
+			if managed && e.Class == inventory.Repaired {
+				return Unchanged // removed by an earlier repair
+			}
 			if managed {
 				return Update // drop the stale record, restore a backup if any
 			}
@@ -239,8 +242,8 @@ func resolveOne(a Action, root fsx.Root, inv *inventory.Inventory) State {
 		if err != nil {
 			return Update
 		}
-		if !managed {
-			return Foreign
+		if !managed || e.Class == inventory.Repaired {
+			return Foreign // a removed conflict came back: back it up again
 		}
 		if fsx.SHA256(data) != e.SHA256 {
 			return ModifiedByUser

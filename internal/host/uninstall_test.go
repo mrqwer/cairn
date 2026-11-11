@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mrqwer/cairn/internal/config"
+	"github.com/mrqwer/cairn/internal/detect"
+	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/inventory"
 	"github.com/mrqwer/cairn/internal/plan"
 )
@@ -97,5 +100,25 @@ Exec = /usr/local/bin/cairn host record-sleep reboot-required
 	}
 	if err := plan.CheckRootAction(a, nil, plan.ModeApply); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUninstallNotesRepairs(t *testing.T) {
+	root := fsx.Root{Dir: t.TempDir()}
+	inv := &inventory.Inventory{}
+	inv.Upsert(inventory.Entry{Path: "/boot/loader/entries/a.conf", Class: inventory.Repaired, Backup: plan.BackupDir + "/%boot%loader%entries%a.conf"})
+	inv.Upsert(inventory.Entry{Path: "/etc/systemd/sleep.conf.d/50-cairn.conf", Class: inventory.DropIn})
+	if err := inv.Save(root, plan.SysInventoryPath); err != nil {
+		t.Fatal(err)
+	}
+	notes := Builder{Root: root}.Notes(plan.ModeUninstall, config.Host{}, detect.System{})
+	want := "repair not reverted: /boot/loader/entries/a.conf (backup: " + plan.BackupDir + "/%boot%loader%entries%a.conf)"
+	if len(notes) != 1 || notes[0] != want {
+		t.Fatalf("notes %q", notes)
+	}
+	for _, a := range UninstallPlan(inv, nil).Actions {
+		if a.Path == "/boot/loader/entries/a.conf" {
+			t.Fatal("uninstall touches a repaired file")
+		}
 	}
 }

@@ -27,6 +27,7 @@ const (
 	IDSwapFree    = "sleep.swap.free"
 	IDKernel      = "sleep.kernel.match"
 	IDInitramfs   = "sleep.initramfs.resume"
+	IDSupported   = "sleep.hibernate.supported"
 )
 
 // RecordPath is where sleep-check --record stores its results.
@@ -172,6 +173,7 @@ const (
 	titleSwapFree    = "Swap has room for the hibernation image"
 	titleKernel      = "Running kernel matches installed modules"
 	titleInitramfs   = "Initramfs has the resume hook"
+	titleSupported   = "Kernel allows hibernation"
 
 	fixNoSwap     = "create and enable a swap file or partition at least as large as RAM, then set host.sleep.hibernation_swap.path"
 	fixInitramfsA = `add the "resume" hook to HOOKS in /etc/mkinitcpio.conf (after "block") and run: sudo mkinitcpio -P`
@@ -185,6 +187,7 @@ var Titles = map[string]string{
 	IDSwapFree:    titleSwapFree,
 	IDKernel:      titleKernel,
 	IDInitramfs:   titleInitramfs,
+	IDSupported:   titleSupported,
 }
 
 // Checks returns the sleep pre-flight checks.
@@ -196,6 +199,19 @@ func Checks(cfg config.Sleep, sys detect.System, probes Probes) []doctor.Check {
 	}
 	missing := doctor.Result{Status: doctor.Crit, Evidence: noSwap, Fix: fixNoSwap}
 	return []doctor.Check{
+		fnCheck{IDSupported, titleSupported, func() doctor.Result {
+			switch {
+			case sys.HibernateSupported == detect.Yes:
+				return doctor.Result{Status: doctor.OK}
+			case sys.HibernateSupported == detect.No && (sys.Lockdown == "integrity" || sys.Lockdown == "confidentiality"):
+				return doctor.Result{Status: doctor.Crit, Evidence: "hibernation is disabled by kernel lockdown (Secure Boot)",
+					Fix: "disable Secure Boot (or kernel lockdown) in the firmware setup; until then the lid only suspends"}
+			case sys.HibernateSupported == detect.No:
+				return doctor.Result{Status: doctor.Crit, Evidence: "the kernel does not offer hibernation (no \"disk\" in /sys/power/state)",
+					Fix: "use a kernel built with hibernation support (CONFIG_HIBERNATION)"}
+			}
+			return doctor.Result{Status: doctor.Unknown, Evidence: "could not read /sys/power/state"}
+		}},
 		fnCheck{IDSwapPresent, titleSwapPresent, func() doctor.Result {
 			if !found {
 				return missing

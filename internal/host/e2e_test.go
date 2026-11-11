@@ -48,11 +48,14 @@ func newRoundTrip(t *testing.T) *roundTrip {
 		sysRoot: fsx.Root{Dir: t.TempDir()},
 		usrRoot: fsx.Root{Dir: t.TempDir()},
 		runner: &execx.FakeRunner{Responses: map[string]execx.Response{
-			"systemctl daemon-reload":                                        {},
-			"systemctl --user daemon-reload":                                 {},
-			"gsettings get " + e2eGsSchema + " " + e2eGsKey:                  {Out: []byte("'suspend'\n")},
-			"gsettings set " + e2eGsSchema + " " + e2eGsKey + " 'hibernate'": {},
-			"gsettings set " + e2eGsSchema + " " + e2eGsKey + " 'suspend'":   {},
+			"systemctl daemon-reload":                                            {},
+			"systemctl --user daemon-reload":                                     {},
+			"gsettings get " + e2eGsSchema + " " + e2eGsKey:                      {Out: []byte("'suspend'\n")},
+			"gsettings set " + e2eGsSchema + " " + e2eGsKey + " 'hibernate'":     {},
+			"gsettings set " + e2eGsSchema + " " + e2eGsKey + " 'suspend'":       {},
+			"gsettings get " + e2eGsSchema + " sleep-inactive-ac-type":           {Out: []byte("'nothing'\n")},
+			"gsettings set " + e2eGsSchema + " sleep-inactive-ac-type 'suspend'": {},
+			"gsettings set " + e2eGsSchema + " sleep-inactive-ac-type 'nothing'": {},
 		}},
 		sys: detect.System{
 			PkgManager: "pacman", GPU: "nvidia", Desktop: "gnome", BootLoader: "systemd-boot",
@@ -70,9 +73,13 @@ func newRoundTrip(t *testing.T) *roundTrip {
 	}
 	cfg.Host.GPU.Nvidia.TemporaryFilePath = e2eNvTmp
 	rt.cfg = cfg
+	rt.runner.Responses["systemctl is-enabled nvidia-suspend.service"] = execx.Response{Out: []byte("disabled\n"), Err: errExit1}
+	rt.runner.Responses["systemctl enable nvidia-suspend.service"] = execx.Response{}
+	rt.runner.Responses["systemctl disable nvidia-suspend.service"] = execx.Response{}
 	for p, c := range map[string]string{
-		"/usr/lib/modprobe.d/nvidia-utils.conf": vendorConf,
-		"/etc/modprobe.d/nvidia-utils.conf":     foreignMask,
+		"/usr/lib/modprobe.d/nvidia-utils.conf":          vendorConf,
+		"/etc/modprobe.d/nvidia-utils.conf":              foreignMask,
+		"/usr/lib/systemd/system/nvidia-suspend.service": "[Unit]\n",
 	} {
 		if err := rt.sysRoot.WriteAtomic(p, []byte(c), 0o644); err != nil {
 			t.Fatal(err)
@@ -179,7 +186,7 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatal("nvidia dir or config snapshot missing")
 	}
 	userEnv, rootEnv := rt.envs()
-	for _, p := range append(rootFiles, plan.SysStateDir, e2eNvTmp, "/etc/modprobe.d/nvidia-utils.conf") {
+	for _, p := range append(rootFiles, plan.SysStateDir, e2eNvTmp, "/etc/modprobe.d/nvidia-utils.conf", "unit:nvidia-suspend.service") {
 		if _, ok := rootEnv.SysInv.Get(p); !ok {
 			t.Errorf("system inventory lacks %s", p)
 		}
@@ -215,16 +222,19 @@ func TestRoundTrip(t *testing.T) {
 	if b, _ := rt.sysRoot.ReadFile("/etc/modprobe.d/nvidia-utils.conf"); string(b) != foreignMask {
 		t.Fatalf("foreign nvidia-utils.conf not restored: %q", b)
 	}
-	if !slices.ContainsFunc(rt.runner.Calls, func(c []string) bool {
-		return strings.Join(c, " ") == "gsettings set "+e2eGsSchema+" "+e2eGsKey+" 'suspend'"
-	}) {
-		t.Fatalf("gsetting not restored: %q", rt.runner.Calls)
-	}
-	for _, u := range []string{"cairn-host-notify.path", "cairn-host-boot-check.service"} {
+	for _, want := range []string{e2eGsKey + " 'suspend'", "sleep-inactive-ac-type 'nothing'"} {
 		if !slices.ContainsFunc(rt.runner.Calls, func(c []string) bool {
-			return strings.Join(c, " ") == "systemctl --user disable "+u
+			return strings.Join(c, " ") == "gsettings set "+e2eGsSchema+" "+want
 		}) {
-			t.Errorf("%s not disabled", u)
+			t.Fatalf("gsetting %s not restored: %q", want, rt.runner.Calls)
+		}
+	}
+	for _, u := range []string{"--user disable cairn-host-notify.path", "--user disable cairn-host-boot-check.service",
+		"disable nvidia-suspend.service"} {
+		if !slices.ContainsFunc(rt.runner.Calls, func(c []string) bool {
+			return strings.Join(c, " ") == "systemctl "+u
+		}) {
+			t.Errorf("%s not run", u)
 		}
 	}
 

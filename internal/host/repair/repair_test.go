@@ -117,15 +117,26 @@ func TestRepairRemovesConflictingFallback(t *testing.T) {
 	put(t, root, "/etc/systemd/system/sleep-fallback.service", "[Service]\nExecStart=/usr/bin/systemctl suspend\n")
 
 	p := Plan(root, sys, config.Sleep{}, offsetFn(1))
-	apply(t, root, p)
+	inv := apply(t, root, p)
 
 	for _, gone := range []string{conflict, "/etc/systemd/system/sleep-fallback.service"} {
 		if root.Exists(gone) {
 			t.Errorf("%s not removed", gone)
 		}
-		if !root.Exists(plan.BackupDir + "/" + strings.ReplaceAll(gone, "/", "%")) {
+		backup := plan.BackupDir + "/" + strings.ReplaceAll(gone, "/", "%")
+		if !root.Exists(backup) {
 			t.Errorf("%s not backed up", gone)
 		}
+		if e, ok := inv.Get(gone); !ok || e.Class != inventory.Repaired || e.Backup != backup {
+			t.Errorf("%s not recorded as repaired: %+v", gone, e)
+		}
+	}
+	// A conflict that comes back is removed again without --force.
+	put(t, root, conflict, "[Unit]\nOnFailure=other.service\n")
+	p = Plan(root, sys, config.Sleep{}, offsetFn(1))
+	r := plan.Resolve(p.Actions, root, inv)
+	if r.Actions[0].Path != conflict || r.Actions[0].State != plan.Foreign {
+		t.Fatalf("recreated conflict: %+v", r.Actions[0])
 	}
 	if got, _ := root.ReadFile(ours); string(got) != "[Unit]\nOnFailure=cairn-sleep-fallback.service\n" {
 		t.Fatalf("50-cairn.conf touched: %q", got)

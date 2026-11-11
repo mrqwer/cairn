@@ -49,10 +49,11 @@ Exec = ` + self + " host record-sleep reboot-required\n"
 
 // DesiredActions returns the root-level actions of the apply plan: the root
 // part of sleep.Actions, gpu.NvidiaActions (vendorNvidia is the content of
-// the vendor modprobe file) and, on pacman systems, the reboot-required
-// hook; root daemon-reloads come last. User-level actions come from
-// UserActions, since they need the user's unit directory.
-func DesiredActions(cfg *config.Config, sys detect.System, self string, vendorNvidia []byte) []plan.Action {
+// the vendor modprobe file), enabling the present NVIDIA vendor sleep units
+// (nvidiaUnits) and, on pacman systems, the reboot-required hook; root
+// daemon-reloads come last. User-level actions come from UserActions, since
+// they need the user's unit directory.
+func DesiredActions(cfg *config.Config, sys detect.System, self string, vendorNvidia []byte, nvidiaUnits []string) []plan.Action {
 	var out, cmds []plan.Action
 	for _, a := range sleep.Actions(cfg.Host.Sleep, sys, self, "") {
 		switch {
@@ -64,6 +65,7 @@ func DesiredActions(cfg *config.Config, sys detect.System, self string, vendorNv
 		}
 	}
 	out = append(out, gpu.NvidiaActions(cfg.Host.GPU.Nvidia, sys, vendorNvidia)...)
+	out = append(out, gpu.VendorUnitActions(cfg.Host.GPU.Nvidia, sys, nvidiaUnits)...)
 	if sys.PkgManager == "pacman" {
 		out = append(out, PacmanHook(self))
 	}
@@ -103,14 +105,15 @@ func (b Builder) Build(mode string, h config.Host, sys detect.System, self strin
 	switch mode {
 	case plan.ModeApply:
 		var vendor []byte
+		var units []string
 		if sys.GPU == "nvidia" && h.GPU.Nvidia.Manage {
 			v, err := b.Root.ReadFile(gpu.VendorUpstream)
 			if err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return nil, err
 			}
-			vendor = v
+			vendor, units = v, gpu.PresentUnits(b.Root)
 		}
-		return DesiredActions(&config.Config{Host: h}, sys, self, vendor), nil
+		return DesiredActions(&config.Config{Host: h}, sys, self, vendor, units), nil
 	case plan.ModeRepair:
 		if b.Probes.Offset == nil {
 			return nil, errors.New("repair needs a resume offset function")
@@ -135,9 +138,27 @@ func (b Builder) Build(mode string, h config.Host, sys detect.System, self strin
 	return nil, fmt.Errorf("unknown mode %q", mode)
 }
 
-// Notes returns the report-only findings for mode (repair only): why boot
-// entries were not updated, and the problems repair only reports.
+// Notes returns the report-only findings for mode. Repair: why boot entries
+// were not updated, and the problems repair only reports. Uninstall: every
+// repair recorded in the system inventory, which uninstall does not revert.
 func (b Builder) Notes(mode string, h config.Host, sys detect.System) []string {
+	if mode == plan.ModeUninstall {
+		inv, err := inventory.Load(b.Root, plan.SysInventoryPath)
+		if err != nil {
+			return []string{err.Error()}
+		}
+		var out []string
+		for _, e := range inv.Entries {
+			if e.Class == inventory.Repaired {
+				backup := e.Backup
+				if backup == "" {
+					backup = "none"
+				}
+				out = append(out, fmt.Sprintf("repair not reverted: %s (backup: %s)", e.Path, backup))
+			}
+		}
+		return out
+	}
 	if mode != plan.ModeRepair {
 		return nil
 	}

@@ -52,7 +52,19 @@ var hostChecks = func(ctx context.Context) ([]doctor.Check, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(checks, nvidiaChecks(ctx, cfg.Host.GPU.Nvidia, sys, inv)...), nil
+	checks = append(checks, nvidiaChecks(ctx, cfg.Host.GPU.Nvidia, sys, inv)...)
+	return append(checks, gpu.UnitsCheck(sysRoot, func(u string) string { return unitState(ctx, u) })), nil
+}
+
+// unitState returns the `systemctl is-enabled` answer for a system unit (a
+// seam for tests).
+var unitState = func(ctx context.Context, unit string) string {
+	// is-enabled exits non-zero for disabled units; its output is the state.
+	out, _ := execx.OSRunner{}.Run(ctx, "systemctl", "is-enabled", unit)
+	if s, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n"); s != "" {
+		return s
+	}
+	return "unknown"
 }
 
 // IDPolicyApplied is the doctor check comparing the host plan with the system.

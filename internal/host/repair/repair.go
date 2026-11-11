@@ -89,7 +89,7 @@ func conflicts(root fsx.Root) []plan.Action {
 				continue
 			}
 			out = append(out, plan.Action{
-				Kind: plan.RemoveFile, Path: p, NeedsRoot: true, Policy: Policy,
+				Kind: plan.RemoveFile, Path: p, NeedsRoot: true, Policy: Policy, Class: inventory.Repaired,
 				Reason: "OnFailure= hook conflicts with cairn's fallback",
 			})
 			for _, u := range named {
@@ -100,7 +100,7 @@ func conflicts(root fsx.Root) []plan.Action {
 				if st, err := os.Lstat(root.Path(up)); err == nil && st.Mode().IsRegular() {
 					seen[up] = true
 					units = append(units, plan.Action{
-						Kind: plan.RemoveFile, Path: up, NeedsRoot: true, Policy: Policy,
+						Kind: plan.RemoveFile, Path: up, NeedsRoot: true, Policy: Policy, Class: inventory.Repaired,
 						Reason: "OnFailure= target of " + p + "; replaced by cairn-sleep-fallback.service",
 					})
 				}

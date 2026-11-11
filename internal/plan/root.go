@@ -207,11 +207,21 @@ func ApplyRoot(ctx context.Context, r RootRequest, env Env, opts RootOptions) er
 	if err := Apply(ctx, p, env, Options{Force: opts.Force, RootOnly: true, Extra: r.Extra}); err != nil {
 		return err
 	}
+	bootChanged, logindChanged := false, false
 	for _, a := range p.Pending() {
-		if a.Kind == WriteFile && bootEntry(path.Clean(a.Path)) {
-			_, _ = fmt.Fprintln(out, "boot entries changed: requires reboot")
-			break
+		if a.Kind != WriteFile {
+			continue
 		}
+		c := path.Clean(a.Path)
+		bootChanged = bootChanged || bootEntry(c)
+		logindChanged = logindChanged || under(c, "/etc/systemd/logind.conf.d") || under(c, "/etc/UPower/UPower.conf.d")
+	}
+	if bootChanged {
+		_, _ = fmt.Fprintln(out, "boot entries changed: requires reboot")
+	}
+	if logindChanged {
+		_, _ = fmt.Fprintln(out, "Lid and critical-battery settings take effect after a reboot "+
+			"(or: sudo systemctl restart systemd-logind — this ends the graphical session).")
 	}
 	return nil
 }

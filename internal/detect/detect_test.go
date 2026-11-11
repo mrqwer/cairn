@@ -121,3 +121,36 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+func TestHibernateSupported(t *testing.T) {
+	for name, c := range map[string]struct {
+		state, lockdown string
+		want            Tri
+		mode            string
+	}{
+		"fixture":         {"freeze mem disk\n", "[none] integrity confidentiality\n", Yes, "none"},
+		"integrity":       {"freeze mem disk\n", "none [integrity] confidentiality\n", No, "integrity"},
+		"confidentiality": {"freeze mem\n", "none integrity [confidentiality]\n", No, "confidentiality"},
+		"no disk":         {"freeze mem\n", "", No, ""},
+		"no lockdown":     {"freeze mem disk\n", "", Yes, ""},
+		"unreadable":      {"", "", Unknown, ""},
+	} {
+		dir := t.TempDir()
+		copyTree(t, fixture, dir)
+		for p, v := range map[string]string{"sys/power/state": c.state, "sys/kernel/security/lockdown": c.lockdown} {
+			_ = os.Remove(filepath.Join(dir, p))
+			if v != "" {
+				if err := os.WriteFile(filepath.Join(dir, p), []byte(v), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		s, err := Detect(context.Background(), fsx.Root{Dir: dir}, runner(), getenv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.HibernateSupported != c.want || s.Lockdown != c.mode {
+			t.Errorf("%s: supported=%v lockdown=%q", name, s.HibernateSupported, s.Lockdown)
+		}
+	}
+}

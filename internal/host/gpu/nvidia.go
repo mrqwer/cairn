@@ -234,3 +234,73 @@ func VRAMBytes(ctx context.Context, r execx.Runner) (uint64, error) {
 	}
 	return mib << 20, nil
 }
+
+// IDUnits is the doctor check over the vendor sleep units.
+const IDUnits = "gpu.nvidia.units"
+
+// VendorUnitDir is where the driver package installs its units.
+const VendorUnitDir = "/usr/lib/systemd/system"
+
+// VendorUnits are the NVIDIA sleep units the driver package ships; they save
+// and restore video memory around suspend and hibernate.
+var VendorUnits = []string{
+	"nvidia-suspend.service",
+	"nvidia-hibernate.service",
+	"nvidia-resume.service",
+	"nvidia-suspend-then-hibernate.service",
+}
+
+// PresentUnits returns the VendorUnits whose unit file exists under root.
+func PresentUnits(root fsx.Root) []string {
+	var out []string
+	for _, u := range VendorUnits {
+		if root.Exists(VendorUnitDir + "/" + u) {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// VendorUnitActions enables the present vendor sleep units when the GPU is
+// NVIDIA and management is enabled.
+func VendorUnitActions(cfg config.Nvidia, sys detect.System, present []string) []plan.Action {
+	if sys.GPU != "nvidia" || !cfg.Manage {
+		return nil
+	}
+	var out []plan.Action
+	for _, u := range present {
+		out = append(out, plan.Action{
+			Kind: plan.EnableUnit, Unit: u, NeedsRoot: true, Class: inventory.UnitEnable, Policy: Policy,
+			Reason: "NVIDIA video memory save/restore around sleep",
+		})
+	}
+	return out
+}
+
+// enabledStates are `systemctl is-enabled` answers under which a unit runs
+// when its target is reached.
+var enabledStates = map[string]bool{
+	"enabled": true, "enabled-runtime": true, "static": true, "alias": true,
+	"indirect": true, "generated": true, "linked": true, "linked-runtime": true,
+}
+
+// UnitsCheck warns when a present vendor sleep unit is not enabled.
+// isEnabled returns the `systemctl is-enabled` answer for a unit.
+func UnitsCheck(root fsx.Root, isEnabled func(unit string) string) doctor.Check {
+	return fnCheck{IDUnits, "NVIDIA sleep units enabled", func() doctor.Result {
+		present := PresentUnits(root)
+		if len(present) == 0 {
+			return doctor.Result{ID: IDUnits, Status: doctor.OK, Evidence: "no vendor sleep units installed"}
+		}
+		var off []string
+		for _, u := range present {
+			if st := isEnabled(u); !enabledStates[st] {
+				off = append(off, u+" ("+st+")")
+			}
+		}
+		if len(off) > 0 {
+			return doctor.Result{ID: IDUnits, Status: doctor.Warn, Evidence: "not enabled: " + strings.Join(off, ", "), Fix: "cairn host apply"}
+		}
+		return doctor.Result{ID: IDUnits, Status: doctor.OK, Evidence: strings.Join(present, ", ")}
+	}}
+}

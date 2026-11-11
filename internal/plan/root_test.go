@@ -411,3 +411,26 @@ func TestMakeDirExtraParentMustExist(t *testing.T) {
 		t.Fatal("parents of an extra path were created")
 	}
 }
+
+func TestApplyRootLogindRestartHint(t *testing.T) {
+	const hint = "Lid and critical-battery settings take effect after a reboot (or: sudo systemctl restart systemd-logind — this ends the graphical session)."
+	env := rootEnv(t)
+	logind := plan.Action{Kind: plan.WriteFile, Path: "/etc/systemd/logind.conf.d/50-cairn.conf", Content: []byte("x\n"), NeedsRoot: true}
+	withBuilder(t, returns(logind))
+	var out bytes.Buffer
+	run := func() {
+		out.Reset()
+		if err := plan.ApplyRoot(context.Background(), plan.NewRootRequest(plan.ModeApply, validHost()), env,
+			plan.RootOptions{Yes: true, Self: selfBin, Out: &out}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run()
+	if !strings.Contains(out.String(), hint) {
+		t.Fatalf("hint missing:\n%s", out.String())
+	}
+	run() // nothing written now
+	if strings.Contains(out.String(), hint) {
+		t.Fatalf("hint printed without a change:\n%s", out.String())
+	}
+}

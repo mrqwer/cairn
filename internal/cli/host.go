@@ -302,6 +302,12 @@ func runHostOp(cmd *cobra.Command, mode string, yes, force bool) error {
 	}
 	userNeeded := len(hs.user.Pending()) > 0
 	rootNeeded := hs.rootStep()
+	if mode == plan.ModeUninstall && !rootNeeded {
+		// Root prints these itself when its step runs.
+		for _, n := range plan.RootNotes(mode, hs.cfg.Host, hs.sys) {
+			cmd.Printf("note: %s\n", n)
+		}
+	}
 	if !userNeeded && !rootNeeded {
 		return nil
 	}

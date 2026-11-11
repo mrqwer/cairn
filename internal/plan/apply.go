@@ -191,10 +191,25 @@ func (env Env) applyOne(ctx context.Context, a Action, inv *inventory.Inventory,
 		if managed && prev.Class == inventory.ManagedDir {
 			return env.removeManagedDir(a.Path, inv, key)
 		}
+		var saved string
 		if a.State == Foreign || a.State == ModifiedByUser {
-			if _, err := env.backup(a.Path, backupDir, a.NeedsRoot); err != nil {
+			b, err := env.backup(a.Path, backupDir, a.NeedsRoot)
+			if err != nil {
 				return err
 			}
+			saved = b
+		}
+		if a.Class == inventory.Repaired {
+			// A one-time repair: removed, never restored, and recorded with
+			// its backup so uninstall can tell the user about it.
+			if err := env.Root.Remove(a.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return err
+			}
+			if saved == "" {
+				saved = prev.Backup
+			}
+			inv.Upsert(inventory.Entry{Path: a.Path, Policy: a.Policy, Class: inventory.Repaired, Backup: saved})
+			return nil
 		}
 		if managed && prev.Backup != "" {
 			data, err := env.Root.ReadFile(prev.Backup)

@@ -53,6 +53,12 @@ type System struct {
 	InitramfsResume      Tri
 	NvidiaParams         map[string]string
 	UPowerDropIns        bool
+	// HibernateSupported is No when kernel lockdown (integrity or
+	// confidentiality) is active or /sys/power/state does not offer "disk".
+	HibernateSupported Tri
+	// Lockdown is the active kernel lockdown mode ("none", "integrity",
+	// "confidentiality"), empty when unknown.
+	Lockdown string
 }
 
 var (
@@ -155,7 +161,34 @@ func Detect(ctx context.Context, root fsx.Root, r execx.Runner, getenv func(stri
 		s.NvidiaParams = parseKV(string(b))
 	}
 	s.UPowerDropIns = root.Exists("etc/UPower/UPower.conf.d")
+	s.HibernateSupported, s.Lockdown = hibernateSupport(root)
 	return s, nil
+}
+
+var lockdownMode = regexp.MustCompile(`\[([a-z]+)\]`)
+
+// hibernateSupport reads the lockdown mode and the sleep states the kernel
+// offers. Unreadable files are not errors: securityfs may be unavailable.
+func hibernateSupport(root fsx.Root) (Tri, string) {
+	mode := ""
+	if b, err := root.ReadFile("sys/kernel/security/lockdown"); err == nil {
+		if m := lockdownMode.FindStringSubmatch(string(b)); m != nil {
+			mode = m[1]
+		}
+	}
+	if mode == "integrity" || mode == "confidentiality" {
+		return No, mode
+	}
+	b, err := root.ReadFile("sys/power/state")
+	if err != nil {
+		return Unknown, mode
+	}
+	for _, f := range strings.Fields(string(b)) {
+		if f == "disk" {
+			return Yes, mode
+		}
+	}
+	return No, mode
 }
 
 // read returns the file content; ok is false when it does not exist.

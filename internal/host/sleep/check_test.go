@@ -22,6 +22,7 @@ func fixture() detect.System {
 		Resume:               detect.Resume{Device: "259:3", Offset: 61112320},
 		KernelModulesPresent: true,
 		InitramfsResume:      detect.Yes,
+		HibernateSupported:   detect.Yes,
 	}
 }
 
@@ -59,7 +60,7 @@ func testProbes(off uint64) Probes {
 
 func TestChecksAllGreen(t *testing.T) {
 	rs := run(t, fixture(), 61112320, 2*gib)
-	if len(rs) != 5 {
+	if len(rs) != 6 {
 		t.Fatalf("got %d results", len(rs))
 	}
 	for id, r := range rs {
@@ -78,8 +79,8 @@ func TestResumeOffsetMismatch(t *testing.T) {
 	p := testProbes(999)
 	p.Repairable = func() bool { return true }
 	rs := doctor.Run(context.Background(), Checks(config.Sleep{}, fixture(), p))
-	if rs[1].ID != IDResume || rs[1].Fix != "sudo cairn host repair" {
-		t.Fatalf("repairable: %+v", rs[1])
+	if rs[2].ID != IDResume || rs[2].Fix != "sudo cairn host repair" {
+		t.Fatalf("repairable: %+v", rs[2])
 	}
 }
 
@@ -200,5 +201,22 @@ func TestRecordRoundTrip(t *testing.T) {
 	empty := RecordedResume(fsx.Root{Dir: t.TempDir()}, time.Now).Run(context.Background())
 	if empty.Status != doctor.Unknown || empty.Fix != "sudo cairn host sleep-check" {
 		t.Fatalf("%+v", empty)
+	}
+}
+
+func TestHibernateSupportedCheck(t *testing.T) {
+	sys := fixture()
+	sys.HibernateSupported, sys.Lockdown = detect.No, "integrity"
+	r := run(t, sys, 61112320, gib)[IDSupported]
+	if r.Status != doctor.Crit || r.Evidence != "hibernation is disabled by kernel lockdown (Secure Boot)" || r.Fix == "" {
+		t.Fatalf("lockdown: %+v", r)
+	}
+	sys.Lockdown = "none"
+	if r := run(t, sys, 61112320, gib)[IDSupported]; r.Status != doctor.Crit || !strings.Contains(r.Evidence, "disk") {
+		t.Fatalf("no disk state: %+v", r)
+	}
+	sys.HibernateSupported = detect.Unknown
+	if r := run(t, sys, 61112320, gib)[IDSupported]; r.Status != doctor.Unknown {
+		t.Fatalf("unknown: %+v", r)
 	}
 }

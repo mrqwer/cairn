@@ -22,12 +22,23 @@ const (
 	hostStateDir    = plan.SysStateDir
 	gsSchema        = "org.gnome.settings-daemon.plugins.power"
 	gsKey           = "sleep-inactive-battery-type"
+	gsKeyAC         = "sleep-inactive-ac-type"
 	fallbackUnit    = "cairn-sleep-fallback.service"
 	notifyPathUnit  = "cairn-host-notify.path"
 	notifySvcUnit   = "cairn-host-notify.service"
 	bootCheckUnit   = "cairn-host-boot-check.service"
 	systemSleepHook = "/usr/lib/systemd/system-sleep/50-cairn"
 )
+
+// idleAC maps host.sleep.lid_ac to GNOME's idle action on AC power, so idle
+// does what closing the lid on AC does (GNOME has no suspend-then-hibernate;
+// with HibernateOnACPower=no that stays suspended anyway).
+var idleAC = map[string]string{
+	"suspend-then-hibernate": "suspend",
+	"suspend":                "suspend",
+	"hibernate":              "hibernate",
+	"ignore":                 "nothing",
+}
 
 var upowerAction = map[string]string{
 	"hibernate":    "Hibernate",
@@ -98,6 +109,12 @@ func Actions(cfg config.Sleep, sys detect.System, self, userUnitDir string) []pl
 			Value: "'" + strings.ReplaceAll(cfg.IdleBattery, "'", "") + "'",
 			Class: inventory.UserSetting, Policy: Policy,
 		})
+		if v, ok := idleAC[cfg.LidAC]; ok {
+			out = append(out, plan.Action{
+				Kind: plan.SetGSetting, Schema: gsSchema, Key: gsKeyAC, Value: "'" + v + "'",
+				Class: inventory.UserSetting, Policy: Policy,
+			})
+		}
 	}
 
 	out = append(out,
