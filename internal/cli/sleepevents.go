@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"errors"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,7 +63,9 @@ func newRecordSleepCmd() *cobra.Command {
 			if typ != "" {
 				data["type"] = typ
 			}
-			if out, err := eventRunner.Run(ctxOf(cmd), "uname", "-r"); err == nil {
+			uctx, cancel := context.WithTimeout(ctxOf(cmd), 2*time.Second)
+			defer cancel()
+			if out, err := eventRunner.Run(uctx, "uname", "-r"); err == nil {
 				if k := strings.TrimSpace(string(out)); k != "" {
 					data["kernel"] = k
 				}
@@ -112,23 +114,36 @@ func newBootCheckCmd() *cobra.Command {
 			f, found := sleep.AnalyzePreviousBoot(evs, cur)
 			if found {
 				fl := events.Log{Root: sysRoot, Path: filepath.Join(dirs.State, "host", "findings.jsonl")}
-				e := events.Event{
-					TS: nowFunc().UTC(), Boot: cur, Source: "boot-check", Kind: f.Kind,
-					Data: map[string]any{"type": f.SleepType, "previous_boot": prev},
+				if err := recordFinding(fl, f, prev, cur); err != nil {
+					return err
 				}
-				if err := fl.Append(e); err != nil {
+				// The alert must survive a not-yet-ready notification
+				// daemon at login: only a delivered one marks the boot
+				// handled, so a retry sends it again.
+				if err := sleep.Send(ctxOf(cmd), eventRunner, sleep.LostNotification(f)); err != nil {
 					return err
 				}
 			}
-			if err := sysRoot.WriteAtomic(lastPath, []byte(prev+"\n"), 0o644); err != nil {
-				return err
-			}
-			if !found {
-				return nil
-			}
-			return sleep.Send(ctxOf(cmd), eventRunner, sleep.LostNotification(f))
+			return sysRoot.WriteAtomic(lastPath, []byte(prev+"\n"), 0o644)
 		},
 	}
+}
+
+// recordFinding appends f unless a finding for the same previous boot exists.
+func recordFinding(fl events.Log, f sleep.Finding, prev, cur string) error {
+	old, _, err := fl.ReadFrom(0)
+	if err != nil {
+		return err
+	}
+	for _, e := range old {
+		if e.Kind == f.Kind && e.Data["previous_boot"] == prev {
+			return nil
+		}
+	}
+	return fl.Append(events.Event{
+		TS: nowFunc().UTC(), Boot: cur, Source: "boot-check", Kind: f.Kind,
+		Data: map[string]any{"type": f.SleepType, "previous_boot": prev},
+	})
 }
 
 func newNotifyCmd() *cobra.Command {
@@ -142,12 +157,13 @@ func newNotifyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			sys := events.Log{Root: sysRoot, Path: sleep.EventsPath}
-			_, err = sleep.Notify(ctxOf(cmd), eventRunner, sys, sysRoot, filepath.Join(dirs.State, "host", "notify.cursor"))
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
+			cur, err := events.CurrentBoot(sysRoot)
+			if err != nil {
 				return err
 			}
-			return nil
+			sys := events.Log{Root: sysRoot, Path: sleep.EventsPath}
+			_, err = sleep.Notify(ctxOf(cmd), eventRunner, sys, sysRoot, filepath.Join(dirs.State, "host", "notify.cursor"), cur, nowFunc())
+			return err
 		},
 	}
 }

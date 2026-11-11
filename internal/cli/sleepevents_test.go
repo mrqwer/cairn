@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -140,5 +141,33 @@ func TestBootCheckAndNotifyMissingLog(t *testing.T) {
 	}
 	if len(e.run.Calls) != 0 {
 		t.Fatal("no notifications expected")
+	}
+}
+
+func TestBootCheckRetriesAfterFailedSend(t *testing.T) {
+	e := setupSE(t)
+	l := events.Log{Root: e.root, Path: sleep.EventsPath}
+	if err := l.Append(events.Event{TS: time.Now(), Boot: "boot-a", Source: "t", Kind: events.KindSleepPre, Data: map[string]any{"type": "suspend"}}); err != nil {
+		t.Fatal(err)
+	}
+	key := "notify-send --urgency=critical --app-name=cairn Laptop lost power during sleep " +
+		"The previous session ended during suspend without resuming. Unsaved work may be lost. Check: cairn doctor host"
+	e.run.Responses[key] = execx.Response{Err: errors.New("no bus")}
+	if _, err := e.exec(t, "boot-check"); err == nil {
+		t.Fatal("want failure on first run")
+	}
+	e.run.Responses[key] = execx.Response{}
+	if _, err := e.exec(t, "boot-check"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.exec(t, "boot-check"); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.run.Calls) != 2 {
+		t.Fatalf("want one failed + one delivered send, got %v", e.run.Calls)
+	}
+	fs, _, _ := events.Log{Root: e.root, Path: e.st + "/host/findings.jsonl"}.ReadFrom(0)
+	if len(fs) != 1 {
+		t.Fatalf("want exactly one finding, got %+v", fs)
 	}
 }

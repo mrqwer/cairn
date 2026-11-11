@@ -133,12 +133,23 @@ func Send(ctx context.Context, r execx.Runner, n Notification) error {
 	return nil
 }
 
-// Notify sends a notification for every new notifiable event in sys since the
+// NoCursorWindow bounds how far back a first Notify run looks.
+const NoCursorWindow = 24 * time.Hour
+
+// Notify sends a notification for new notifiable events in sys since the
 // cursor stored in cursorPath (under user), then advances the cursor. A
-// missing system log is not an error. If the log is smaller than the cursor it
-// was replaced: it is re-read from the start, skipping events older than the
-// cursor file. When a notification fails the cursor is not advanced.
-func Notify(ctx context.Context, r execx.Runner, sys events.Log, user fsx.Root, cursorPath string) (int, error) {
+// missing system log is not an error.
+//
+// With no cursor file only events of currentBoot that are at most
+// NoCursorWindow old are considered, so installing never replays history. A
+// kernel.reboot-required event from another boot is always skipped: the user
+// has rebooted since. If the log is smaller than the cursor it was replaced:
+// it is re-read from the start, skipping events older than the cursor file.
+// Within one batch only the most recent event per notification title is sent.
+//
+// Delivery is at-least-once: when a notification fails the cursor is not
+// advanced, so notifications of the batch already shown may repeat on retry.
+func Notify(ctx context.Context, r execx.Runner, sys events.Log, user fsx.Root, cursorPath, currentBoot string, now time.Time) (int, error) {
 	st, err := sys.Root.Stat(sys.Path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, nil
@@ -148,6 +159,7 @@ func Notify(ctx context.Context, r execx.Runner, sys events.Log, user fsx.Root, 
 	}
 	var cursor int64
 	var since time.Time
+	noCursor := false
 	if b, err := user.ReadFile(cursorPath); err == nil {
 		if v, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil && v >= 0 {
 			cursor = v
@@ -155,7 +167,9 @@ func Notify(ctx context.Context, r execx.Runner, sys events.Log, user fsx.Root, 
 		if cst, err := user.Stat(cursorPath); err == nil {
 			since = cst.ModTime()
 		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	} else if errors.Is(err, fs.ErrNotExist) {
+		noCursor = true
+	} else {
 		return 0, err
 	}
 	replaced := cursor > st.Size()
@@ -167,10 +181,23 @@ func Notify(ctx context.Context, r execx.Runner, sys events.Log, user fsx.Root, 
 	if err != nil {
 		return 0, err
 	}
-	sent := 0
-	for _, e := range evs {
+	last := map[string]int{}
+	notes := make([]Notification, len(evs))
+	for i, e := range evs {
 		n, ok := NotificationFor(e)
-		if !ok || (replaced && e.TS.Before(since)) {
+		switch {
+		case !ok,
+			replaced && e.TS.Before(since),
+			noCursor && (e.Boot != currentBoot || now.Sub(e.TS) > NoCursorWindow),
+			e.Kind == events.KindRebootRequired && e.Boot != currentBoot:
+			continue
+		}
+		notes[i] = n
+		last[n.Title] = i
+	}
+	sent := 0
+	for i, n := range notes {
+		if n.Title == "" || last[n.Title] != i {
 			continue
 		}
 		if err := Send(ctx, r, n); err != nil {
@@ -178,7 +205,7 @@ func Notify(ctx context.Context, r execx.Runner, sys events.Log, user fsx.Root, 
 		}
 		sent++
 	}
-	if next != cursor {
+	if noCursor || next != cursor {
 		if err := user.WriteAtomic(cursorPath, []byte(strconv.FormatInt(next, 10)+"\n"), 0o644); err != nil {
 			return sent, err
 		}

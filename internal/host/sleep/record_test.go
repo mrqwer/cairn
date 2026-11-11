@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,8 @@ type notifyEnv struct {
 	user   fsx.Root
 	cursor string
 	run    *execx.FakeRunner
+	boot   string
+	now    time.Time
 }
 
 func newNotifyEnv(t *testing.T) *notifyEnv {
@@ -59,6 +62,8 @@ func newNotifyEnv(t *testing.T) *notifyEnv {
 		user:   root,
 		cursor: "/home/u/.local/state/cairn/host/notify.cursor",
 		run:    &execx.FakeRunner{Responses: map[string]execx.Response{}},
+		boot:   "A",
+		now:    t0.Add(time.Hour),
 	}
 	return n
 }
@@ -69,7 +74,7 @@ func (n *notifyEnv) want(title, body string) {
 
 func (n *notifyEnv) notify(t *testing.T) int {
 	t.Helper()
-	c, err := Notify(context.Background(), n.run, n.sys, n.user, n.cursor)
+	c, err := Notify(context.Background(), n.run, n.sys, n.user, n.cursor, n.boot, n.now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,11 +98,9 @@ func TestNotifySendsOncePerEvent(t *testing.T) {
 
 func TestNotifyMessages(t *testing.T) {
 	n := newNotifyEnv(t)
-	n.want("Hibernation unavailable", "sleep.swap.free, sleep.resume.match. Suspended instead. Run: cairn doctor host")
 	n.want("Hibernation unavailable", "boom. Suspended instead. Run: cairn doctor host")
 	n.want("Reboot required", "Kernel or GPU driver was upgraded: reboot before relying on hibernation")
 	for _, e := range []events.Event{
-		evt("A", events.KindSleepCheckFailed, 0, map[string]any{"failed": []any{"sleep.swap.free", "sleep.resume.match"}}),
 		evt("A", events.KindSleepCheckFailed, 1, map[string]any{"error": "boom"}),
 		evt("A", events.KindRebootRequired, 2, nil),
 	} {
@@ -105,7 +108,7 @@ func TestNotifyMessages(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if c := n.notify(t); c != 3 {
+	if c := n.notify(t); c != 2 {
 		t.Fatalf("sent %d", c)
 	}
 	want := []string{"notify-send", "--urgency=critical", "--app-name=cairn", "Hibernation unavailable"}
@@ -123,6 +126,7 @@ func TestNotifyMissingLog(t *testing.T) {
 
 func TestNotifyReplacedLogSkipsOldEvents(t *testing.T) {
 	n := newNotifyEnv(t)
+	n.now = time.Now()
 	n.want("Hibernation refused", "Suspended instead of hibernating. Run: cairn doctor host")
 	// Cursor far beyond the log size, written "now".
 	if err := n.user.WriteAtomic(n.cursor, []byte("99999\n"), 0o644); err != nil {
@@ -152,7 +156,7 @@ func TestNotifyFailureKeepsCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	n.run.Responses["notify-send --urgency=critical --app-name=cairn Reboot required Kernel or GPU driver was upgraded: reboot before relying on hibernation"] = execx.Response{Err: errors.New("no bus")}
-	if _, err := Notify(context.Background(), n.run, n.sys, n.user, n.cursor); err == nil {
+	if _, err := Notify(context.Background(), n.run, n.sys, n.user, n.cursor, n.boot, n.now); err == nil {
 		t.Fatal("want error")
 	}
 	if n.user.Exists(n.cursor) {
@@ -211,5 +215,89 @@ func TestRecentEventsCheck(t *testing.T) {
 	}
 	if r := run(many...); strings.Count(r.Evidence, "sleep.pre") != 5 {
 		t.Fatalf("want 5 entries: %s", r.Evidence)
+	}
+}
+
+func TestNotifyFailedIDsListed(t *testing.T) {
+	n := newNotifyEnv(t)
+	n.want("Hibernation unavailable", "sleep.swap.free, sleep.resume.match. Suspended instead. Run: cairn doctor host")
+	if err := n.sys.Append(evt("A", events.KindSleepCheckFailed, 0, map[string]any{"failed": []any{"sleep.swap.free", "sleep.resume.match"}})); err != nil {
+		t.Fatal(err)
+	}
+	if c := n.notify(t); c != 1 {
+		t.Fatalf("sent %d", c)
+	}
+}
+
+func cursorOf(t *testing.T, n *notifyEnv) string {
+	t.Helper()
+	b, err := n.user.ReadFile(n.cursor)
+	if err != nil {
+		t.Fatalf("cursor missing: %v", err)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func TestNotifyNoCursorIgnoresOldBootEvents(t *testing.T) {
+	n := newNotifyEnv(t)
+	n.boot = "B"
+	for _, e := range []events.Event{evt("A", events.KindSleepFallback, 0, nil), evt("A", events.KindRebootRequired, 1, nil)} {
+		if err := n.sys.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c := n.notify(t); c != 0 || len(n.run.Calls) != 0 {
+		t.Fatalf("sent %d, calls %v", c, n.run.Calls)
+	}
+	st, _ := n.sys.Root.Stat(n.sys.Path)
+	if got := cursorOf(t, n); got != strconv.FormatInt(st.Size(), 10) {
+		t.Fatalf("cursor %s, want end of log %d", got, st.Size())
+	}
+}
+
+func TestNotifyNoCursorCurrentBootFailureAndAge(t *testing.T) {
+	n := newNotifyEnv(t)
+	n.want("Hibernation refused", "Suspended instead of hibernating. Run: cairn doctor host")
+	if err := n.sys.Append(evt("A", events.KindSleepFallback, 0, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if c := n.notify(t); c != 1 {
+		t.Fatalf("sent %d", c)
+	}
+	// Same boot but older than 24h: not replayed.
+	m := newNotifyEnv(t)
+	m.now = t0.Add(25 * time.Hour)
+	if err := m.sys.Append(evt("A", events.KindSleepFallback, 0, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if c := m.notify(t); c != 0 {
+		t.Fatalf("stale event notified: %d", c)
+	}
+}
+
+func TestNotifyRebootRequiredFromPreviousBootSkipped(t *testing.T) {
+	n := newNotifyEnv(t)
+	if err := n.user.WriteAtomic(n.cursor, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	n.boot = "B"
+	if err := n.sys.Append(evt("A", events.KindRebootRequired, 0, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if c := n.notify(t); c != 0 || len(n.run.Calls) != 0 {
+		t.Fatalf("sent %d", c)
+	}
+}
+
+func TestNotifyCoalescesPerTitle(t *testing.T) {
+	n := newNotifyEnv(t)
+	n.want("Hibernation unavailable", "third. Suspended instead. Run: cairn doctor host")
+	for i, msg := range []string{"first", "second", "third"} {
+		if err := n.sys.Append(evt("A", events.KindSleepCheckFailed, i, map[string]any{"error": msg})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c := n.notify(t); c != 1 || len(n.run.Calls) != 1 {
+		t.Fatalf("sent %d calls %v", c, n.run.Calls)
 	}
 }
