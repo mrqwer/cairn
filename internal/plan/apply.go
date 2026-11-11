@@ -160,6 +160,13 @@ func (env Env) applyOne(ctx context.Context, a Action, inv *inventory.Inventory,
 		if managed {
 			e.Backup, e.Previous, e.Upstream, e.UpstreamSHA256 = prev.Backup, prev.Previous, prev.Upstream, prev.UpstreamSHA256
 		}
+		if a.Upstream != "" {
+			up, err := env.Root.ReadFile(a.Upstream)
+			if err != nil {
+				return fmt.Errorf("read upstream: %w", err)
+			}
+			e.Upstream, e.UpstreamSHA256 = a.Upstream, fsx.SHA256(up)
+		}
 		switch a.State {
 		case Foreign:
 			b, err := env.backup(a.Path, backupDir, a.NeedsRoot)

@@ -75,7 +75,10 @@ type Action struct {
 	Class     inventory.Class `json:"class,omitempty"`
 	Policy    string          `json:"policy,omitempty"`
 	Reason    string          `json:"reason,omitempty"`
-	State     State           `json:"state,omitempty"`
+	// Upstream is the vendor file a masking WriteFile shadows; Apply records
+	// its path and content hash in the inventory.
+	Upstream string `json:"upstream,omitempty"`
+	State    State  `json:"state,omitempty"`
 }
 
 // Plan is an ordered list of resolved actions.

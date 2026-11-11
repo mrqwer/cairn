@@ -8,7 +8,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mrqwer/cairn/internal/doctor"
+	"github.com/mrqwer/cairn/internal/execx"
+	"github.com/mrqwer/cairn/internal/host/gpu"
 	"github.com/mrqwer/cairn/internal/host/sleep"
+	"github.com/mrqwer/cairn/internal/inventory"
+	"github.com/mrqwer/cairn/internal/plan"
 )
 
 // ExitError asks main to terminate the process with Code.
@@ -26,7 +30,35 @@ var hostChecks = func(ctx context.Context) ([]doctor.Check, error) {
 	}
 	checks = append(checks, sc...)
 	checks = append(checks, sleep.RecentEvents(sysRoot, sleep.EventsPath))
-	return checks, nil
+	gc, err := nvidiaChecks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return append(checks, gc...), nil
+}
+
+// nvidiaChecks returns the NVIDIA checks when the GPU is NVIDIA and managed.
+func nvidiaChecks(ctx context.Context) ([]doctor.Check, error) {
+	cfg, _, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	n := cfg.Host.GPU.Nvidia
+	if !n.Manage {
+		return nil, nil
+	}
+	sys, err := detectSystem(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if sys.GPU != "nvidia" {
+		return nil, nil
+	}
+	inv, err := inventory.Load(sysRoot, plan.SysInventoryPath)
+	if err != nil {
+		return nil, err
+	}
+	return gpu.NvidiaChecks(n, sys, sysRoot, inv, gpu.FreeBytes, gpu.VRAMBytes(ctx, execx.OSRunner{})), nil
 }
 
 type jsonResult struct {

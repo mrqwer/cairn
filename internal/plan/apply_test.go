@@ -248,3 +248,21 @@ func TestApplyValidatesBeforeExecuting(t *testing.T) {
 		t.Fatal("user action executed before validation finished")
 	}
 }
+
+func TestApplyRecordsUpstream(t *testing.T) {
+	env, _ := newEnv(t)
+	const up = "/usr/lib/modprobe.d/nvidia-utils.conf"
+	put(t, env.Root, up, "options nvidia NVreg_TemporaryFilePath=/var/tmp\n")
+	a := plan.Action{Kind: plan.WriteFile, Path: modprobe, Content: []byte("masked\n"), NeedsRoot: true,
+		Class: inventory.Mask, Policy: "gpu-nvidia", Upstream: up}
+	p := plan.ResolveAll([]plan.Action{a}, env.Root, env.UserInv, env.SysInv)
+	if err := plan.Apply(context.Background(), p, env, plan.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	reload(t, &env)
+	e, ok := env.SysInv.Get(modprobe)
+	want := fsx.SHA256([]byte("options nvidia NVreg_TemporaryFilePath=/var/tmp\n"))
+	if !ok || e.Upstream != up || e.UpstreamSHA256 != want || e.Class != inventory.Mask {
+		t.Fatalf("entry: %+v %v", e, ok)
+	}
+}
