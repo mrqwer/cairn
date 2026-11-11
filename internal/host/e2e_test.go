@@ -126,17 +126,7 @@ func (rt *roundTrip) plan(mode string) (pending []plan.Action, stale bool) {
 // answering "y" on its terminal.
 func (rt *roundTrip) run(mode string) {
 	rt.t.Helper()
-	userEnv, rootEnv := rt.envs()
-	u, _, err := PlanBoth(mode, rt.cfg.Host, rt.sys, e2eSelf, rt.userActs(mode, userEnv), userEnv, rootEnv)
-	if err != nil {
-		rt.t.Fatal(err)
-	}
-	priv := func(ctx context.Context, req plan.RootRequest) error {
-		return ApplyRootSide(ctx, req, rootEnv, plan.RootOptions{
-			Sys: rt.sys, Self: e2eSelf, Out: &rt.ttyOut, TTY: strings.NewReader("y\n"),
-		})
-	}
-	if err := ApplyBoth(context.Background(), u, userEnv, plan.NewRootRequest(mode, rt.cfg.Host), false, priv); err != nil {
+	if err := rt.runWith(mode, "y\n"); err != nil {
 		rt.t.Fatalf("%s: %v\nroot output:\n%s", mode, err, rt.ttyOut.String())
 	}
 }
@@ -291,5 +281,60 @@ func TestApplyRootRepairPrintsBuilderNotes(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "note: no block device node for "+swap) {
 		t.Fatalf("repair note not printed:\n%s", out.String())
+	}
+}
+
+// runWith performs mode like run, with the root step answering tty.
+func (rt *roundTrip) runWith(mode, tty string) error {
+	rt.t.Helper()
+	userEnv, rootEnv := rt.envs()
+	u, r, err := PlanBoth(mode, rt.cfg.Host, rt.sys, e2eSelf, rt.userActs(mode, userEnv), userEnv, rootEnv)
+	if err != nil {
+		rt.t.Fatal(err)
+	}
+	priv := func(ctx context.Context, req plan.RootRequest) error {
+		return ApplyRootSide(ctx, req, rootEnv, plan.RootOptions{
+			Sys: rt.sys, Self: e2eSelf, Out: &rt.ttyOut, TTY: strings.NewReader(tty),
+		})
+	}
+	return ApplyBoth(context.Background(), u, r, userEnv, plan.NewRootRequest(mode, rt.cfg.Host), false, priv)
+}
+
+func TestApplyRootDeclinedAppliesNoUserAction(t *testing.T) {
+	rt := newRoundTrip(t)
+	err := rt.runWith(plan.ModeApply, "n\n")
+	if !errors.Is(err, plan.ErrRootDeclined) || !strings.Contains(err.Error(), "user-level changes were not applied") {
+		t.Fatalf("err=%v", err)
+	}
+	for _, c := range rt.runner.Calls {
+		if c[0] == "gsettings" || (len(c) > 1 && c[1] == "--user") {
+			t.Errorf("user command ran: %q", c)
+		}
+	}
+	for _, p := range []string{"cairn-host-notify.path", "cairn-host-notify.service", "cairn-host-boot-check.service"} {
+		if rt.usrRoot.Exists(e2eUnitDir + "/" + p) {
+			t.Errorf("user unit %s written", p)
+		}
+	}
+	if rt.usrRoot.Exists(e2eUserInv) {
+		t.Error("user inventory written")
+	}
+}
+
+func TestApplyBothRejectsInvalidRootPreview(t *testing.T) {
+	rt := newRoundTrip(t)
+	userEnv, _ := rt.envs()
+	u := plan.Resolve(rt.userActs(plan.ModeApply, userEnv), userEnv.Root, userEnv.UserInv)
+	bad := plan.Plan{Mode: plan.ModeApply, Actions: []plan.Action{{Kind: plan.WriteFile, Path: "/etc/passwd", NeedsRoot: true, State: plan.Create}}}
+	called := false
+	priv := func(context.Context, plan.RootRequest) error { called = true; return nil }
+	err := ApplyBoth(context.Background(), u, bad, userEnv, plan.NewRootRequest(plan.ModeApply, rt.cfg.Host), false, priv)
+	if err == nil || !strings.Contains(err.Error(), "/etc/passwd") || called || len(rt.runner.Calls) != 0 {
+		t.Fatalf("err=%v called=%v calls=%q", err, called, rt.runner.Calls)
+	}
+	req := plan.NewRootRequest(plan.ModeApply, rt.cfg.Host)
+	req.Host.Sleep.Lid = "explode"
+	if err := ApplyBoth(context.Background(), u, plan.Plan{}, userEnv, req, false, priv); err == nil || called {
+		t.Fatalf("invalid request accepted: %v", err)
 	}
 }

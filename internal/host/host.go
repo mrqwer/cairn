@@ -175,19 +175,63 @@ func PlanBoth(mode string, h config.Host, sys detect.System, self string, userAc
 // tests call ApplyRootSide directly.
 type Privileged func(context.Context, plan.RootRequest) error
 
-// ApplyBoth applies the pending user-level actions of user (already shown
-// and confirmed) and then hands req to the privileged step, which shows and
-// confirms root's own plan. privileged nil skips the root step.
-func ApplyBoth(ctx context.Context, user plan.Plan, userEnv plan.Env, req plan.RootRequest, force bool, privileged Privileged) error {
-	if len(user.Pending()) > 0 {
-		if err := plan.Apply(ctx, user, userEnv, plan.Options{Force: force, UserOnly: true}); err != nil {
+// CheckRootPreview validates, on the user side, the request that would be
+// sent to root and every action of root's preview, so an invalid request or
+// a policy bug stops the operation before anything is applied. Root
+// validates everything again itself.
+func CheckRootPreview(req plan.RootRequest, preview plan.Plan) error {
+	if err := req.Validate(); err != nil {
+		return fmt.Errorf("invalid root request: %w", err)
+	}
+	extra := plan.ExtraPaths(req.Host)
+	var errs []error
+	for _, a := range preview.Actions {
+		errs = append(errs, plan.CheckRootAction(a, extra, req.Mode))
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("invalid root plan: %w", err)
+	}
+	return nil
+}
+
+// ApplyBoth runs a host operation on both sides after CheckRootPreview.
+// user holds the user-level actions (already shown and confirmed), root the
+// user side's preview of root's plan; privileged nil skips the root step.
+//
+// On apply the privileged step runs first and user actions only after it
+// succeeded: user settings such as idle hibernation must never take effect
+// without root's sleep-entry guard. On uninstall the order is reversed, so
+// the guard is removed last. When the root step fails or is declined on
+// apply, nothing is applied on the user side and the error says so.
+func ApplyBoth(ctx context.Context, user, root plan.Plan, userEnv plan.Env, req plan.RootRequest, force bool, privileged Privileged) error {
+	if err := CheckRootPreview(req, root); err != nil {
+		return err
+	}
+	applyUser := func() error {
+		if len(user.Pending()) == 0 {
+			return nil
+		}
+		return plan.Apply(ctx, user, userEnv, plan.Options{Force: force, UserOnly: true})
+	}
+	runRoot := func() error {
+		if privileged == nil {
+			return nil
+		}
+		return privileged(ctx, req)
+	}
+	if req.Mode == plan.ModeUninstall {
+		if err := applyUser(); err != nil {
 			return err
 		}
+		return runRoot()
 	}
-	if privileged == nil {
-		return nil
+	if err := runRoot(); err != nil {
+		if len(user.Pending()) > 0 {
+			return fmt.Errorf("%w; user-level changes were not applied", err)
+		}
+		return err
 	}
-	return privileged(ctx, req)
+	return applyUser()
 }
 
 // ApplyRootSide is the body of apply-root: load the system inventory from

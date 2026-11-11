@@ -256,10 +256,11 @@ func newHostPlanCmd() *cobra.Command {
 	}
 }
 
-// runHostOp is apply and uninstall: show the user plan and root's preview,
-// confirm and apply the user side, then always hand over to the privileged
-// step when root has anything for this config; root shows and confirms its
-// own plan.
+// runHostOp is apply and uninstall: show the user plan, validate the request
+// and root's preview, confirm the user side, then run both through
+// host.ApplyBoth (on apply the privileged step first, user actions only after
+// it succeeded). The privileged step always runs when root has anything for
+// this config; root shows and confirms its own plan.
 func runHostOp(cmd *cobra.Command, mode string, yes, force bool) error {
 	ctx := ctxOf(cmd)
 	hs, err := loadHost(ctx, mode)
@@ -275,6 +276,10 @@ func runHostOp(cmd *cobra.Command, mode string, yes, force bool) error {
 	if m := hs.user.ModifiedPaths(); len(m) > 0 && !force {
 		return fmt.Errorf("%w: %s", plan.ErrModifiedByUser, strings.Join(m, ", "))
 	}
+	req := plan.NewRootRequest(mode, hs.cfg.Host)
+	if err := host.CheckRootPreview(req, hs.root); err != nil {
+		return err
+	}
 	if rootNeeded {
 		if err := checkSelf(sysRoot, hs.self); err != nil {
 			return err
@@ -289,7 +294,7 @@ func runHostOp(cmd *cobra.Command, mode string, yes, force bool) error {
 		cmd.Println("Root changes will be shown and confirmed by the privileged step.")
 		priv = sudoPrivileged(cmd, hs.self, yes, force)
 	}
-	return host.ApplyBoth(ctx, hs.user, hs.env, plan.NewRootRequest(mode, hs.cfg.Host), force, priv)
+	return host.ApplyBoth(ctx, hs.user, hs.root, hs.env, req, force, priv)
 }
 
 func sudoPrivileged(cmd *cobra.Command, self string, yes, force bool) host.Privileged {

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -142,5 +143,25 @@ func TestApplyRootRequiresRoot(t *testing.T) {
 	_, err := runHost(t, "{}", "host", "apply-root", "--mode", "apply")
 	if err == nil || !strings.Contains(err.Error(), "must run as root") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestHostApplyRootFailureLeavesUserSideAlone(t *testing.T) {
+	_, calls := wireEnv(t)
+	target := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "systemd/user/cairn-test.service")
+	hostDesired = func(context.Context, *config.Config, detect.System, string) ([]plan.Action, error) {
+		return []plan.Action{{Kind: plan.WriteFile, Path: target, Content: []byte("[Unit]\n")}}, nil
+	}
+	withRootBuilder(t, plan.Action{Kind: plan.WriteFile, Path: "/etc/systemd/sleep.conf.d/50-cairn.conf", Content: []byte("x\n"), NeedsRoot: true})
+	runSudo = func(context.Context, *cobra.Command, string, string, bool, bool, []byte) error {
+		*calls = append(*calls, sudoRec{})
+		return errors.New("exit status 1")
+	}
+	out, err := runHost(t, "", "host", "apply", "--yes")
+	if err == nil || !strings.Contains(err.Error(), "user-level changes were not applied") || len(*calls) != 1 {
+		t.Fatalf("err=%v calls=%d\n%s", err, len(*calls), out)
+	}
+	if _, err := os.Stat(target); err == nil {
+		t.Fatal("user file written although the root step failed")
 	}
 }
