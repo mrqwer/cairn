@@ -219,7 +219,7 @@ func TestDoctorDetectsOnceAndQueriesVRAMLazily(t *testing.T) {
 		return detect.System{GPU: "nvidia"}, nil
 	}
 	vram := 0
-	vramOf = func(context.Context) uint64 { vram++; return 1 << 30 }
+	vramOf = func(context.Context) (uint64, error) { vram++; return 1 << 30, nil }
 	freeBytesOf = func(string) (uint64, error) { return 1 << 40, nil }
 	checks, err := hostChecks(context.Background())
 	if err != nil {
@@ -254,9 +254,29 @@ func TestSleepCheckBlocksOnNvidiaSpace(t *testing.T) {
 	oldFree, oldVram := freeBytesOf, vramOf
 	t.Cleanup(func() { freeBytesOf, vramOf = oldFree, oldVram })
 	freeBytesOf = func(string) (uint64, error) { return 1 << 30, nil }
-	vramOf = func(context.Context) uint64 { return 8 << 30 }
+	vramOf = func(context.Context) (uint64, error) { return 8 << 30, nil }
 	_, _, err = runSC(t, "--record")
 	if exitCode(err) != 1 || !strings.Contains(eventLog(t, e), gpu.IDSpace) {
 		t.Fatalf("err=%v log=%s", err, eventLog(t, e))
+	}
+}
+
+func TestSleepCheckIgnoresInventoryWhenNvidiaUnmanaged(t *testing.T) {
+	e := setupSC(t)
+	e.sys.GPU = "nvidia"
+	h, err := config.Defaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Host.GPU.Nvidia.Manage = false
+	snap, _ := plan.HostSnapshot(h.Host)
+	if err := e.root.WriteAtomic(plan.HostConfigPath, snap, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.root.WriteAtomic(plan.SysInventoryPath, []byte("{corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, errOut, err := runSC(t, "--record"); exitCode(err) != 0 {
+		t.Fatalf("err=%v\n%s\n%s", err, out, errOut)
 	}
 }

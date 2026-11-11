@@ -84,6 +84,7 @@ Type = Package
 Target = linux
 Target = linux-lts
 Target = linux-zen
+Target = linux-hardened
 Target = nvidia*
 
 [Action]

@@ -113,9 +113,6 @@ func runSleepCheck(cmd *cobra.Command, record bool) error {
 	inv := &inventory.Inventory{}
 	if trusted {
 		h, usedDefaults, err = hostSnapshot()
-		if err == nil {
-			inv, err = inventory.Load(sysRoot, plan.SysInventoryPath)
-		}
 	} else {
 		var cfg *config.Config
 		if cfg, err = config.Defaults(); err == nil {
@@ -131,6 +128,13 @@ func runSleepCheck(cmd *cobra.Command, record bool) error {
 	sys, err := detectSystem(ctx)
 	if err != nil {
 		return fail(err)
+	}
+	// The inventory only feeds the NVIDIA checks; a damaged one must not
+	// block hibernation on systems where they do not run.
+	if trusted && h.GPU.Nvidia.Manage && sys.GPU == "nvidia" {
+		if inv, err = inventory.Load(sysRoot, plan.SysInventoryPath); err != nil {
+			return fail(err)
+		}
 	}
 	// NVIDIA checks too: a dump target without room for the VRAM must block
 	// hibernation at entry.

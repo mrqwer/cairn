@@ -40,7 +40,7 @@ var dropInDirs = []string{
 
 // Seams for tests: the block device of a file and the command runner (blkid).
 var (
-	deviceOf                = sleep.DeviceOf
+	deviceOf              = sleep.DeviceOf
 	runner   execx.Runner = execx.OSRunner{}
 )
 
@@ -60,6 +60,8 @@ func Plan(root fsx.Root, sys detect.System, cfg config.Sleep, offset sleep.Offse
 		acts, notes := bootEntries(root, sys, cfg, offset)
 		p.Actions = append(acts, p.Actions...)
 		p.Notes = notes
+	} else {
+		p.Notes = otherLoader(root, sys, cfg, offset)
 	}
 	p.Notes = append(p.Notes, Report(root, sys)...)
 	return p
@@ -127,17 +129,42 @@ func entryLine(l string) (key, value string) {
 	return f[0], strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(l), f[0]))
 }
 
-// bootEntries rewrites the options of the entries for the running kernel.
-func bootEntries(root fsx.Root, sys detect.System, cfg config.Sleep, offset sleep.OffsetFunc) ([]plan.Action, []string) {
+// resumeTarget returns the resume= and resume_offset= values for the
+// hibernation swap file.
+func resumeTarget(root fsx.Root, sys detect.System, cfg config.Sleep, offset sleep.OffsetFunc) (uuid string, off uint64, err error) {
 	swap, ok := sleep.SelectSwap(cfg, sys)
 	if !ok {
-		return nil, []string{"no active hibernation swap file; boot entries not updated"}
+		return "", 0, fmt.Errorf("no active hibernation swap file")
 	}
-	off, err := offset(swap.Path)
-	if err != nil {
-		return nil, []string{fmt.Sprintf("resume offset of %s: %v; boot entries not updated", swap.Path, err)}
+	if off, err = offset(swap.Path); err != nil {
+		return "", 0, fmt.Errorf("resume offset of %s: %w", swap.Path, err)
 	}
-	uuid, err := swapUUID(root, swap.Path)
+	if uuid, err = swapUUID(root, swap.Path); err != nil {
+		return "", 0, err
+	}
+	return uuid, off, nil
+}
+
+// otherLoader explains what to set by hand on boot loaders repair does not
+// edit, with the values when they are known.
+func otherLoader(root fsx.Root, sys detect.System, cfg config.Sleep, offset sleep.OffsetFunc) []string {
+	name := sys.BootLoader
+	if name == "" {
+		name = "unknown"
+	}
+	uuid, off := "<uuid>", "<offset>"
+	var notes []string
+	if u, o, err := resumeTarget(root, sys, cfg, offset); err != nil {
+		notes = append(notes, err.Error())
+	} else {
+		uuid, off = u, strconv.FormatUint(o, 10)
+	}
+	return append(notes, fmt.Sprintf("boot loader %s: set resume=UUID=%s resume_offset=%s on the kernel command line manually", name, uuid, off))
+}
+
+// bootEntries rewrites the options of the entries for the running kernel.
+func bootEntries(root fsx.Root, sys detect.System, cfg config.Sleep, offset sleep.OffsetFunc) ([]plan.Action, []string) {
+	uuid, off, err := resumeTarget(root, sys, cfg, offset)
 	if err != nil {
 		return nil, []string{err.Error() + "; boot entries not updated"}
 	}
@@ -147,6 +174,7 @@ func bootEntries(root fsx.Root, sys detect.System, cfg config.Sleep, offset slee
 	}
 	want := map[string]string{"resume": "UUID=" + uuid, "resume_offset": strconv.FormatUint(off, 10)}
 	var out []plan.Action
+	var notes []string
 	for _, name := range regularFiles(root, entriesDir, ".conf") {
 		p := entriesDir + "/" + name
 		st, err := root.Stat(p)
@@ -157,7 +185,11 @@ func bootEntries(root fsx.Root, sys detect.System, cfg config.Sleep, offset slee
 		if err != nil {
 			continue
 		}
-		content, ok := rewriteEntry(string(data), match, want)
+		content, ok, err := rewriteEntry(string(data), match, want)
+		if err != nil {
+			notes = append(notes, fmt.Sprintf("%s: %v; not changed, fix it by hand", p, err))
+			continue
+		}
 		if !ok || content == string(data) {
 			continue
 		}
@@ -167,7 +199,7 @@ func bootEntries(root fsx.Root, sys detect.System, cfg config.Sleep, offset slee
 			Reason: "resume=" + want["resume"] + " resume_offset=" + want["resume_offset"],
 		})
 	}
-	return out, nil
+	return out, notes
 }
 
 // swapUUID returns the filesystem UUID of the block device holding file.
@@ -215,19 +247,49 @@ func kernelMatcher(root fsx.Root, release string) (func(string) bool, error) {
 }
 
 // rewriteEntry sets want's keys in the options of an entry whose linux line
-// matches; ok is false for other entries. Existing tokens are replaced in
-// place, missing ones are appended to the first options line (or a new one).
-func rewriteEntry(content string, match func(string) bool, want map[string]string) (string, bool) {
+// matches; ok is false for other entries. An entry that already has each key
+// once with the right value is returned unchanged. Ambiguous entries (several
+// linux lines, a key given twice) are refused with an error. Otherwise
+// existing tokens are replaced in place and missing ones appended to the
+// first options line (or a new one).
+func rewriteEntry(content string, match func(string) bool, want map[string]string) (string, bool, error) {
 	lines := strings.SplitAfter(content, "\n")
-	linuxAt, matched := -1, false
+	linuxAt, linuxes, matched := -1, 0, false
 	for i, l := range lines {
 		if k, v := entryLine(l); k == "linux" {
-			linuxAt, matched = i, match(v)
-			break
+			linuxes++
+			if match(v) && !matched {
+				linuxAt, matched = i, true
+			}
 		}
 	}
 	if !matched {
-		return content, false
+		return content, false, nil
+	}
+	if linuxes > 1 {
+		return content, true, fmt.Errorf("%d linux lines", linuxes)
+	}
+	count, right := map[string]int{}, map[string]bool{}
+	for _, l := range lines {
+		if k, v := entryLine(l); k == "options" {
+			for _, tok := range strings.Fields(v) {
+				name, val, _ := strings.Cut(tok, "=")
+				if w, ok := want[name]; ok {
+					count[name]++
+					right[name] = val == w
+				}
+			}
+		}
+	}
+	done := true
+	for k := range want {
+		if count[k] > 1 {
+			return content, true, fmt.Errorf("%s= is given %d times", k, count[k])
+		}
+		done = done && count[k] == 1 && right[k]
+	}
+	if done {
+		return content, true, nil
 	}
 	seen := map[string]bool{}
 	firstOpts := -1
@@ -266,7 +328,7 @@ func rewriteEntry(content string, match func(string) bool, want map[string]strin
 			lines = append(lines[:linuxAt+1], append([]string{nl}, lines[linuxAt+1:]...)...)
 		}
 	}
-	return strings.Join(lines, ""), true
+	return strings.Join(lines, ""), true, nil
 }
 
 // setOptions rebuilds an options line, keeping its indentation and newline.

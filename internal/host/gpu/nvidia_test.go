@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mrqwer/cairn/internal/config"
 	"github.com/mrqwer/cairn/internal/detect"
@@ -144,11 +145,11 @@ func results(cs []doctor.Check) map[string]doctor.Result {
 	return out
 }
 
-func vr(n uint64) func() uint64 { return func() uint64 { return n } }
+func vr(n uint64) func() (uint64, error) { return func() (uint64, error) { return n, nil } }
 
 func TestVRAMQueriedOnlyBySpaceCheck(t *testing.T) {
 	calls := 0
-	vram := func() uint64 { calls++; return gib }
+	vram := func() (uint64, error) { calls++; return gib, nil }
 	cs := NvidiaChecks(cfg(), nv(), fsx.Root{Dir: t.TempDir()}, &inventory.Inventory{}, free(100*gib), vram)
 	if calls != 0 {
 		t.Fatalf("VRAM queried while building checks")
@@ -232,10 +233,33 @@ func TestVRAMBytes(t *testing.T) {
 	fr := &execx.FakeRunner{Responses: map[string]execx.Response{
 		"nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits": {Out: []byte("8192\n8192\n")},
 	}}
-	if got := VRAMBytes(context.Background(), fr); got != 8192<<20 {
-		t.Fatalf("got %d", got)
+	if got, err := VRAMBytes(context.Background(), fr); got != 8192<<20 || err != nil {
+		t.Fatalf("got %d %v", got, err)
 	}
-	if got := VRAMBytes(context.Background(), &execx.FakeRunner{}); got != 0 {
-		t.Fatalf("unavailable: %d", got)
+	if got, err := VRAMBytes(context.Background(), &execx.FakeRunner{}); got != 0 || err != nil {
+		t.Fatalf("unavailable: %d %v", got, err)
+	}
+}
+
+// blockingRunner hangs like a wedged nvidia-smi until its context ends.
+type blockingRunner struct{}
+
+func (blockingRunner) Run(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestVRAMBytesTimesOut(t *testing.T) {
+	old := vramTimeout
+	t.Cleanup(func() { vramTimeout = old })
+	vramTimeout = 20 * time.Millisecond
+	got, err := VRAMBytes(context.Background(), blockingRunner{})
+	if got != 0 || err == nil || err.Error() != "nvidia-smi timed out" {
+		t.Fatalf("got %d err=%v", got, err)
+	}
+	vram := func() (uint64, error) { return VRAMBytes(context.Background(), blockingRunner{}) }
+	r := results(NvidiaChecks(cfg(), nv(), fsx.Root{Dir: t.TempDir()}, &inventory.Inventory{}, free(100*gib), vram))[IDSpace]
+	if r.Status != doctor.Unknown || r.Evidence != "nvidia-smi timed out" {
+		t.Fatalf("%+v", r)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -46,9 +47,9 @@ func newRoundTrip(t *testing.T) *roundTrip {
 		sysRoot: fsx.Root{Dir: t.TempDir()},
 		usrRoot: fsx.Root{Dir: t.TempDir()},
 		runner: &execx.FakeRunner{Responses: map[string]execx.Response{
-			"systemctl daemon-reload":        {},
-			"systemctl --user daemon-reload": {},
-			"gsettings get " + e2eGsSchema + " " + e2eGsKey:                {Out: []byte("'suspend'\n")},
+			"systemctl daemon-reload":                                        {},
+			"systemctl --user daemon-reload":                                 {},
+			"gsettings get " + e2eGsSchema + " " + e2eGsKey:                  {Out: []byte("'suspend'\n")},
 			"gsettings set " + e2eGsSchema + " " + e2eGsKey + " 'hibernate'": {},
 			"gsettings set " + e2eGsSchema + " " + e2eGsKey + " 'suspend'":   {},
 		}},
@@ -259,5 +260,36 @@ func TestRoundTrip(t *testing.T) {
 	// Uninstalling twice changes nothing.
 	if again, _ := rt.plan(plan.ModeUninstall); len(again) != 0 {
 		t.Fatalf("second uninstall pending: %v", again)
+	}
+}
+
+func TestApplyRootRepairPrintsBuilderNotes(t *testing.T) {
+	root := fsx.Root{Dir: t.TempDir()}
+	if err := root.WriteAtomic("/boot/loader/loader.conf", []byte("default arch.conf\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A real file outside root: its device has no node under root's /sys.
+	swap := t.TempDir() + "/swapfile"
+	if err := os.WriteFile(swap, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := Builder{Root: root, Offset: func(string) (uint64, error) { return 7, nil }}
+	oldB, oldN := plan.RootBuilder, plan.RootNotes
+	t.Cleanup(func() { plan.RootBuilder, plan.RootNotes = oldB, oldN })
+	plan.RootBuilder, plan.RootNotes = b.Build, b.Notes
+	sys := detect.System{BootLoader: "systemd-boot", KernelRunning: "6.1.0-test",
+		Swaps: []detect.Swap{{Path: swap, Type: "file"}}}
+	cfg, err := config.Defaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	env := plan.Env{Root: root, Runner: &execx.FakeRunner{}, OwnerOf: func(fs.FileInfo) (uint32, bool) { return 0, true }}
+	if err := ApplyRootSide(context.Background(), plan.NewRootRequest(plan.ModeRepair, cfg.Host), env,
+		plan.RootOptions{Yes: true, Sys: sys, Self: e2eSelf, Out: &out}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "note: no block device node for "+swap) {
+		t.Fatalf("repair note not printed:\n%s", out.String())
 	}
 }

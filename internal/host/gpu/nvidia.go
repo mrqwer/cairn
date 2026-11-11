@@ -4,12 +4,14 @@ package gpu
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mrqwer/cairn/internal/config"
 	"github.com/mrqwer/cairn/internal/detect"
@@ -121,16 +123,21 @@ func (c fnCheck) Title() string                     { return c.title }
 func (c fnCheck) Run(context.Context) doctor.Result { return c.run() }
 
 // NvidiaChecks returns the NVIDIA doctor checks. freeBytes reports free space
-// at a path; vram returns the total GPU memory (0 when unknown). vram is
-// called only when the space check runs, since querying it can wake the GPU.
+// at a path; vram returns the total GPU memory (0 when unknown) or an error
+// such as a timeout. vram is called only when the space check runs, since
+// querying it can wake the GPU.
 func NvidiaChecks(cfg config.Nvidia, sys detect.System, root fsx.Root, inv *inventory.Inventory,
-	freeBytes func(path string) (uint64, error), vram func() uint64) []doctor.Check {
+	freeBytes func(path string) (uint64, error), vram func() (uint64, error)) []doctor.Check {
 	return []doctor.Check{
 		fnCheck{IDParams, "NVIDIA temporary file path in effect", func() doctor.Result {
 			return paramsResult(cfg, sys, root)
 		}},
 		fnCheck{IDSpace, "NVIDIA suspend space", func() doctor.Result {
-			return spaceResult(cfg, freeBytes, vram())
+			v, err := vram()
+			if err != nil {
+				return doctor.Result{Status: doctor.Unknown, Evidence: err.Error()}
+			}
+			return spaceResult(cfg, freeBytes, v)
 		}},
 		fnCheck{IDUpstream, "NVIDIA vendor modprobe file unchanged", func() doctor.Result {
 			return upstreamResult(root, inv)
@@ -204,17 +211,26 @@ func FreeBytes(p string) (uint64, error) {
 	}
 }
 
+// vramTimeout bounds nvidia-smi: sleep-check runs it on every hibernate entry.
+var vramTimeout = 5 * time.Second
+
 // VRAMBytes returns the total memory of the first GPU via nvidia-smi, or 0
-// when it cannot be determined.
-func VRAMBytes(ctx context.Context, r execx.Runner) uint64 {
+// when it cannot be determined. A query that does not finish within
+// vramTimeout is an error ("nvidia-smi timed out").
+func VRAMBytes(ctx context.Context, r execx.Runner) (uint64, error) {
+	ctx, cancel := context.WithTimeout(ctx, vramTimeout)
+	defer cancel()
 	out, err := r.Run(ctx, "nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits")
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return 0, errors.New("nvidia-smi timed out")
+	}
 	if err != nil {
-		return 0
+		return 0, nil
 	}
 	first, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
 	mib, err := strconv.ParseUint(strings.TrimSpace(first), 10, 64)
 	if err != nil {
-		return 0
+		return 0, nil
 	}
-	return mib << 20
+	return mib << 20, nil
 }

@@ -186,3 +186,36 @@ func TestRepairNoDeviceIsReported(t *testing.T) {
 		t.Fatalf("actions %+v notes %q", p.Actions, p.Notes)
 	}
 }
+
+func TestRepairOtherBootLoaderNote(t *testing.T) {
+	root, sys, _ := fixture(t)
+	sys.BootLoader = "grub"
+	p := Plan(root, sys, config.Sleep{}, offsetFn(61112320))
+	want := "boot loader grub: set resume=UUID=x resume_offset=61112320 on the kernel command line manually"
+	if len(p.Actions) != 0 || !strings.Contains(strings.Join(p.Notes, "\n"), want) {
+		t.Fatalf("actions %+v notes %q", p.Actions, p.Notes)
+	}
+}
+
+func TestRepairRefusesAmbiguousEntries(t *testing.T) {
+	for name, content := range map[string]string{
+		"two linux lines":  "linux /vmlinuz-linux\nlinux /vmlinuz-linux\noptions rw resume_offset=1\n",
+		"duplicate offset": "linux /vmlinuz-linux\noptions rw resume_offset=1 resume_offset=2\n",
+		"duplicate resume": "linux /vmlinuz-linux\noptions rw resume=UUID=x\noptions resume=UUID=y resume_offset=1\n",
+	} {
+		root, sys, _ := fixture(t)
+		put(t, root, entry, content)
+		p := Plan(root, sys, config.Sleep{}, offsetFn(9))
+		if len(p.Actions) != 0 || !strings.Contains(strings.Join(p.Notes, "\n"), "arch.conf") {
+			t.Errorf("%s: actions %+v notes %q", name, p.Actions, p.Notes)
+		}
+	}
+}
+
+func TestRepairLeavesCorrectEntryAlone(t *testing.T) {
+	root, sys, _ := fixture(t)
+	put(t, root, entry, "linux /vmlinuz-linux\noptions  rw   resume=UUID=x\tresume_offset=7  \n")
+	if p := Plan(root, sys, config.Sleep{}, offsetFn(7)); len(p.Actions) != 0 {
+		t.Fatalf("rewrote an entry that already has the right values: %+v", p.Actions)
+	}
+}

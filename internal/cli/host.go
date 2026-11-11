@@ -44,7 +44,7 @@ func init() {
 		return host.Builder{Root: sysRoot, Offset: offsetOf}.Build(mode, h, sys, self)
 	}
 	plan.RootNotes = func(mode string, h config.Host, sys detect.System) []string {
-		return host.Builder{Root: sysRoot}.Notes(mode, h, sys)
+		return host.Builder{Root: sysRoot, Offset: offsetOf}.Notes(mode, h, sys)
 	}
 }
 

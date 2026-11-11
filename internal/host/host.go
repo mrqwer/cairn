@@ -33,6 +33,7 @@ Type = Package
 Target = linux
 Target = linux-lts
 Target = linux-zen
+Target = linux-hardened
 Target = nvidia*
 
 [Action]
@@ -132,12 +133,16 @@ func (b Builder) Build(mode string, h config.Host, sys detect.System, self strin
 	return nil, fmt.Errorf("unknown mode %q", mode)
 }
 
-// Notes returns the report-only findings for mode (repair only).
-func (b Builder) Notes(mode string, _ config.Host, sys detect.System) []string {
+// Notes returns the report-only findings for mode (repair only): why boot
+// entries were not updated, and the problems repair only reports.
+func (b Builder) Notes(mode string, h config.Host, sys detect.System) []string {
 	if mode != plan.ModeRepair {
 		return nil
 	}
-	return repair.Report(b.Root, sys)
+	if b.Offset == nil {
+		return repair.Report(b.Root, sys)
+	}
+	return repair.Plan(b.Root, sys, h.Sleep, b.Offset).Notes
 }
 
 // PlanBoth resolves a host operation for display: userActs against the user

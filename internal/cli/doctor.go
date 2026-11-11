@@ -51,7 +51,7 @@ var hostChecks = func(ctx context.Context) ([]doctor.Check, error) {
 // Seams for the NVIDIA space check.
 var (
 	freeBytesOf = gpu.FreeBytes
-	vramOf      = func(ctx context.Context) uint64 { return gpu.VRAMBytes(ctx, execx.OSRunner{}) }
+	vramOf      = func(ctx context.Context) (uint64, error) { return gpu.VRAMBytes(ctx, execx.OSRunner{}) }
 )
 
 // nvidiaChecks returns the NVIDIA checks when the GPU is NVIDIA and managed.
@@ -61,7 +61,7 @@ func nvidiaChecks(ctx context.Context, n config.Nvidia, sys detect.System, inv *
 	if !n.Manage || sys.GPU != "nvidia" {
 		return nil
 	}
-	return gpu.NvidiaChecks(n, sys, sysRoot, inv, freeBytesOf, func() uint64 { return vramOf(ctx) })
+	return gpu.NvidiaChecks(n, sys, sysRoot, inv, freeBytesOf, func() (uint64, error) { return vramOf(ctx) })
 }
 
 type jsonResult struct {
