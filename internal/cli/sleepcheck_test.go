@@ -274,9 +274,12 @@ func TestSleepCheckTimesOut(t *testing.T) {
 	old := sleepCheckTimeout
 	t.Cleanup(func() { sleepCheckTimeout = old })
 	sleepCheckTimeout = 20 * time.Millisecond
+	done := make(chan struct{})
+	t.Cleanup(func() { <-done }) // the abandoned run must end before seams are restored
 	detectSystem = func(ctx context.Context) (detect.System, error) {
-		time.Sleep(300 * time.Millisecond)
-		return e.sys, nil
+		defer close(done)
+		<-ctx.Done()
+		return detect.System{}, ctx.Err()
 	}
 	if _, _, err := runSC(t, "--record"); exitCode(err) != 1 {
 		t.Fatalf("exit: %v", err)
