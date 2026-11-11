@@ -9,8 +9,9 @@ live from a CLI, a terminal UI and a web dashboard.
 It is built to be used by anyone: it adopts *your* tmux, Neovim and AI-tool configs instead
 of imposing a fixed setup. The author's own setup is just one profile in `profiles/`.
 
-**Status: design.** Nothing in this repository is implemented yet. Each module gets a
-reviewed design document in `docs/specs/` before any code is written.
+**Status:** the host sleep module (`cairn host`, `cairn doctor host`) is implemented;
+verification on real hardware is pending. Every other module is still in design. Each
+module gets a reviewed design document in `docs/specs/` before any code is written.
 
 ## Why
 
