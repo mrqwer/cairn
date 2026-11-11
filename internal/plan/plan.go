@@ -4,7 +4,9 @@ package plan
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
+	"os"
 	"strings"
 
 	"github.com/mrqwer/cairn/internal/fsx"
@@ -121,11 +123,23 @@ func (a Action) target() string {
 	}
 }
 
-func modeOr(m, def fs.FileMode) fs.FileMode {
+// fileMode returns m, or def when m is zero. Bits beyond the permission bits
+// (setuid, setgid, sticky, type bits) are an error rather than silently
+// dropped.
+func fileMode(m, def fs.FileMode) (fs.FileMode, error) {
 	if m == 0 {
-		return def
+		return def, nil
 	}
-	return m.Perm()
+	if m&^fs.ModePerm != 0 {
+		return 0, fmt.Errorf("mode %v: only permission bits are allowed", m)
+	}
+	return m, nil
+}
+
+// samePerm reports whether fi's permissions equal the action's mode.
+func samePerm(fi fs.FileInfo, m, def fs.FileMode) bool {
+	want, err := fileMode(m, def)
+	return err == nil && fi.Mode().Perm() == want
 }
 
 // Resolve sets each action's State by comparing it with disk and inv. A
@@ -203,7 +217,7 @@ func resolveOne(a Action, root fsx.Root, inv *inventory.Inventory) State {
 		if cur != want {
 			return Update
 		}
-		if st, err := root.Stat(a.Path); err != nil || st.Mode().Perm() != modeOr(a.Mode, defaultFileMode) {
+		if st, err := root.Stat(a.Path); err != nil || !samePerm(st, a.Mode, defaultFileMode) {
 			return Update
 		}
 		return Unchanged
@@ -226,17 +240,17 @@ func resolveOne(a Action, root fsx.Root, inv *inventory.Inventory) State {
 		}
 		return Update
 	case MakeDir:
-		st, err := root.Stat(a.Path)
+		st, err := os.Lstat(root.Path(a.Path))
 		if errors.Is(err, fs.ErrNotExist) {
 			return Create
 		}
 		if err != nil || !st.IsDir() {
-			return Update // apply reports the error
+			return Update // symlink, file or unreadable: apply reports the error
 		}
 		if !managed {
 			return Foreign
 		}
-		if e.Previous != preexisting && st.Mode().Perm() != modeOr(a.Mode, defaultDirMode) {
+		if e.Previous != preexisting && !samePerm(st, a.Mode, defaultDirMode) {
 			return Update
 		}
 		return Unchanged

@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mrqwer/cairn/internal/config"
+	"github.com/mrqwer/cairn/internal/detect"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/inventory"
@@ -21,12 +24,18 @@ import (
 	"github.com/mrqwer/cairn/internal/xdg"
 )
 
-// hostDesired is the registration point for host policies; later tasks
-// replace it with the real policy set.
-var hostDesired = func(context.Context, *config.Config, string) ([]plan.Action, error) { return nil, nil }
+// hostDesired is the registration point for user-level host policies; later
+// tasks replace it. Root-level actions come only from plan.RootBuilder, so
+// apply-root can regenerate them itself.
+var hostDesired = func(context.Context, *config.Config, detect.System, string) ([]plan.Action, error) {
+	return nil, nil
+}
 
-// checkSelf and runSudo are seams for tests.
+// detectSystem, checkSelf and runSudo are seams for tests.
 var (
+	detectSystem = func(ctx context.Context) (detect.System, error) {
+		return detect.Detect(ctx, sysRoot, execx.OSRunner{}, os.Getenv)
+	}
 	checkSelf = plan.CheckSelfOwnership
 	runSudo   = sudoApplyRoot
 )
@@ -36,9 +45,7 @@ var sysRoot = fsx.Root{Dir: "/"}
 // hostState is everything the user-side host commands need.
 type hostState struct {
 	cfg   *config.Config
-	dirs  xdg.Dirs
 	self  string
-	extra []string
 	env   plan.Env
 	plan  plan.Plan
 	stale bool // the root-side host config snapshot differs from cfg.Host
@@ -59,21 +66,7 @@ func selfPath() (string, error) {
 	return filepath.EvalSymlinks(exe)
 }
 
-// hostExtra lists config-derived paths the root side may create: the NVIDIA
-// temporary directory, unless it is the vendor default /var/tmp.
-func hostExtra(cfg *config.Config) []string {
-	n := cfg.Host.GPU.Nvidia
-	if !n.Manage || n.TemporaryFilePath == "" {
-		return nil
-	}
-	p := filepath.Clean(n.TemporaryFilePath)
-	if p == "/var/tmp" {
-		return nil
-	}
-	return []string{p}
-}
-
-func loadHost(ctx context.Context) (*hostState, error) {
+func loadHost(ctx context.Context, mode string) (*hostState, error) {
 	cfg, _, err := loadConfig()
 	if err != nil {
 		return nil, err
@@ -102,22 +95,35 @@ func loadHost(ctx context.Context) (*hostState, error) {
 	if err != nil {
 		return nil, err
 	}
-	desired, err := hostDesired(ctx, cfg, self)
+	sys, err := detectSystem(ctx)
 	if err != nil {
 		return nil, err
 	}
+	desired, err := hostDesired(ctx, cfg, sys, self)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range desired {
+		if a.NeedsRoot {
+			return nil, fmt.Errorf("policy bug: root action %s %s must come from plan.RootBuilder", a.Kind, a.Path)
+		}
+	}
+	rootActs, err := plan.BuildRoot(mode, cfg.Host, sys, self)
+	if err != nil {
+		return nil, err
+	}
+	p := plan.ResolveAll(append(desired, rootActs...), sysRoot, userInv, sysInv)
+	p.Mode = mode
 	return &hostState{
-		cfg:   cfg,
-		dirs:  dirs,
-		self:  self,
-		extra: hostExtra(cfg),
+		cfg:  cfg,
+		self: self,
 		env: plan.Env{
 			Root: sysRoot, Runner: execx.OSRunner{},
 			UserInv: userInv, SysInv: sysInv,
 			UserInvPath: userInvPath, SysInvPath: plan.SysInventoryPath,
 			UserBackupDir: filepath.Join(dirs.State, "host", "backup"),
 		},
-		plan:  plan.ResolveAll(desired, sysRoot, userInv, sysInv),
+		plan:  p,
 		stale: plan.SnapshotStale(sysRoot, cfg.Host),
 	}, nil
 }
@@ -149,14 +155,19 @@ func confirm(in io.Reader, out io.Writer) bool {
 	return ans == "y" || ans == "yes"
 }
 
-// sudoApplyRoot runs `sudo <self> host apply-root --plan <file>`. This is the
-// one place that uses os/exec instead of execx.Runner: sudo needs the
-// terminal for its password prompt and the root side's output should stream
-// to the user, while Runner only returns combined output after exit. The
-// logic it triggers (plan.ApplyRoot) is Runner-based and tested.
-func sudoApplyRoot(ctx context.Context, cmd *cobra.Command, self, file string) error {
-	c := exec.CommandContext(ctx, "sudo", self, "host", "apply-root", "--plan", file)
-	c.Stdin, c.Stdout, c.Stderr = cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()
+// sudoApplyRoot runs `sudo <self> host apply-root --mode <m> --expect <hash>`
+// with the request on stdin (sudo reads the password from the tty). This is
+// the one place that uses os/exec instead of execx.Runner: sudo needs the
+// terminal and the root side's output should stream to the user, while
+// Runner only returns combined output after exit. The logic it triggers
+// (plan.ApplyRoot) is Runner-based and tested.
+func sudoApplyRoot(ctx context.Context, cmd *cobra.Command, self, mode, expect string, force bool, request []byte) error {
+	args := []string{self, "host", "apply-root", "--mode", mode, "--expect", expect}
+	if force {
+		args = append(args, "--force")
+	}
+	c := exec.CommandContext(ctx, "sudo", args...)
+	c.Stdin, c.Stdout, c.Stderr = bytes.NewReader(request), cmd.OutOrStdout(), cmd.ErrOrStderr()
 	if err := c.Run(); err != nil {
 		return fmt.Errorf("sudo %s host apply-root: %w", self, err)
 	}
@@ -175,7 +186,7 @@ func newHostPlanCmd() *cobra.Command {
 		Short: "Show what cairn host apply would change",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			hs, err := loadHost(ctxOf(cmd))
+			hs, err := loadHost(ctxOf(cmd), plan.ModeApply)
 			if err != nil {
 				return err
 			}
@@ -193,7 +204,7 @@ func newHostApplyCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := ctxOf(cmd)
-			hs, err := loadHost(ctx)
+			hs, err := loadHost(ctx, plan.ModeApply)
 			if err != nil {
 				return err
 			}
@@ -222,13 +233,11 @@ func newHostApplyCmd() *cobra.Command {
 			if !rootNeeded {
 				return nil
 			}
-			req := plan.NewRootRequest(hs.plan, hs.extra, hs.cfg.Host, force)
-			file := filepath.Join(hs.dirs.Runtime, "host-plan.json")
-			if err := plan.WriteRootRequest(sysRoot, file, req); err != nil {
+			req, err := json.Marshal(plan.NewRootRequest(hs.plan.Mode, hs.cfg.Host))
+			if err != nil {
 				return err
 			}
-			defer func() { _ = sysRoot.Remove(file) }()
-			return runSudo(ctx, cmd, hs.self, file)
+			return runSudo(ctx, cmd, hs.self, hs.plan.Mode, plan.Hash(hs.plan.Actions), force, req)
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "do not ask for confirmation")
@@ -236,11 +245,14 @@ func newHostApplyCmd() *cobra.Command {
 	return cmd
 }
 
-// newHostApplyRootCmd is the root half of apply. It runs under sudo, so it
-// reads neither XDG directories nor config files: everything comes from the
-// plan file, which it treats as untrusted input.
+// newHostApplyRootCmd is the root half of apply. It runs under sudo and reads
+// neither XDG directories nor config files. Its only unprivileged input is a
+// small request on stdin (mode, host config) plus the approved plan hash on
+// argv; it regenerates the actions itself and runs them only if their hash
+// matches.
 func newHostApplyRootCmd() *cobra.Command {
-	var file string
+	var mode, expect string
+	var force bool
 	cmd := &cobra.Command{
 		Use:    "apply-root",
 		Short:  "Apply the root part of a host plan (run by cairn host apply)",
@@ -250,9 +262,6 @@ func newHostApplyRootCmd() *cobra.Command {
 			if os.Geteuid() != 0 {
 				return errors.New("apply-root must run as root; use cairn host apply")
 			}
-			if !filepath.IsAbs(file) {
-				return fmt.Errorf("--plan %q: must be an absolute path", file)
-			}
 			self, err := selfPath()
 			if err != nil {
 				return err
@@ -260,7 +269,15 @@ func newHostApplyRootCmd() *cobra.Command {
 			if err := checkSelf(sysRoot, self); err != nil {
 				return err
 			}
-			req, err := plan.ReadRootRequest(sysRoot, file)
+			req, err := plan.ReadRootRequest(cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
+			if req.Mode != mode {
+				return fmt.Errorf("request mode %q does not match --mode %q", req.Mode, mode)
+			}
+			ctx := ctxOf(cmd)
+			sys, err := detectSystem(ctx)
 			if err != nil {
 				return err
 			}
@@ -269,14 +286,18 @@ func newHostApplyRootCmd() *cobra.Command {
 				return err
 			}
 			env := plan.Env{Root: sysRoot, Runner: execx.OSRunner{}, SysInv: sysInv, SysInvPath: plan.SysInventoryPath}
-			if err := plan.ApplyRoot(ctxOf(cmd), req, env); err != nil {
+			opts := plan.RootOptions{Expect: expect, Force: force, Sys: sys, Self: self}
+			if err := plan.ApplyRoot(ctx, req, env, opts); err != nil {
 				return err
 			}
 			cmd.Println("root changes applied")
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&file, "plan", "", "plan file written by cairn host apply")
-	_ = cmd.MarkFlagRequired("plan")
+	cmd.Flags().StringVar(&mode, "mode", "", "plan mode (apply or repair)")
+	cmd.Flags().StringVar(&expect, "expect", "", "hash of the approved root plan")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite managed files modified by hand")
+	_ = cmd.MarkFlagRequired("mode")
+	_ = cmd.MarkFlagRequired("expect")
 	return cmd
 }

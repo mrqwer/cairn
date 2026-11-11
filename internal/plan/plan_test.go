@@ -156,7 +156,10 @@ func TestAllowedRootPath(t *testing.T) {
 		{"/etc/systemd/system/systemd-suspend-then-hibernate.service.d/fallback.conf", false, true},
 		{"/etc/systemd/system/sshd.service.d/override.conf", false, false},
 		{"/etc/systemd/system/multi-user.target.wants/sshd.service", false, false},
-		{"/etc/systemd/system/sshd.service.d/50-cairn.conf", true, true},
+		{"/etc/systemd/system/sshd.service.d/50-cairn.conf", false, false},
+		{"/etc/systemd/system/systemd-suspend-then-hibernate.service.d/50-cairn.conf", true, true},
+		{"/etc/systemd/system/cairn-notify.path", false, false},
+		{"/etc/systemd/system/cairn-sleep-fallback.service.d/50-cairn.conf", false, false},
 		{"/boot/loader/entries/arch.conf", false, true},
 		{"/boot/loader/loader.conf", false, false},
 		{"/boot/loader/entries/sub/arch.conf", false, false},
@@ -206,6 +209,12 @@ func TestCheckRootActionKinds(t *testing.T) {
 		{"root enable sshd", plan.Action{Kind: plan.EnableUnit, Unit: "sshd.service"}, plan.ModeApply, false},
 		{"root disable paccache", plan.Action{Kind: plan.DisableUnit, Unit: "paccache.timer"}, plan.ModeApply, true},
 		{"unknown kind", plan.Action{Kind: "Chown", Path: sleepConf}, plan.ModeApply, false},
+		{"world-writable file", plan.Action{Kind: plan.WriteFile, Path: sleepConf, Mode: 0o666}, plan.ModeApply, false},
+		{"group-writable dir", plan.Action{Kind: plan.MakeDir, Path: "/var/lib/cairn/host", Mode: 0o775}, plan.ModeApply, false},
+		{"setuid file", plan.Action{Kind: plan.WriteFile, Path: "/usr/lib/systemd/system-sleep/50-cairn", Mode: 0o755 | os.ModeSetuid}, plan.ModeApply, false},
+		{"sticky dir", plan.Action{Kind: plan.MakeDir, Path: "/var/lib/cairn/host", Mode: 0o755 | os.ModeSticky}, plan.ModeApply, false},
+		{"executable hook", plan.Action{Kind: plan.WriteFile, Path: "/usr/lib/systemd/system-sleep/50-cairn", Mode: 0o755}, plan.ModeApply, true},
+		{"foreign service dropin", plan.Action{Kind: plan.WriteFile, Path: "/etc/systemd/system/sshd.service.d/50-cairn.conf"}, plan.ModeApply, false},
 	}
 	for _, c := range cases {
 		err := plan.CheckRootAction(c.a, extra, c.mode)

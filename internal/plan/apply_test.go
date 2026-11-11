@@ -3,14 +3,11 @@ package plan_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"os"
+	"io/fs"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/mrqwer/cairn/internal/config"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/inventory"
@@ -48,6 +45,8 @@ func newEnv(t *testing.T) (plan.Env, *execx.FakeRunner) {
 		UserInvPath:   userInvPath,
 		SysInvPath:    plan.SysInventoryPath,
 		UserBackupDir: "/state/cairn/host/backup",
+		// Temp dirs belong to the test user; treat them as root-owned.
+		OwnerOf: func(fs.FileInfo) (uint32, bool) { return 0, true },
 	}, fr
 }
 
@@ -247,155 +246,5 @@ func TestApplyValidatesBeforeExecuting(t *testing.T) {
 	}
 	if env.Root.Exists(userUnit) {
 		t.Fatal("user action executed before validation finished")
-	}
-}
-
-func rootRequest(mode string, actions ...plan.Action) plan.RootRequest {
-	host := config.Host{}
-	host.Sleep.Lid = "suspend-then-hibernate"
-	host.Sleep.LidAC = "suspend-then-hibernate"
-	host.Sleep.CriticalBattery = "hibernate"
-	host.Sleep.IdleBattery = "hibernate"
-	host.Sleep.HibernateAfter = config.Duration{Duration: 15 * time.Minute}
-	host.GPU.Nvidia.TemporaryFilePath = "/home/.nvidia-suspend"
-	return plan.NewRootRequest(plan.Plan{Mode: mode, Actions: actions}, []string{"/home/.nvidia-suspend"}, host, false)
-}
-
-func TestApplyRootWritesConfigSnapshot(t *testing.T) {
-	env, _ := newEnv(t)
-	req := rootRequest(plan.ModeApply,
-		plan.Action{Kind: plan.MakeDir, Path: "/home/.nvidia-suspend", Mode: 0o700, NeedsRoot: true, Class: inventory.ManagedDir},
-		plan.Action{Kind: plan.WriteFile, Path: sleepConf, Content: []byte("x"), NeedsRoot: true},
-		plan.Action{Kind: plan.SetGSetting, Schema: gsSchema, Key: gsKey, Value: "'x'"}, // user-level: dropped
-	)
-	if len(req.Actions) != 2 {
-		t.Fatalf("request must carry root actions only: %+v", req.Actions)
-	}
-	if err := plan.ApplyRoot(context.Background(), req, env); err != nil {
-		t.Fatal(err)
-	}
-	st, err := env.Root.Stat(plan.HostConfigPath)
-	if err != nil || st.Mode().Perm() != 0o644 {
-		t.Fatalf("snapshot: %v %v", st, err)
-	}
-	data, _ := env.Root.ReadFile(plan.HostConfigPath)
-	var h config.Host
-	if err := json.Unmarshal(data, &h); err != nil || h.Sleep.HibernateAfter.Duration != 15*time.Minute || h.GPU.Nvidia.TemporaryFilePath != "/home/.nvidia-suspend" {
-		t.Fatalf("snapshot content %s: %v", data, err)
-	}
-	if st, err := env.Root.Stat("/home/.nvidia-suspend"); err != nil || !st.IsDir() || st.Mode().Perm() != 0o700 {
-		t.Fatalf("temp dir: %v %v", st, err)
-	}
-	saved, err := inventory.Load(env.Root, plan.SysInventoryPath)
-	if err != nil || len(saved.Entries) != 2 {
-		t.Fatalf("saved inventory %+v %v", saved, err)
-	}
-}
-
-func TestApplyRootRepairMode(t *testing.T) {
-	const conflicting = "/etc/systemd/system/sleep-fallback.service"
-	env, _ := newEnv(t)
-	put(t, env.Root, conflicting, "[Service]\nExecStart=/usr/bin/systemctl suspend\n")
-	rm := plan.Action{Kind: plan.RemoveFile, Path: conflicting, NeedsRoot: true}
-
-	err := plan.ApplyRoot(context.Background(), rootRequest(plan.ModeApply, rm), env)
-	if err == nil || !env.Root.Exists(conflicting) {
-		t.Fatalf("apply mode must reject %s: err=%v", conflicting, err)
-	}
-	if env.Root.Exists(plan.HostConfigPath) {
-		t.Fatal("rejected request must not write anything")
-	}
-
-	if err := plan.ApplyRoot(context.Background(), rootRequest(plan.ModeRepair, rm), env); err != nil {
-		t.Fatal(err)
-	}
-	if env.Root.Exists(conflicting) {
-		t.Fatal("repair did not remove the conflicting unit")
-	}
-	if got, _ := env.Root.ReadFile("/var/lib/cairn/host/backup/%etc%systemd%system%sleep-fallback.service"); !strings.Contains(string(got), "systemctl suspend") {
-		t.Fatalf("backup missing: %q", got)
-	}
-
-	boot := plan.Action{Kind: plan.WriteFile, Path: "/boot/loader/entries/arch.conf", Content: []byte("options resume_offset=1\n"), NeedsRoot: true}
-	if err := plan.ApplyRoot(context.Background(), rootRequest(plan.ModeApply, boot), env); err == nil {
-		t.Fatal("boot entry write accepted in apply mode")
-	}
-	if err := plan.ApplyRoot(context.Background(), rootRequest(plan.ModeRepair, boot), env); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestApplyRootRejectsBadRequests(t *testing.T) {
-	ok := plan.Action{Kind: plan.WriteFile, Path: sleepConf, Content: []byte("x"), NeedsRoot: true}
-	cases := map[string]func(r *plan.RootRequest){
-		"user action": func(r *plan.RootRequest) {
-			r.Actions = append(r.Actions, plan.Action{Kind: plan.SetGSetting, Schema: "a", Key: "b", Value: "c"})
-		},
-		"bad version":     func(r *plan.RootRequest) { r.Version = 99 },
-		"bad mode":        func(r *plan.RootRequest) { r.Mode = "yolo" },
-		"extra /etc":      func(r *plan.RootRequest) { r.Extra = []string{"/etc"} },
-		"extra root":      func(r *plan.RootRequest) { r.Extra = []string{"/"} },
-		"extra relative":  func(r *plan.RootRequest) { r.Extra = []string{"home/x"} },
-		"extra dotdot":    func(r *plan.RootRequest) { r.Extra = []string{"/home/../etc/x"} },
-		"bad host config": func(r *plan.RootRequest) { r.Host.Sleep.Lid = "explode" },
-		"bad command": func(r *plan.RootRequest) {
-			r.Actions = append(r.Actions, plan.Action{Kind: plan.RunCommand, Cmd: []string{"rm", "-rf", "/"}, NeedsRoot: true})
-		},
-		"not root": func(r *plan.RootRequest) { r.Actions[0].NeedsRoot = false },
-	}
-	for name, mutate := range cases {
-		env, fr := newEnv(t)
-		req := rootRequest(plan.ModeApply, ok)
-		mutate(&req)
-		if err := plan.ApplyRoot(context.Background(), req, env); err == nil {
-			t.Errorf("%s: accepted", name)
-		}
-		if env.Root.Exists(sleepConf) || env.Root.Exists(plan.HostConfigPath) || len(fr.Calls) != 0 {
-			t.Errorf("%s: executed something before rejecting", name)
-		}
-	}
-}
-
-func TestApplyRootReResolvesState(t *testing.T) {
-	env, _ := newEnv(t)
-	put(t, env.Root, sleepConf, "hand edit\n")
-	env.SysInv.Upsert(inventory.Entry{Path: sleepConf, SHA256: fsx.SHA256([]byte("old managed"))})
-	// The requester claims "create"; the root side must not trust it.
-	req := rootRequest(plan.ModeApply, plan.Action{Kind: plan.WriteFile, Path: sleepConf, Content: []byte("x"), NeedsRoot: true, State: plan.Create})
-	if err := plan.ApplyRoot(context.Background(), req, env); !errors.Is(err, plan.ErrModifiedByUser) {
-		t.Fatalf("err=%v, want ErrModifiedByUser", err)
-	}
-	req.Force = true
-	if err := plan.ApplyRoot(context.Background(), req, env); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestRootRequestFile(t *testing.T) {
-	root := newRoot(t)
-	req := rootRequest(plan.ModeRepair, plan.Action{Kind: plan.WriteFile, Path: sleepConf, Content: []byte("x"), NeedsRoot: true})
-	if err := plan.WriteRootRequest(root, "/run/cairn/host-plan.json", req); err != nil {
-		t.Fatal(err)
-	}
-	st, _ := root.Stat("/run/cairn/host-plan.json")
-	if st.Mode().Perm() != 0o600 {
-		t.Fatalf("plan file mode %v", st.Mode())
-	}
-	got, err := plan.ReadRootRequest(root, "/run/cairn/host-plan.json")
-	if err != nil || got.Mode != plan.ModeRepair || len(got.Actions) != 1 || string(got.Actions[0].Content) != "x" {
-		t.Fatalf("round trip %+v %v", got, err)
-	}
-	if err := os.Chmod(root.Path("/run/cairn/host-plan.json"), 0o666); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := plan.ReadRootRequest(root, "/run/cairn/host-plan.json"); err == nil {
-		t.Fatal("world-writable plan file accepted")
-	}
-	put(t, root, "/run/cairn/junk.json", "not json")
-	if err := os.Chmod(root.Path("/run/cairn/junk.json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := plan.ReadRootRequest(root, "/run/cairn/junk.json"); err == nil || strings.Contains(err.Error(), "invalid character") {
-		t.Fatalf("junk plan file: %v (must fail without echoing content)", err)
 	}
 }

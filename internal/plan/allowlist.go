@@ -3,6 +3,7 @@ package plan
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"path"
 	"regexp"
 	"slices"
@@ -27,8 +28,9 @@ var (
 		"/etc/UPower/UPower.conf.d/50-cairn.conf",
 		"/etc/modprobe.d/nvidia-utils.conf",
 	}
-	// repairDropInDirs hold foreign drop-ins repair may remove.
-	repairDropInDirs = []string{
+	// sleepDropInDirs hold cairn's 50-cairn.conf and, in repair mode,
+	// foreign drop-ins that may be removed.
+	sleepDropInDirs = []string{
 		systemUnitDir + "/systemd-hibernate.service.d",
 		systemUnitDir + "/systemd-suspend-then-hibernate.service.d",
 	}
@@ -82,12 +84,12 @@ func normalRootPath(p string) bool {
 	if slices.Contains(rootFiles, p) {
 		return true
 	}
-	dir, base := path.Split(p)
-	dir = strings.TrimSuffix(dir, "/")
-	if dir == systemUnitDir {
-		return strings.HasPrefix(base, "cairn-") && unitName.MatchString(base)
+	if path.Dir(p) == systemUnitDir {
+		base := path.Base(p)
+		return strings.HasPrefix(base, "cairn-") && strings.HasSuffix(base, ".service") && unitName.MatchString(base)
 	}
-	return path.Dir(dir) == systemUnitDir && strings.HasSuffix(dir, ".service.d") && base == "50-cairn.conf"
+	// Drop-ins only for the sleep services cairn hooks into.
+	return path.Base(p) == "50-cairn.conf" && slices.Contains(sleepDropInDirs, path.Dir(p))
 }
 
 // repairRemovable: a top-level unit file or a foreign sleep-service drop-in.
@@ -96,7 +98,7 @@ func repairRemovable(p string) bool {
 	if dir == systemUnitDir {
 		return strings.HasSuffix(base, ".service") && unitName.MatchString(base)
 	}
-	return slices.Contains(repairDropInDirs, dir) && !strings.HasPrefix(base, ".")
+	return slices.Contains(sleepDropInDirs, dir) && !strings.HasPrefix(base, ".")
 }
 
 func bootEntry(p string) bool {
@@ -159,6 +161,14 @@ func userCommand(cmd []string) bool {
 func CheckRootAction(a Action, extra []string, mode string) error {
 	switch a.Kind {
 	case WriteFile, RemoveFile, MakeDir:
+		if a.Kind != RemoveFile {
+			if _, err := fileMode(a.Mode, 0); err != nil {
+				return fmt.Errorf("%s %q: %w", a.Kind, a.Path, err)
+			}
+			if a.Mode&0o022 != 0 {
+				return fmt.Errorf("%s %q: mode %v is group/world writable", a.Kind, a.Path, a.Mode)
+			}
+		}
 		if !AllowedRootPath(a.Path, extra, mode) {
 			return fmt.Errorf("%s %q: path not allowed for root in %s mode", a.Kind, a.Path, mode)
 		}
@@ -198,6 +208,9 @@ func CheckUserAction(a Action) error {
 	case WriteFile, RemoveFile, MakeDir:
 		if _, ok := cleanAbs(a.Path); !ok {
 			return fmt.Errorf("%s %q: path must be absolute with no .. components", a.Kind, a.Path)
+		}
+		if _, err := fileMode(a.Mode, 0); err != nil {
+			return fmt.Errorf("%s %q: %w", a.Kind, a.Path, err)
 		}
 	case EnableUnit, DisableUnit:
 		if !a.UserUnit || !userUnit(a.Unit) {
@@ -241,29 +254,42 @@ func CheckSelfOwnership(root fsx.Root, self string) error {
 	if !ok {
 		return fmt.Errorf("cairn binary path %q is not absolute", self)
 	}
-	for p := c; ; p = path.Dir(p) {
-		why := ""
+	if err := trustedChain(root, c, nil); err != nil {
+		return errors.New("refusing to run " + c + " as root: " + err.Error() +
+			"; install a root-owned copy with `just install` " +
+			"(sudo install -m 0755 -o root -g root bin/cairn /usr/local/bin/cairn) and run that")
+	}
+	return nil
+}
+
+func statOwner(fi fs.FileInfo) (uint32, bool) {
+	sys, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return sys.Uid, true
+}
+
+// trustedChain checks p and each of its parents up to "/": each must be
+// owned by root (per ownerOf; nil means the real owner) and not group/world
+// writable.
+func trustedChain(root fsx.Root, p string, ownerOf func(fs.FileInfo) (uint32, bool)) error {
+	if ownerOf == nil {
+		ownerOf = statOwner
+	}
+	for p = path.Clean(p); ; p = path.Dir(p) {
 		st, err := root.Stat(p)
-		switch {
-		case err != nil:
-			why = "not inspectable (" + err.Error() + ")"
-		case st.Sys() == nil:
-			why = "owner unknown"
-		default:
-			sys, ok := st.Sys().(*syscall.Stat_t)
-			switch {
-			case !ok:
-				why = "owner unknown"
-			case sys.Uid != 0:
-				why = fmt.Sprintf("owned by uid %d, not root", sys.Uid)
-			case st.Mode().Perm()&0o022 != 0:
-				why = fmt.Sprintf("mode %v is group/world writable", st.Mode().Perm())
-			}
+		if err != nil {
+			return fmt.Errorf("%s is not inspectable (%v)", p, err)
 		}
-		if why != "" {
-			return errors.New("refusing to run " + c + " as root: " + p + " is " + why +
-				"; install a root-owned copy with `just install` " +
-				"(sudo install -m 0755 -o root -g root bin/cairn /usr/local/bin/cairn) and run that")
+		uid, ok := ownerOf(st)
+		switch {
+		case !ok:
+			return fmt.Errorf("%s has an unknown owner", p)
+		case uid != 0:
+			return fmt.Errorf("%s is owned by uid %d, not root", p, uid)
+		case st.Mode().Perm()&0o022 != 0:
+			return fmt.Errorf("%s has group/world-writable mode %v", p, st.Mode().Perm())
 		}
 		if p == "/" {
 			return nil

@@ -70,3 +70,18 @@ func TestValidateBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestValidatePathHygiene(t *testing.T) {
+	for _, p := range []string{"/home/x\n/etc", "/home/../etc/x", "/home//x", "/home/x/", "/home/x\x7f", "/home/\tx"} {
+		var cfg config.Config
+		cfg.Host.Sleep.Lid, cfg.Host.Sleep.LidAC = "suspend", "suspend"
+		cfg.Host.Sleep.CriticalBattery, cfg.Host.Sleep.IdleBattery = "hibernate", "hibernate"
+		cfg.Host.Sleep.HibernateAfter, _ = config.ParseDuration("15min")
+		cfg.Host.GPU.Nvidia.TemporaryFilePath = p
+		cfg.Host.Sleep.HibernationSwap.Path = p
+		got := keys(cfg.Validate())
+		if !got["host.gpu.nvidia.temporary_file_path"] || !got["host.sleep.hibernation_swap.path"] || len(got) != 2 {
+			t.Errorf("%q: errors %v", p, got)
+		}
+	}
+}

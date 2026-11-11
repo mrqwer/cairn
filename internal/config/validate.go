@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"path"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -47,9 +49,28 @@ func (c *Config) Validate() []FieldError {
 		{"host.sleep.hibernation_swap.path", s.HibernationSwap.Path},
 		{"host.gpu.nvidia.temporary_file_path", c.Host.GPU.Nvidia.TemporaryFilePath},
 	} {
-		if p.val != "" && !path.IsAbs(p.val) {
-			errs = append(errs, FieldError{p.key, fmt.Sprintf("%q is not an absolute path", p.val)})
+		if p.val == "" {
+			continue
+		}
+		if msg := checkPath(p.val); msg != "" {
+			errs = append(errs, FieldError{p.key, fmt.Sprintf("%q %s", p.val, msg)})
 		}
 	}
 	return errs
+}
+
+// checkPath requires an absolute, already-clean path without ".." parts or
+// control characters; these values reach root-side file operations.
+func checkPath(p string) string {
+	switch {
+	case !path.IsAbs(p):
+		return "is not an absolute path"
+	case strings.ContainsFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f }):
+		return "contains control characters"
+	case slices.Contains(strings.Split(p, "/"), ".."):
+		return "contains a .. component"
+	case path.Clean(p) != p:
+		return "is not a clean path"
+	}
+	return ""
 }

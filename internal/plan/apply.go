@@ -3,15 +3,14 @@ package plan
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path"
 	"strings"
+	"syscall"
 
-	"github.com/mrqwer/cairn/internal/config"
 	"github.com/mrqwer/cairn/internal/events"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/fsx"
@@ -29,6 +28,9 @@ type Env struct {
 	UserInv, SysInv         *inventory.Inventory
 	UserInvPath, SysInvPath string
 	Events                  events.Log
+	// OwnerOf returns the owning uid of a file; nil means the real owner.
+	// Tests inject it because temp dirs cannot be root-owned.
+	OwnerOf func(fs.FileInfo) (uid uint32, ok bool)
 	// UserBackupDir receives backups of foreign user-level files, since the
 	// system backup directory is root-only. Empty means BackupDir.
 	UserBackupDir string
@@ -99,7 +101,7 @@ func Apply(ctx context.Context, p Plan, env Env, opts Options) error {
 		if a.NeedsRoot {
 			inv, backupDir = env.SysInv, BackupDir
 		}
-		if err := env.applyOne(ctx, a, inv, backupDir); err != nil {
+		if err := env.applyOne(ctx, a, inv, backupDir, opts.Extra); err != nil {
 			runErr = fmt.Errorf("%s %s: %w", a.Kind, a.target(), err)
 			break
 		}
@@ -140,7 +142,7 @@ func systemctl(a Action, verb string) []string {
 // obvious: RemoveFile of a managed file with a backup restores the backup;
 // SetGSetting back to the recorded previous value un-manages the setting;
 // MakeDir on a pre-existing directory only records it (no chmod).
-func (env Env) applyOne(ctx context.Context, a Action, inv *inventory.Inventory, backupDir string) error {
+func (env Env) applyOne(ctx context.Context, a Action, inv *inventory.Inventory, backupDir string, extra []string) error {
 	key := a.target()
 	prev, managed := inv.Get(key)
 	switch a.Kind {
@@ -161,7 +163,11 @@ func (env Env) applyOne(ctx context.Context, a Action, inv *inventory.Inventory,
 				return err
 			}
 		}
-		if err := env.Root.WriteAtomic(a.Path, a.Content, modeOr(a.Mode, defaultFileMode)); err != nil {
+		mode, err := fileMode(a.Mode, defaultFileMode)
+		if err != nil {
+			return err
+		}
+		if err := env.Root.WriteAtomic(a.Path, a.Content, mode); err != nil {
 			return err
 		}
 		inv.Upsert(e)
@@ -176,7 +182,11 @@ func (env Env) applyOne(ctx context.Context, a Action, inv *inventory.Inventory,
 			if err != nil {
 				return fmt.Errorf("restore backup: %w", err)
 			}
-			if err := env.Root.WriteAtomic(a.Path, data, modeOr(a.Mode, defaultFileMode)); err != nil {
+			mode, err := fileMode(a.Mode, defaultFileMode)
+			if err != nil {
+				return err
+			}
+			if err := env.Root.WriteAtomic(a.Path, data, mode); err != nil {
 				return err
 			}
 		} else if err := env.Root.Remove(a.Path); err != nil {
@@ -192,11 +202,7 @@ func (env Env) applyOne(ctx context.Context, a Action, inv *inventory.Inventory,
 			e.Previous = preexisting
 		}
 		if e.Previous != preexisting {
-			mode := modeOr(a.Mode, defaultDirMode)
-			if err := env.Root.MkdirAll(a.Path, mode); err != nil {
-				return err
-			}
-			if err := os.Chmod(env.Root.Path(a.Path), mode); err != nil {
+			if err := env.makeDir(a, extra); err != nil {
 				return err
 			}
 		}
@@ -290,142 +296,50 @@ func (env Env) backup(p, dir string) (string, error) {
 	}
 }
 
-const (
-	requestVersion = 1
-	maxRequestSize = 16 << 20
-)
-
-// RootRequest is what the user-side `cairn host apply` hands to
-// `cairn host apply-root` through sudo. The root side treats it as untrusted:
-// it re-validates every field and re-resolves the actions itself, and needs
-// no XDG environment or config files.
-type RootRequest struct {
-	Version int         `json:"version"`
-	Mode    string      `json:"mode"`
-	Force   bool        `json:"force,omitempty"`
-	Extra   []string    `json:"extra,omitempty"`
-	Host    config.Host `json:"host"`
-	Actions []Action    `json:"actions"`
-}
-
-// NewRootRequest builds the request for the root actions of p (all of them,
-// including unchanged ones, since the root side re-resolves).
-func NewRootRequest(p Plan, extra []string, host config.Host, force bool) RootRequest {
-	mode := p.Mode
-	if mode == "" {
-		mode = ModeApply
+// makeDir creates (if missing) and chmods the directory a.Path without
+// following symlinks. As root, every parent must be root-owned and not
+// group/world writable, and the parent of a config-derived (extra) path
+// must already exist.
+func (env Env) makeDir(a Action, extra []string) error {
+	mode, err := fileMode(a.Mode, defaultDirMode)
+	if err != nil {
+		return err
 	}
-	r := RootRequest{Version: requestVersion, Mode: mode, Force: force, Extra: extra, Host: host}
-	for _, a := range p.Actions {
-		if a.NeedsRoot {
-			r.Actions = append(r.Actions, a)
+	p := path.Clean(a.Path)
+	full := env.Root.Path(p)
+	st, err := os.Lstat(full)
+	switch {
+	case err == nil && st.Mode()&fs.ModeSymlink != 0:
+		return fmt.Errorf("%s is a symlink; refusing to use it", p)
+	case err == nil && !st.IsDir():
+		return fmt.Errorf("%s exists and is not a directory", p)
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return err
+	}
+	missing := err != nil
+	parent := path.Dir(p)
+	if extraPath := a.NeedsRoot && inExtra(p, extra); missing && !extraPath {
+		if err := env.Root.MkdirAll(parent, 0o755); err != nil {
+			return err
 		}
 	}
-	return r
-}
-
-// Validate checks the whole request; any failure rejects all of it.
-func (r RootRequest) Validate() error {
-	if r.Version != requestVersion {
-		return fmt.Errorf("plan request version %d, want %d", r.Version, requestVersion)
-	}
-	if r.Mode != ModeApply && r.Mode != ModeRepair {
-		return fmt.Errorf("plan request mode %q is not %q or %q", r.Mode, ModeApply, ModeRepair)
-	}
-	errs := []error{checkExtra(r.Extra)}
-	cfg := config.Config{Host: r.Host}
-	for _, e := range cfg.Validate() {
-		errs = append(errs, e)
-	}
-	for _, a := range r.Actions {
-		if !a.NeedsRoot {
-			errs = append(errs, fmt.Errorf("%s %s: user-level action in root request", a.Kind, a.target()))
-			continue
+	if a.NeedsRoot {
+		if err := trustedChain(env.Root, parent, env.OwnerOf); err != nil {
+			return err
 		}
-		errs = append(errs, CheckRootAction(a, r.Extra, r.Mode))
 	}
-	return errors.Join(errs...)
-}
-
-// WriteRootRequest stores r at p with mode 0600 (parent created 0700).
-func WriteRootRequest(root fsx.Root, p string, r RootRequest) error {
-	data, err := json.Marshal(r)
+	if missing {
+		if err := os.Mkdir(full, mode); err != nil {
+			return err
+		}
+	}
+	fd, err := syscall.Open(full, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		return err
+		return fmt.Errorf("open %s: %w", p, err)
 	}
-	if err := root.MkdirAll(path.Dir(p), 0o700); err != nil {
-		return err
+	defer func() { _ = syscall.Close(fd) }()
+	if err := syscall.Fchmod(fd, uint32(mode)); err != nil {
+		return fmt.Errorf("chmod %s: %w", p, err)
 	}
-	return root.WriteAtomic(p, data, 0o600)
-}
-
-// ReadRootRequest loads a request written by WriteRootRequest. The file must
-// be a regular, not group/world-writable file; parse errors do not echo its
-// content (it is read with root privileges).
-func ReadRootRequest(root fsx.Root, p string) (RootRequest, error) {
-	var r RootRequest
-	st, err := root.Stat(p)
-	if err != nil {
-		return r, fmt.Errorf("plan file: %w", err)
-	}
-	if !st.Mode().IsRegular() || st.Size() > maxRequestSize || st.Mode().Perm()&0o022 != 0 {
-		return r, fmt.Errorf("plan file %s: must be a regular file, at most %d bytes, not group/world writable", p, maxRequestSize)
-	}
-	data, err := root.ReadFile(p)
-	if err != nil {
-		return r, fmt.Errorf("plan file: %w", err)
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&r); err != nil {
-		return RootRequest{}, fmt.Errorf("plan file %s is not a valid cairn plan", p)
-	}
-	return r, nil
-}
-
-// HostSnapshot is the content of HostConfigPath for host.
-func HostSnapshot(host config.Host) ([]byte, error) {
-	data, err := json.MarshalIndent(host, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(data, '\n'), nil
-}
-
-// SnapshotStale reports whether HostConfigPath differs from host.
-func SnapshotStale(root fsx.Root, host config.Host) bool {
-	want, err := HostSnapshot(host)
-	if err != nil {
-		return true
-	}
-	got, err := root.ReadFile(HostConfigPath)
-	return err != nil || !bytes.Equal(got, want)
-}
-
-// ApplyRoot is the root side of apply: validate everything, re-resolve the
-// actions against the system inventory, write the host config snapshot for
-// later root-side commands, then apply the root actions.
-func ApplyRoot(ctx context.Context, r RootRequest, env Env) error {
-	if err := r.Validate(); err != nil {
-		return fmt.Errorf("rejected plan: %w", err)
-	}
-	if env.SysInv == nil {
-		return errors.New("plan: system inventory not loaded")
-	}
-	p := Resolve(r.Actions, env.Root, env.SysInv)
-	p.Mode = r.Mode
-	if m := p.ModifiedPaths(); len(m) > 0 && !r.Force {
-		return fmt.Errorf("%w: %s", ErrModifiedByUser, strings.Join(m, ", "))
-	}
-	snap, err := HostSnapshot(r.Host)
-	if err != nil {
-		return err
-	}
-	if err := env.Root.MkdirAll(SysStateDir, 0o755); err != nil {
-		return err
-	}
-	if err := env.Root.WriteAtomic(HostConfigPath, snap, 0o644); err != nil {
-		return err
-	}
-	return Apply(ctx, p, env, Options{Force: r.Force, RootOnly: true, Extra: r.Extra})
+	return nil
 }
