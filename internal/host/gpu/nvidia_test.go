@@ -144,6 +144,25 @@ func results(cs []doctor.Check) map[string]doctor.Result {
 	return out
 }
 
+func vr(n uint64) func() uint64 { return func() uint64 { return n } }
+
+func TestVRAMQueriedOnlyBySpaceCheck(t *testing.T) {
+	calls := 0
+	vram := func() uint64 { calls++; return gib }
+	cs := NvidiaChecks(cfg(), nv(), fsx.Root{Dir: t.TempDir()}, &inventory.Inventory{}, free(100*gib), vram)
+	if calls != 0 {
+		t.Fatalf("VRAM queried while building checks")
+	}
+	for _, c := range cs {
+		if c.ID() != IDSpace {
+			c.Run(context.Background())
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("VRAM queried by a check other than %s", IDSpace)
+	}
+}
+
 func free(n uint64) func(string) (uint64, error) {
 	return func(string) (uint64, error) { return n, nil }
 }
@@ -154,19 +173,19 @@ func TestParamsMismatchWarnsReboot(t *testing.T) {
 	if err := root.WriteAtomic(VendorMask, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r := results(NvidiaChecks(cfg(), nv(), root, inv, free(100*gib), 8*gib))[IDParams]
+	r := results(NvidiaChecks(cfg(), nv(), root, inv, free(100*gib), vr(8*gib)))[IDParams]
 	if r.Status != doctor.Warn || r.Fix != "reboot to load the new NVIDIA options" ||
 		r.Evidence != "configured "+cfgPath+", driver uses /var/tmp" {
 		t.Fatalf("%+v", r)
 	}
 	root2 := fsx.Root{Dir: t.TempDir()}
-	r = results(NvidiaChecks(cfg(), nv(), root2, inv, free(100*gib), 8*gib))[IDParams]
+	r = results(NvidiaChecks(cfg(), nv(), root2, inv, free(100*gib), vr(8*gib)))[IDParams]
 	if r.Status != doctor.Warn || r.Fix != "cairn host apply" {
 		t.Fatalf("%+v", r)
 	}
 	sys := nv()
 	sys.NvidiaParams["TemporaryFilePath"] = `"` + cfgPath + `"`
-	if r = results(NvidiaChecks(cfg(), sys, root, inv, free(100*gib), 8*gib))[IDParams]; r.Status != doctor.OK {
+	if r = results(NvidiaChecks(cfg(), sys, root, inv, free(100*gib), vr(8*gib)))[IDParams]; r.Status != doctor.OK {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -174,17 +193,17 @@ func TestParamsMismatchWarnsReboot(t *testing.T) {
 func TestNotEnoughSpaceCrit(t *testing.T) {
 	root := fsx.Root{Dir: t.TempDir()}
 	inv := &inventory.Inventory{}
-	if r := results(NvidiaChecks(cfg(), nv(), root, inv, free(8*gib), 8*gib))[IDSpace]; r.Status != doctor.Crit {
+	if r := results(NvidiaChecks(cfg(), nv(), root, inv, free(8*gib), vr(8*gib)))[IDSpace]; r.Status != doctor.Crit {
 		t.Fatalf("%+v", r)
 	}
-	if r := results(NvidiaChecks(cfg(), nv(), root, inv, free(9*gib), 8*gib))[IDSpace]; r.Status != doctor.OK {
+	if r := results(NvidiaChecks(cfg(), nv(), root, inv, free(9*gib), vr(8*gib)))[IDSpace]; r.Status != doctor.OK {
 		t.Fatalf("%+v", r)
 	}
-	if r := results(NvidiaChecks(cfg(), nv(), root, inv, free(9*gib), 0))[IDSpace]; r.Status != doctor.Unknown {
+	if r := results(NvidiaChecks(cfg(), nv(), root, inv, free(9*gib), vr(0)))[IDSpace]; r.Status != doctor.Unknown {
 		t.Fatalf("no vram: %+v", r)
 	}
 	bad := func(string) (uint64, error) { return 0, errors.New("boom") }
-	if r := results(NvidiaChecks(cfg(), nv(), root, inv, bad, 8*gib))[IDSpace]; r.Status != doctor.Unknown {
+	if r := results(NvidiaChecks(cfg(), nv(), root, inv, bad, vr(8*gib)))[IDSpace]; r.Status != doctor.Unknown {
 		t.Fatalf("statfs err: %+v", r)
 	}
 }
@@ -195,16 +214,16 @@ func TestUpstreamChangedWarns(t *testing.T) {
 		t.Fatal(err)
 	}
 	inv := &inventory.Inventory{}
-	if r := results(NvidiaChecks(cfg(), nv(), root, inv, free(100*gib), gib))[IDUpstream]; r.Status != doctor.OK {
+	if r := results(NvidiaChecks(cfg(), nv(), root, inv, free(100*gib), vr(gib)))[IDUpstream]; r.Status != doctor.OK {
 		t.Fatalf("nothing managed: %+v", r)
 	}
 	inv.Upsert(inventory.Entry{Path: VendorMask, Class: inventory.Mask, Upstream: VendorUpstream, UpstreamSHA256: fsx.SHA256([]byte("v1"))})
-	r := results(NvidiaChecks(cfg(), nv(), root, inv, free(100*gib), gib))[IDUpstream]
+	r := results(NvidiaChecks(cfg(), nv(), root, inv, free(100*gib), vr(gib)))[IDUpstream]
 	if r.Status != doctor.Warn || r.Evidence != "vendor file changed: run cairn host apply" {
 		t.Fatalf("%+v", r)
 	}
 	inv.Upsert(inventory.Entry{Path: VendorMask, Class: inventory.Mask, Upstream: VendorUpstream, UpstreamSHA256: fsx.SHA256([]byte("v2"))})
-	if r = results(NvidiaChecks(cfg(), nv(), root, inv, free(100*gib), gib))[IDUpstream]; r.Status != doctor.OK {
+	if r = results(NvidiaChecks(cfg(), nv(), root, inv, free(100*gib), vr(gib)))[IDUpstream]; r.Status != doctor.OK {
 		t.Fatalf("%+v", r)
 	}
 }

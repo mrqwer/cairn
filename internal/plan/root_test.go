@@ -164,10 +164,10 @@ func TestApplyRootConfirmsOnTTY(t *testing.T) {
 		t.Fatal("--yes did not apply")
 	}
 
-	// Nothing pending: no question, snapshot still refreshed.
+	// Nothing pending but a missing snapshot: it is a root change to confirm.
 	env3 := rootEnv(t)
 	withBuilder(t, returns())
-	if _, err := run(env3, noTTY{t}, false); err != nil || !env3.Root.Exists(plan.HostConfigPath) {
+	if _, err := run(env3, strings.NewReader("y\n"), false); err != nil || !env3.Root.Exists(plan.HostConfigPath) {
 		t.Fatalf("empty plan: %v", err)
 	}
 }

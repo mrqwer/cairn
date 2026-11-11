@@ -28,6 +28,7 @@ var (
 		"/usr/lib/systemd/system-sleep/50-cairn",
 		"/etc/UPower/UPower.conf.d/50-cairn.conf",
 		"/etc/modprobe.d/nvidia-utils.conf",
+		"/etc/pacman.d/hooks/50-cairn-reboot-required.hook",
 	}
 	// sleepDropInDirs hold cairn's 50-cairn.conf and, in repair mode,
 	// foreign drop-ins that may be removed.
@@ -119,7 +120,7 @@ func AllowedRootPath(p string, extra []string, mode string) bool {
 		return false
 	}
 	switch mode {
-	case ModeApply:
+	case ModeApply, ModeUninstall:
 		return normalRootPath(c) || inExtra(c, extra)
 	case ModeRepair:
 		return normalRootPath(c) || inExtra(c, extra) || repairRemovable(c) || bootEntry(c)
@@ -160,6 +161,9 @@ func userCommand(cmd []string) bool {
 
 // CheckRootAction validates one action for execution as root in mode.
 func CheckRootAction(a Action, extra []string, mode string) error {
+	if mode == ModeUninstall {
+		return checkUninstallAction(a, extra)
+	}
 	switch a.Kind {
 	case WriteFile, RemoveFile, MakeDir:
 		if a.Kind != RemoveFile {
@@ -199,6 +203,29 @@ func CheckRootAction(a Action, extra []string, mode string) error {
 		}
 	default:
 		return fmt.Errorf("%s: not a root action", a.Kind)
+	}
+	return nil
+}
+
+// checkUninstallAction allows only removals of apply-mode paths, disabling
+// allowlisted units and daemon-reload. ApplyRoot additionally requires every
+// removed path to be recorded in the system inventory.
+func checkUninstallAction(a Action, extra []string) error {
+	switch a.Kind {
+	case RemoveFile:
+		if !AllowedRootPath(a.Path, extra, ModeUninstall) {
+			return fmt.Errorf("RemoveFile %q: path not allowed for root in %s mode", a.Path, ModeUninstall)
+		}
+	case DisableUnit:
+		if a.UserUnit || !rootUnit(a.Unit) {
+			return fmt.Errorf("DisableUnit %q: unit not allowed for root", a.Unit)
+		}
+	case RunCommand:
+		if !slices.Equal(a.Cmd, []string{"systemctl", "daemon-reload"}) {
+			return fmt.Errorf("RunCommand %q: command not allowed in %s mode", a.Cmd, ModeUninstall)
+		}
+	default:
+		return fmt.Errorf("%s: not allowed in %s mode", a.Kind, ModeUninstall)
 	}
 	return nil
 }

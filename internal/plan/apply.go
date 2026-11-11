@@ -188,6 +188,9 @@ func (env Env) applyOne(ctx context.Context, a Action, inv *inventory.Inventory,
 		}
 		inv.Upsert(e)
 	case RemoveFile:
+		if managed && prev.Class == inventory.ManagedDir {
+			return env.removeManagedDir(a.Path, inv, key)
+		}
 		if a.State == Foreign || a.State == ModifiedByUser {
 			if _, err := env.backup(a.Path, backupDir, a.NeedsRoot); err != nil {
 				return err
@@ -272,6 +275,30 @@ func (env Env) applyOne(ctx context.Context, a Action, inv *inventory.Inventory,
 	default:
 		return fmt.Errorf("unknown action kind %q", a.Kind)
 	}
+	return nil
+}
+
+// removeManagedDir removes a managed directory only when it is empty; a
+// non-empty one stays, together with its inventory record.
+func (env Env) removeManagedDir(p string, inv *inventory.Inventory, key string) error {
+	full := env.Root.Path(p)
+	st, err := os.Lstat(full)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		inv.Delete(key)
+		return nil
+	case err != nil:
+		return err
+	case !st.IsDir():
+		return fmt.Errorf("%s is not a directory", p)
+	}
+	if err := os.Remove(full); err != nil {
+		if errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST) {
+			return nil
+		}
+		return err
+	}
+	inv.Delete(key)
 	return nil
 }
 

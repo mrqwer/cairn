@@ -121,15 +121,16 @@ func (c fnCheck) Title() string                     { return c.title }
 func (c fnCheck) Run(context.Context) doctor.Result { return c.run() }
 
 // NvidiaChecks returns the NVIDIA doctor checks. freeBytes reports free space
-// at a path; vramBytes is the total GPU memory (0 when unknown).
+// at a path; vram returns the total GPU memory (0 when unknown). vram is
+// called only when the space check runs, since querying it can wake the GPU.
 func NvidiaChecks(cfg config.Nvidia, sys detect.System, root fsx.Root, inv *inventory.Inventory,
-	freeBytes func(path string) (uint64, error), vramBytes uint64) []doctor.Check {
+	freeBytes func(path string) (uint64, error), vram func() uint64) []doctor.Check {
 	return []doctor.Check{
 		fnCheck{IDParams, "NVIDIA temporary file path in effect", func() doctor.Result {
 			return paramsResult(cfg, sys, root)
 		}},
 		fnCheck{IDSpace, "NVIDIA suspend space", func() doctor.Result {
-			return spaceResult(cfg, freeBytes, vramBytes)
+			return spaceResult(cfg, freeBytes, vram())
 		}},
 		fnCheck{IDUpstream, "NVIDIA vendor modprobe file unchanged", func() doctor.Result {
 			return upstreamResult(root, inv)

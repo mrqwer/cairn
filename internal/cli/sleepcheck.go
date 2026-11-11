@@ -8,30 +8,22 @@ import (
 	"os"
 	"time"
 
-	"context"
-
 	"github.com/spf13/cobra"
 
 	"github.com/mrqwer/cairn/internal/config"
+	"github.com/mrqwer/cairn/internal/detect"
 	"github.com/mrqwer/cairn/internal/doctor"
 	"github.com/mrqwer/cairn/internal/events"
 	"github.com/mrqwer/cairn/internal/host/sleep"
+	"github.com/mrqwer/cairn/internal/inventory"
 	"github.com/mrqwer/cairn/internal/plan"
 )
 
 // userSleepChecks builds the sleep checks for `cairn doctor host`. Unless
 // running as root it cannot call FIEMAP, so the resume check reads the last
 // sleep-check result instead.
-func userSleepChecks(ctx context.Context) ([]doctor.Check, error) {
-	cfg, _, err := loadConfig()
-	if err != nil {
-		return nil, err
-	}
-	sys, err := detectSystem(ctx)
-	if err != nil {
-		return nil, err
-	}
-	checks := sleep.Checks(cfg.Host.Sleep, sys, offsetOf, deviceOf)
+func userSleepChecks(sc config.Sleep, sys detect.System) []doctor.Check {
+	checks := sleep.Checks(sc, sys, offsetOf, deviceOf)
 	if !isRoot() {
 		for i, c := range checks {
 			if c.ID() == sleep.IDResume {
@@ -39,7 +31,7 @@ func userSleepChecks(ctx context.Context) ([]doctor.Check, error) {
 			}
 		}
 	}
-	return checks, nil
+	return checks
 }
 
 // Seams for tests.
@@ -52,26 +44,25 @@ var (
 
 const defaultsNote = "no " + plan.HostConfigPath + ", using built-in defaults"
 
-// hostSleepConfig reads the root-side host snapshot; sleep-check runs from
+// hostSnapshot reads the root-side host snapshot; sleep-check runs from
 // systemd without XDG state, so it must not use the user config loader.
 // usedDefaults reports that the snapshot was missing.
-func hostSleepConfig() (sc config.Sleep, usedDefaults bool, err error) {
+func hostSnapshot() (h config.Host, usedDefaults bool, err error) {
 	data, err := sysRoot.ReadFile(plan.HostConfigPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		cfg, err := config.Defaults()
 		if err != nil {
-			return config.Sleep{}, false, err
+			return config.Host{}, false, err
 		}
-		return cfg.Host.Sleep, true, nil
+		return cfg.Host, true, nil
 	}
 	if err != nil {
-		return config.Sleep{}, false, err
+		return config.Host{}, false, err
 	}
-	var h config.Host
 	if err := json.Unmarshal(data, &h); err != nil {
-		return config.Sleep{}, false, fmt.Errorf("parse %s: %w", plan.HostConfigPath, err)
+		return config.Host{}, false, fmt.Errorf("parse %s: %w", plan.HostConfigPath, err)
 	}
-	return h.Sleep, false, nil
+	return h, false, nil
 }
 
 // failClosed turns Unknown into Crit for the checks that guard the resume
@@ -116,15 +107,19 @@ func runSleepCheck(cmd *cobra.Command, record bool) error {
 		}
 		return err
 	}
-	var sc config.Sleep
+	var h config.Host
 	var usedDefaults bool
 	var err error
+	inv := &inventory.Inventory{}
 	if trusted {
-		sc, usedDefaults, err = hostSleepConfig()
+		h, usedDefaults, err = hostSnapshot()
+		if err == nil {
+			inv, err = inventory.Load(sysRoot, plan.SysInventoryPath)
+		}
 	} else {
 		var cfg *config.Config
 		if cfg, err = config.Defaults(); err == nil {
-			sc, usedDefaults = cfg.Host.Sleep, true
+			h, usedDefaults = cfg.Host, true
 		}
 	}
 	if err != nil {
@@ -137,7 +132,10 @@ func runSleepCheck(cmd *cobra.Command, record bool) error {
 	if err != nil {
 		return fail(err)
 	}
-	rs := doctor.Run(ctx, sleep.Checks(sc, sys, offsetOf, deviceOf))
+	// NVIDIA checks too: a dump target without room for the VRAM must block
+	// hibernation at entry.
+	checks := append(sleep.Checks(h.Sleep, sys, offsetOf, deviceOf), nvidiaChecks(ctx, h.GPU.Nvidia, sys, inv)...)
+	rs := doctor.Run(ctx, checks)
 	if usedDefaults {
 		for i := range rs {
 			if rs[i].ID == sleep.IDSwapPresent {

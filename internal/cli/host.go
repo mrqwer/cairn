@@ -19,16 +19,33 @@ import (
 	"github.com/mrqwer/cairn/internal/detect"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/fsx"
+	"github.com/mrqwer/cairn/internal/host"
 	"github.com/mrqwer/cairn/internal/inventory"
 	"github.com/mrqwer/cairn/internal/plan"
 	"github.com/mrqwer/cairn/internal/xdg"
 )
 
-// hostDesired is the registration point for user-level host policies; later
-// tasks replace it. Root-level actions come only from plan.RootBuilder, so
-// apply-root can regenerate them itself.
-var hostDesired = func(context.Context, *config.Config, detect.System, string) ([]plan.Action, error) {
-	return nil, nil
+// hostDesired returns the user-level actions of the apply plan (a seam for
+// tests). Root-level actions come only from plan.RootBuilder, so apply-root
+// can regenerate them itself.
+var hostDesired = func(_ context.Context, cfg *config.Config, sys detect.System, self string) ([]plan.Action, error) {
+	dirs, err := xdg.Resolve(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	return host.UserActions(cfg, sys, self, host.UserUnitDir(dirs)), nil
+}
+
+// The root builder is registered here and nowhere else: it reads the system
+// through sysRoot at call time, so apply-root and the user-side preview use
+// the same policies.
+func init() {
+	plan.RootBuilder = func(mode string, h config.Host, sys detect.System, self string) ([]plan.Action, error) {
+		return host.Builder{Root: sysRoot, Offset: offsetOf}.Build(mode, h, sys, self)
+	}
+	plan.RootNotes = func(mode string, h config.Host, sys detect.System) []string {
+		return host.Builder{Root: sysRoot}.Notes(mode, h, sys)
+	}
 }
 
 // detectSystem, checkSelf and runSudo are seams for tests.
@@ -38,17 +55,22 @@ var (
 	}
 	checkSelf = plan.CheckSelfOwnership
 	runSudo   = sudoApplyRoot
+	exePath   = os.Executable
+	// hostRunner runs the user side's commands (systemctl --user, gsettings).
+	hostRunner execx.Runner = execx.OSRunner{}
 )
 
 var sysRoot = fsx.Root{Dir: "/"}
 
 // hostState is everything the user-side host commands need.
 type hostState struct {
-	cfg   *config.Config
-	self  string
-	env   plan.Env
-	plan  plan.Plan
-	stale bool // the root-side host config snapshot differs from cfg.Host
+	cfg  *config.Config
+	self string
+	env  plan.Env
+	user plan.Plan // user-level actions, resolved
+	root plan.Plan // preview of root's plan
+	// stale: the root-side host config snapshot differs from cfg.Host.
+	stale bool
 }
 
 func ctxOf(cmd *cobra.Command) context.Context {
@@ -58,15 +80,36 @@ func ctxOf(cmd *cobra.Command) context.Context {
 	return context.Background()
 }
 
+// unsafeSelfChars may not appear in the cairn binary path: it is embedded in
+// unit files (where % is a specifier and whitespace splits arguments) and in
+// shell and pacman hook lines.
+const unsafeSelfChars = " \t\n\r\v\f%\"'\\$`;"
+
+// checkSelfPath rejects binary paths that cannot be embedded safely.
+func checkSelfPath(p string) error {
+	if i := strings.IndexAny(p, unsafeSelfChars); i >= 0 {
+		return fmt.Errorf("cairn binary path %q contains %q, which cannot be used in unit files and hooks; "+
+			"install cairn to a path without whitespace, %%, quotes, backslash, $, backtick or ;", p, p[i])
+	}
+	return nil
+}
+
 func selfPath() (string, error) {
-	exe, err := os.Executable()
+	exe, err := exePath()
 	if err != nil {
 		return "", err
 	}
-	return filepath.EvalSymlinks(exe)
+	p, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", err
+	}
+	if err := checkSelfPath(p); err != nil {
+		return "", err
+	}
+	return p, nil
 }
 
-func loadHost(ctx context.Context, mode string) (*hostState, error) {
+func loadValidConfig() (*config.Config, error) {
 	cfg, _, err := loadConfig()
 	if err != nil {
 		return nil, err
@@ -77,6 +120,14 @@ func loadHost(ctx context.Context, mode string) (*hostState, error) {
 			all[i] = e
 		}
 		return nil, fmt.Errorf("configuration is invalid: %w", errors.Join(all...))
+	}
+	return cfg, nil
+}
+
+func loadHost(ctx context.Context, mode string) (*hostState, error) {
+	cfg, err := loadValidConfig()
+	if err != nil {
+		return nil, err
 	}
 	dirs, err := xdg.Resolve(os.Getenv)
 	if err != nil {
@@ -99,60 +150,40 @@ func loadHost(ctx context.Context, mode string) (*hostState, error) {
 	if err != nil {
 		return nil, err
 	}
-	desired, err := hostDesired(ctx, cfg, sys, self)
-	if err != nil {
-		return nil, err
-	}
-	for _, a := range desired {
-		if a.NeedsRoot {
-			return nil, fmt.Errorf("policy bug: root action %s %s must come from plan.RootBuilder", a.Kind, a.Path)
+	var desired []plan.Action
+	switch mode {
+	case plan.ModeApply:
+		if desired, err = hostDesired(ctx, cfg, sys, self); err != nil {
+			return nil, err
 		}
+	case plan.ModeUninstall:
+		desired = host.UninstallPlan(nil, userInv).Actions
 	}
-	rootActs, err := plan.BuildRoot(mode, cfg.Host, sys, self)
+	env := plan.Env{
+		Root: sysRoot, Runner: hostRunner,
+		UserInv: userInv, SysInv: sysInv,
+		UserInvPath: userInvPath, SysInvPath: plan.SysInventoryPath,
+		UserBackupDir: filepath.Join(dirs.State, "host", "backup"),
+	}
+	user, root, err := host.PlanBoth(mode, cfg.Host, sys, self, desired, env, env)
 	if err != nil {
 		return nil, err
 	}
-	p := plan.ResolveAll(append(desired, rootActs...), sysRoot, userInv, sysInv)
-	p.Mode = mode
 	return &hostState{
-		cfg:  cfg,
-		self: self,
-		env: plan.Env{
-			Root: sysRoot, Runner: execx.OSRunner{},
-			UserInv: userInv, SysInv: sysInv,
-			UserInvPath: userInvPath, SysInvPath: plan.SysInventoryPath,
-			UserBackupDir: filepath.Join(dirs.State, "host", "backup"),
-		},
-		plan:  p,
-		stale: plan.SnapshotStale(sysRoot, cfg.Host),
+		cfg: cfg, self: self, env: env, user: user, root: root,
+		stale: mode == plan.ModeApply && plan.SnapshotStale(sysRoot, cfg.Host),
 	}, nil
 }
 
-func (hs *hostState) pending() (user, root bool) {
-	for _, a := range hs.plan.Pending() {
-		if a.NeedsRoot {
-			root = true
-		} else {
-			user = true
-		}
-	}
-	return user, root || hs.stale
-}
-
-// side returns the actions of one side (root or user) as a plan.
-func (hs *hostState) side(root bool) plan.Plan {
-	out := plan.Plan{Mode: hs.plan.Mode}
-	for _, a := range hs.plan.Actions {
-		if a.NeedsRoot == root {
-			out.Actions = append(out.Actions, a)
-		}
-	}
-	return out
-}
+// rootStep reports whether the privileged step must run: whenever root has
+// any action for this config (R11: never skipped on the strength of the
+// user-side preview, which cannot see root-only facts) or the snapshot is
+// stale.
+func (hs *hostState) rootStep() bool { return len(hs.root.Actions) > 0 || hs.stale }
 
 func (hs *hostState) renderUser(w io.Writer) {
-	if u := hs.side(false); len(u.Pending()) > 0 {
-		plan.Render(w, u)
+	if len(hs.user.Pending()) > 0 {
+		plan.Render(w, hs.user)
 		return
 	}
 	_, _ = fmt.Fprintln(w, "user-level: nothing to do")
@@ -162,8 +193,8 @@ func (hs *hostState) renderUser(w io.Writer) {
 // recomputes it with its own view of the system and confirms it itself.
 func (hs *hostState) renderRootPreview(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "preview (exact plan is computed by root at apply time):")
-	if r := hs.side(true); len(r.Pending()) > 0 {
-		plan.Render(w, r)
+	if len(hs.root.Pending()) > 0 {
+		plan.Render(w, hs.root)
 	} else if !hs.stale {
 		_, _ = fmt.Fprintln(w, "needs root: nothing to do")
 	}
@@ -203,8 +234,8 @@ func sudoApplyRoot(ctx context.Context, cmd *cobra.Command, self, mode string, y
 
 func newHostCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "host", Short: "Manage host settings"}
-	cmd.AddCommand(newHostPlanCmd(), newHostApplyCmd(), newHostApplyRootCmd(), newSleepCheckCmd(),
-		newRecordSleepCmd(), newBootCheckCmd(), newNotifyCmd())
+	cmd.AddCommand(newHostPlanCmd(), newHostApplyCmd(), newHostUninstallCmd(), newHostRepairCmd(),
+		newHostApplyRootCmd(), newSleepCheckCmd(), newRecordSleepCmd(), newBootCheckCmd(), newNotifyCmd())
 	return cmd
 }
 
@@ -225,6 +256,52 @@ func newHostPlanCmd() *cobra.Command {
 	}
 }
 
+// runHostOp is apply and uninstall: show the user plan and root's preview,
+// confirm and apply the user side, then always hand over to the privileged
+// step when root has anything for this config; root shows and confirms its
+// own plan.
+func runHostOp(cmd *cobra.Command, mode string, yes, force bool) error {
+	ctx := ctxOf(cmd)
+	hs, err := loadHost(ctx, mode)
+	if err != nil {
+		return err
+	}
+	hs.renderUser(cmd.OutOrStdout())
+	userNeeded := len(hs.user.Pending()) > 0
+	rootNeeded := hs.rootStep()
+	if !userNeeded && !rootNeeded {
+		return nil
+	}
+	if m := hs.user.ModifiedPaths(); len(m) > 0 && !force {
+		return fmt.Errorf("%w: %s", plan.ErrModifiedByUser, strings.Join(m, ", "))
+	}
+	if rootNeeded {
+		if err := checkSelf(sysRoot, hs.self); err != nil {
+			return err
+		}
+	}
+	if userNeeded && !yes && !confirm(cmd.InOrStdin(), cmd.OutOrStdout()) {
+		cmd.Println("aborted")
+		return nil
+	}
+	var priv host.Privileged
+	if rootNeeded {
+		cmd.Println("Root changes will be shown and confirmed by the privileged step.")
+		priv = sudoPrivileged(cmd, hs.self, yes, force)
+	}
+	return host.ApplyBoth(ctx, hs.user, hs.env, plan.NewRootRequest(mode, hs.cfg.Host), force, priv)
+}
+
+func sudoPrivileged(cmd *cobra.Command, self string, yes, force bool) host.Privileged {
+	return func(ctx context.Context, req plan.RootRequest) error {
+		data, err := json.Marshal(req)
+		if err != nil {
+			return err
+		}
+		return runSudo(ctx, cmd, self, req.Mode, yes, force, data)
+	}
+}
+
 func newHostApplyCmd() *cobra.Command {
 	var yes, force bool
 	cmd := &cobra.Command{
@@ -232,42 +309,7 @@ func newHostApplyCmd() *cobra.Command {
 		Short: "Apply the host plan (root parts through sudo)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx := ctxOf(cmd)
-			hs, err := loadHost(ctx, plan.ModeApply)
-			if err != nil {
-				return err
-			}
-			hs.renderUser(cmd.OutOrStdout())
-			userNeeded, rootNeeded := hs.pending()
-			if !userNeeded && !rootNeeded {
-				return nil
-			}
-			if m := hs.side(false).ModifiedPaths(); len(m) > 0 && !force {
-				return fmt.Errorf("%w: %s", plan.ErrModifiedByUser, strings.Join(m, ", "))
-			}
-			if rootNeeded {
-				if err := checkSelf(sysRoot, hs.self); err != nil {
-					return err
-				}
-			}
-			if userNeeded {
-				if !yes && !confirm(cmd.InOrStdin(), cmd.OutOrStdout()) {
-					cmd.Println("aborted")
-					return nil
-				}
-				if err := plan.Apply(ctx, hs.plan, hs.env, plan.Options{Force: force, UserOnly: true}); err != nil {
-					return err
-				}
-			}
-			if !rootNeeded {
-				return nil
-			}
-			cmd.Println("Root changes will be shown and confirmed by the privileged step.")
-			req, err := json.Marshal(plan.NewRootRequest(hs.plan.Mode, hs.cfg.Host))
-			if err != nil {
-				return err
-			}
-			return runSudo(ctx, cmd, hs.self, hs.plan.Mode, yes, force, req)
+			return runHostOp(cmd, plan.ModeApply, yes, force)
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "do not ask for confirmation")
@@ -275,11 +317,53 @@ func newHostApplyCmd() *cobra.Command {
 	return cmd
 }
 
-// newHostApplyRootCmd is the root half of apply. It runs under sudo and reads
-// neither XDG directories nor config files. Its only unprivileged input is a
-// small request on stdin (mode, host config). It regenerates the actions with
-// its own detection, prints them and asks on /dev/tty (never stdin) unless
-// --yes.
+func newHostUninstallCmd() *cobra.Command {
+	var yes, force bool
+	cmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove everything cairn host manages and restore what it replaced",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runHostOp(cmd, plan.ModeUninstall, yes, force)
+		},
+	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "do not ask for confirmation")
+	cmd.Flags().BoolVar(&force, "force", false, "remove managed files modified by hand (a backup is kept)")
+	return cmd
+}
+
+func newHostRepairCmd() *cobra.Command {
+	var yes, force bool
+	cmd := &cobra.Command{
+		Use:   "repair",
+		Short: "Remove conflicting hibernate hooks and fix boot entry resume settings (through sudo)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := loadValidConfig()
+			if err != nil {
+				return err
+			}
+			self, err := selfPath()
+			if err != nil {
+				return err
+			}
+			if err := checkSelf(sysRoot, self); err != nil {
+				return err
+			}
+			cmd.Println("The repair plan is computed, shown and confirmed by the privileged step.")
+			return sudoPrivileged(cmd, self, yes, force)(ctxOf(cmd), plan.NewRootRequest(plan.ModeRepair, cfg.Host))
+		},
+	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "do not ask for confirmation")
+	cmd.Flags().BoolVar(&force, "force", false, "rewrite boot entries changed since the last repair (a backup is kept)")
+	return cmd
+}
+
+// newHostApplyRootCmd is the root half of apply, uninstall and repair. It
+// runs under sudo and reads neither XDG directories nor config files. Its
+// only unprivileged input is a small request on stdin (mode, host config).
+// It regenerates the actions with its own detection, prints them and asks
+// on /dev/tty (never stdin) unless --yes.
 func newHostApplyRootCmd() *cobra.Command {
 	var mode string
 	var yes, force bool
@@ -311,11 +395,7 @@ func newHostApplyRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			sysInv, err := inventory.Load(sysRoot, plan.SysInventoryPath)
-			if err != nil {
-				return err
-			}
-			env := plan.Env{Root: sysRoot, Runner: execx.OSRunner{}, SysInv: sysInv, SysInvPath: plan.SysInventoryPath}
+			env := plan.Env{Root: sysRoot, Runner: execx.OSRunner{}}
 			opts := plan.RootOptions{Yes: yes, Force: force, Sys: sys, Self: self, Out: cmd.ErrOrStderr()}
 			if !yes {
 				// stdin carries the request; the answer comes from the terminal.
@@ -324,14 +404,10 @@ func newHostApplyRootCmd() *cobra.Command {
 					opts.TTY = tty
 				}
 			}
-			if err := plan.ApplyRoot(ctx, req, env, opts); err != nil {
-				return err
-			}
-			cmd.Println("root changes applied")
-			return nil
+			return host.ApplyRootSide(ctx, req, env, opts)
 		},
 	}
-	cmd.Flags().StringVar(&mode, "mode", "", "plan mode (apply or repair)")
+	cmd.Flags().StringVar(&mode, "mode", "", "plan mode (apply, repair or uninstall)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "do not ask for confirmation")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite managed files modified by hand")
 	_ = cmd.MarkFlagRequired("mode")

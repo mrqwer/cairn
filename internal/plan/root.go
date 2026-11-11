@@ -27,6 +27,12 @@ var RootBuilder = func(mode string, host config.Host, sys detect.System, self st
 	return nil, nil
 }
 
+// RootNotes returns report-only findings for mode (for example repair
+// problems cairn does not fix itself). apply-root prints them before its plan.
+var RootNotes = func(mode string, host config.Host, sys detect.System) []string {
+	return nil
+}
+
 // MaxRootRequest bounds the request apply-root reads from stdin.
 const MaxRootRequest = 64 << 10
 
@@ -61,8 +67,8 @@ func (r RootRequest) Validate() error {
 	if r.Version != requestVersion {
 		return fmt.Errorf("request version %d, want %d", r.Version, requestVersion)
 	}
-	if r.Mode != ModeApply && r.Mode != ModeRepair {
-		return fmt.Errorf("request mode %q is not %q or %q", r.Mode, ModeApply, ModeRepair)
+	if r.Mode != ModeApply && r.Mode != ModeRepair && r.Mode != ModeUninstall {
+		return fmt.Errorf("request mode %q is not %q, %q or %q", r.Mode, ModeApply, ModeRepair, ModeUninstall)
 	}
 	var errs []error
 	cfg := config.Config{Host: r.Host}
@@ -149,6 +155,11 @@ func ApplyRoot(ctx context.Context, r RootRequest, env Env, opts RootOptions) er
 	var errs []error
 	for _, a := range acts {
 		errs = append(errs, CheckRootAction(a, r.Extra, r.Mode))
+		if r.Mode == ModeUninstall && a.Kind == RemoveFile {
+			if _, ok := env.SysInv.Get(a.Path); !ok {
+				errs = append(errs, fmt.Errorf("RemoveFile %q: not recorded in the system inventory", a.Path))
+			}
+		}
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("rejected plan: %w", err)
@@ -161,8 +172,17 @@ func ApplyRoot(ctx context.Context, r RootRequest, env Env, opts RootOptions) er
 	if err := env.precheckDirs(p); err != nil {
 		return err
 	}
-	Render(out, p)
-	if len(p.Pending()) > 0 && !opts.Yes {
+	for _, n := range RootNotes(r.Mode, r.Host, opts.Sys) {
+		_, _ = fmt.Fprintf(out, "note: %s\n", n)
+	}
+	// Uninstall leaves the snapshot alone; otherwise a changed snapshot is a
+	// root change like any other and is shown and confirmed.
+	stale := r.Mode != ModeUninstall && SnapshotStale(env.Root, r.Host)
+	renderRoot(out, p, stale)
+	if len(p.Pending()) == 0 && !stale {
+		return nil
+	}
+	if !opts.Yes {
 		if opts.TTY == nil {
 			return errors.New("no terminal to confirm root changes; re-run cairn host apply with --yes")
 		}
@@ -172,17 +192,43 @@ func ApplyRoot(ctx context.Context, r RootRequest, env Env, opts RootOptions) er
 			return ErrRootDeclined
 		}
 	}
-	snap, err := HostSnapshot(r.Host)
-	if err != nil {
+	if stale {
+		snap, err := HostSnapshot(r.Host)
+		if err != nil {
+			return err
+		}
+		if err := env.secureDir(SysStateDir, true); err != nil {
+			return err
+		}
+		if err := env.Root.WriteAtomic(HostConfigPath, snap, 0o644); err != nil {
+			return err
+		}
+	}
+	if err := Apply(ctx, p, env, Options{Force: opts.Force, RootOnly: true, Extra: r.Extra}); err != nil {
 		return err
 	}
-	if err := env.secureDir(SysStateDir, true); err != nil {
-		return err
+	for _, a := range p.Pending() {
+		if a.Kind == WriteFile && bootEntry(path.Clean(a.Path)) {
+			_, _ = fmt.Fprintln(out, "boot entries changed: requires reboot")
+			break
+		}
 	}
-	if err := env.Root.WriteAtomic(HostConfigPath, snap, 0o644); err != nil {
-		return err
+	return nil
+}
+
+// renderRoot prints root's plan; a stale host config snapshot is shown as one
+// more pending change.
+func renderRoot(w io.Writer, p Plan, stale bool) {
+	if !stale {
+		Render(w, p)
+		return
 	}
-	return Apply(ctx, p, env, Options{Force: opts.Force, RootOnly: true, Extra: r.Extra})
+	if len(p.Pending()) == 0 {
+		_, _ = fmt.Fprintln(w, "needs root:")
+	} else {
+		Render(w, p)
+	}
+	_, _ = fmt.Fprintf(w, "  update  config snapshot  %s\n", HostConfigPath)
 }
 
 // precheckDirs verifies, without creating anything, the existing part of

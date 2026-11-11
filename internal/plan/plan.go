@@ -37,10 +37,12 @@ const (
 	Foreign        State = "foreign" // exists, not in inventory
 )
 
-// Plan modes. Repair mode widens the root allowlist (see AllowedRootPath).
+// Plan modes. Repair mode widens the root allowlist (see AllowedRootPath);
+// uninstall mode narrows it to removing what the inventory records.
 const (
-	ModeApply  = "apply"
-	ModeRepair = "repair"
+	ModeApply     = "apply"
+	ModeRepair    = "repair"
+	ModeUninstall = "uninstall"
 )
 
 // System-side locations owned by cairn host.
@@ -81,10 +83,12 @@ type Action struct {
 	State    State  `json:"state,omitempty"`
 }
 
-// Plan is an ordered list of resolved actions.
+// Plan is an ordered list of resolved actions. Notes are report-only
+// findings shown with the plan; they are never executed.
 type Plan struct {
 	Mode    string
 	Actions []Action
+	Notes   []string
 }
 
 // Pending returns the actions apply would execute.

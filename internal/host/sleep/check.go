@@ -79,8 +79,14 @@ func (c fnCheck) ID() string                        { return c.id }
 func (c fnCheck) Title() string                     { return c.title }
 func (c fnCheck) Run(context.Context) doctor.Result { return c.run() }
 
-// selectSwap picks the hibernation swap: the configured path, else the
-// active file swap with the lowest priority.
+// SelectSwap picks the hibernation swap: the configured path, else the
+// active file swap with the lowest priority. ok is false when that swap is
+// not active.
+func SelectSwap(cfg config.Sleep, sys detect.System) (swap detect.Swap, ok bool) {
+	s, _, ok := selectSwap(cfg, sys)
+	return s, ok
+}
+
 func selectSwap(cfg config.Sleep, sys detect.System) (detect.Swap, string, bool) {
 	if p := cfg.HibernationSwap.Path; p != "" {
 		for _, s := range sys.Swaps {

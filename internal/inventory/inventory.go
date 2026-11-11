@@ -20,6 +20,9 @@ const (
 	ManagedDir  Class = "dir"
 	UserSetting Class = "user-setting"
 	UnitEnable  Class = "unit-enable"
+	// Repaired marks a foreign file rewritten once by cairn host repair (a
+	// boot entry); uninstall leaves it alone.
+	Repaired Class = "repaired"
 )
 
 const formatVersion = 1
