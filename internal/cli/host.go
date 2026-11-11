@@ -203,7 +203,8 @@ func sudoApplyRoot(ctx context.Context, cmd *cobra.Command, self, mode string, y
 
 func newHostCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "host", Short: "Manage host settings"}
-	cmd.AddCommand(newHostPlanCmd(), newHostApplyCmd(), newHostApplyRootCmd(), newSleepCheckCmd())
+	cmd.AddCommand(newHostPlanCmd(), newHostApplyCmd(), newHostApplyRootCmd(), newSleepCheckCmd(),
+		newRecordSleepCmd(), newBootCheckCmd(), newNotifyCmd())
 	return cmd
 }
 

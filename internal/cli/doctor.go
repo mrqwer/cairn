@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mrqwer/cairn/internal/doctor"
+	"github.com/mrqwer/cairn/internal/host/sleep"
 )
 
 // ExitError asks main to terminate the process with Code.
@@ -23,7 +24,9 @@ var hostChecks = func(ctx context.Context) ([]doctor.Check, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(checks, sc...), nil
+	checks = append(checks, sc...)
+	checks = append(checks, sleep.RecentEvents(sysRoot, sleep.EventsPath))
+	return checks, nil
 }
 
 type jsonResult struct {
