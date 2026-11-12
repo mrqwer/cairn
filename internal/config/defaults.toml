@@ -1,0 +1,15 @@
+profile = ""
+
+[host.sleep]
+lid = "suspend-then-hibernate"
+lid_ac = "suspend-then-hibernate"
+critical_battery = "hibernate"
+idle_battery = "hibernate"
+hibernate_after = "15min"
+
+[host.sleep.hibernation_swap]
+path = ""
+
+[host.gpu.nvidia]
+manage = true
+temporary_file_path = "/var/tmp"

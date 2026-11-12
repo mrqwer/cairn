@@ -1,0 +1,3 @@
+PreserveVideoMemoryAllocations: 1
+TemporaryFilePath: "/var/tmp"
+DynamicPowerManagement: 0

@@ -1,0 +1,4 @@
+Filename				Type		Size		Used		Priority
+/dev/zram0 partition 8033276 5534856 100
+/hibernate-swap/runtime-swapfile file 25165820 0 20
+/hibernate-swap/swapfile file 25165820 0 -1

@@ -1,0 +1,6 @@
+[host.sleep]
+critical_battery = "poweroff"
+hibernate_after = "30min"
+
+[host.sleep.hibernation_swap]
+path = "/swap/swapfile"

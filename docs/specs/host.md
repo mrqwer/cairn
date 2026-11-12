@@ -55,7 +55,19 @@ host config (TOML, layered)      providers (detected)              generated art
   make it true on a given system and are chosen by detection, overridable in config.
 - `cairn host plan` prints every file it would create/change/remove and every command it
   would run, grouped into *user-level* and *needs root*. `cairn host apply` executes the
-  plan; root parts run through `sudo` once, showing the same plan.
+  plan; root parts run through `sudo` once.
+- **Privilege model (v1).** The unprivileged side never hands actions, file content or a
+  plan file to root. `cairn host apply|uninstall|repair` sends only a small request on
+  stdin (format version, mode, host config) to `sudo <cairn> host apply-root --mode <m>`.
+  The root side validates that config, regenerates its own actions from it with its own
+  detection, checks every action against the root allowlist and every target directory
+  chain (root-owned, not group/world writable, no symlinks), prints its plan and asks on
+  `/dev/tty` (or `--yes`); only then does it write. The user's `plan` shows root's part as
+  a labelled preview. On `apply` the privileged step runs first and user-level changes
+  (GNOME idle settings, user units) are applied only after it succeeded, so idle
+  hibernation never takes effect without the sleep-entry guard. Root-side commands
+  (`apply-root`, `sleep-check`, `record-sleep`) never read the user's XDG config; they use
+  the host config snapshot `/var/lib/cairn/host/config.json` written by `apply-root`.
 - Every generated file starts with a header: `# Managed by cairn host (<policy>). Do not edit; run "cairn host ..."`.
   An inventory of managed files is kept in `$XDG_STATE_HOME/cairn/host/managed.json`;
   `uninstall` uses it and restores any file it had to replace from a saved copy.
@@ -75,8 +87,11 @@ host config (TOML, layered)      providers (detected)              generated art
 | Enabling existing units | `paccache.timer`, vendor GPU sleep units | record previous state | restore previous state |
 | One-time repairs (`cairn host repair`) | boot entries (`resume=`, `resume_offset`), boot-loader default, broken fallback entries, initramfs `resume` hook + regeneration, swapfile creation/resizing, removing a conflicting pre-existing unit | explicit command, separate plan, each file backed up to `/var/lib/cairn/host/backup/` | **not** reverted automatically (could leave the machine unbootable); `uninstall` lists them and how to restore from the backups |
 
-Supported boot loaders for repairs in v1: systemd-boot (the reference machine) and GRUB
-(regenerate via `grub-mkconfig`); others are detect-and-report only.
+Supported boot loaders for repairs in v1: systemd-boot (the reference machine), with Type
+#1 entries for the running kernel. GRUB, UKIs and other boot loaders are report-only in
+v1: repair prints the exact `resume=` / `resume_offset=` values to set by hand. Repairs
+are recorded in the system inventory (class `repaired`, with their backup) so `uninstall`
+can list them.
 
 ### 4.2 Shared foundation
 
@@ -92,6 +107,9 @@ replace them. `cairn init` in v1 covers host detection only.
   designed for (package-manager and boot-loader abstractions) but not tested in v1.
 - GNOME is the supported desktop for idle settings; other desktops get documented manual
   steps and a doctor check.
+- Hibernation swap: a swap file on ext4/xfs or a swap partition (zram is never used).
+  Swap files on btrfs are not supported in v1 (FIEMAP does not give their resume
+  offset); the resume check reports them as critical.
 - Secure Boot with kernel lockdown disables hibernation: detected and reported; sleep
   policy falls back to suspend with the warning from 5.2.
 - Single primary user per machine (the one who ran `cairn host apply`); multi-user is out
@@ -112,7 +130,7 @@ replace them. `cairn init` in v1 covers host detection only.
 | Hibernate after | 15 min (configurable), or earlier when battery < 5% | `sleep.conf.d/50-cairn.conf`: `HibernateDelaySec=15min`, `SuspendEstimationSec=15min` |
 | Idle (desktop) | same action as lid | GNOME: set idle action consistently; other desktops: document |
 | Critical battery | hibernate | UPower `CriticalPowerAction=Hibernate` via drop-in where supported |
-| Failed hibernate | stay awake + alert (no silent suspend) | `OnFailure=` alert unit |
+| Failed hibernate | suspend instead + alert (see 5.2) | `OnFailure=` fallback unit: logs the event, then suspends |
 
 ### 5.2 Pre-flight checks (run by `plan`, `doctor`, and at sleep entry)
 
@@ -342,7 +360,7 @@ Run on the reference machine after `apply`, each step logged:
 4. Suspend-then-hibernate with `HibernateDelaySec=2min` on battery; confirm transition to
    hibernate and resume.
 5. Simulated failure: point the hibernation swap check at a too-small file → hibernate is
-   refused with a notification; machine stays awake.
+   refused with a notification; the machine suspends instead + alert (5.2).
 6. Disk: fill a test cache dir over its cap → cleanup trims it; cross a watch threshold on a
    loop-mounted test filesystem → notification.
 7. Backup: initial backup, `restic check`, random-sample restore matches.
