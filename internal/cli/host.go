@@ -24,6 +24,7 @@ import (
 	"github.com/mrqwer/cairn/internal/host"
 	"github.com/mrqwer/cairn/internal/inventory"
 	"github.com/mrqwer/cairn/internal/plan"
+	"github.com/mrqwer/cairn/internal/ui"
 	"github.com/mrqwer/cairn/internal/xdg"
 )
 
@@ -190,6 +191,10 @@ func resolveHost(ctx context.Context, cfg *config.Config, sys detect.System, mod
 func (hs *hostState) rootStep() bool { return len(hs.root.Actions) > 0 || hs.stale }
 
 func (hs *hostState) renderUser(w io.Writer) {
+	if st, ok := styleFor(w); ok {
+		plan.RenderSection(w, hs.user, st, "your account", "", homeDir())
+		return
+	}
 	if len(hs.user.Pending()) > 0 {
 		plan.Render(w, hs.user)
 		return
@@ -200,6 +205,14 @@ func (hs *hostState) renderUser(w io.Writer) {
 // renderRootPreview shows the user side's guess at the root plan. Root
 // recomputes it with its own view of the system and confirms it itself.
 func (hs *hostState) renderRootPreview(w io.Writer) {
+	if st, ok := styleFor(w); ok {
+		plan.RenderSection(w, hs.root, st, "system (needs root)", "preview — root computes the exact plan", "")
+		if hs.stale {
+			_, _ = fmt.Fprintf(w, "  %s %s %s\n", st.Yellow("~"), st.Dim(ui.Pad("file", 7)), plan.HostConfigPath+st.Dim("  saved copy of your settings for root-side checks"))
+		}
+		_, _ = fmt.Fprintln(w)
+		return
+	}
 	_, _ = fmt.Fprintln(w, "preview (exact plan is computed by root at apply time):")
 	if len(hs.root.Pending()) > 0 {
 		plan.Render(w, hs.root)
@@ -222,6 +235,14 @@ func (hs *hostState) renderSleepBlockers(ctx context.Context, w io.Writer) {
 		return doctor.Run(ctx, userSleepChecks(hs.cfg.Host.Sleep, hs.sys)), nil
 	})
 	if err != nil {
+		return
+	}
+	if st, ok := styleFor(w); ok {
+		for _, r := range rs {
+			if r.Status == doctor.Crit {
+				_, _ = fmt.Fprintf(w, " %s %s\n     %s\n     %s %s\n\n", st.Red("✗"), st.Bold("Hibernation will be refused at sleep entry"), r.Title, st.Cyan("→"), st.Cyan(r.Fix))
+			}
+		}
 		return
 	}
 	for _, r := range rs {
@@ -277,9 +298,15 @@ func newHostPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if st, ok := styleFor(cmd.OutOrStdout()); ok {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\n %s %s\n", st.Bold("cairn host plan"), st.Dim("· preview only, nothing is changed"))
+			}
 			hs.renderUser(cmd.OutOrStdout())
 			hs.renderRootPreview(cmd.OutOrStdout())
 			hs.renderSleepBlockers(ctxOf(cmd), cmd.OutOrStdout())
+			if st, ok := styleFor(cmd.OutOrStdout()); ok {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), " %s %s\n\n", st.Dim("To apply:"), st.Cyan("cairn host apply"))
+			}
 			return nil
 		},
 	}

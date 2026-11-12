@@ -225,7 +225,11 @@ func runSleepCheck(cmd *cobra.Command, record bool) error {
 	if record && isRoot() {
 		failClosed(rs)
 	}
-	doctor.Render(cmd.OutOrStdout(), rs)
+	if st, ok := styleFor(cmd.OutOrStdout()); ok {
+		doctor.RenderStyled(cmd.OutOrStdout(), rs, st, "cairn sleep check")
+	} else {
+		doctor.Render(cmd.OutOrStdout(), rs)
+	}
 	if !record {
 		// As root the result is stored for doctor (which cannot run FIEMAP
 		// as a user); no event is logged and the exit code is unchanged.

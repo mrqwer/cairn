@@ -18,6 +18,7 @@ import (
 	"github.com/mrqwer/cairn/internal/doctor"
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/plan"
+	"github.com/mrqwer/cairn/internal/ui"
 )
 
 // Check IDs.
@@ -253,7 +254,7 @@ func Checks(cfg config.Sleep, sys detect.System, probes Probes) []doctor.Check {
 			}
 			imgKiB := (img + 1023) / 1024
 			free := swap.SizeKiB - swap.UsedKiB
-			ev := fmt.Sprintf("image %d KiB, free %d KiB", imgKiB, free)
+			ev := fmt.Sprintf("image up to %s, %s free in swap", ui.Bytes(uint64(imgKiB)*1024), ui.Bytes(uint64(free)*1024))
 			if free < imgKiB {
 				return doctor.Result{Status: doctor.Crit, Evidence: ev, Fix: "enlarge the hibernation swap or free memory"}
 			}

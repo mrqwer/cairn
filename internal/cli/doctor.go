@@ -168,6 +168,8 @@ func newDoctorCmd() *cobra.Command {
 				}
 			} else if len(rs) == 0 {
 				cmd.Println("no checks registered")
+			} else if st, ok := styleFor(cmd.OutOrStdout()); ok {
+				doctor.RenderStyled(cmd.OutOrStdout(), rs, st, "cairn doctor · host")
 			} else {
 				doctor.Render(cmd.OutOrStdout(), rs)
 			}

@@ -20,6 +20,7 @@ import (
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/inventory"
 	"github.com/mrqwer/cairn/internal/plan"
+	"github.com/mrqwer/cairn/internal/ui"
 )
 
 // Policy is the policy name recorded for NVIDIA objects.
@@ -172,7 +173,7 @@ func spaceResult(cfg config.Nvidia, freeBytes func(string) (uint64, error), vram
 		return doctor.Result{Status: doctor.Unknown, Evidence: err.Error()}
 	}
 	need := vram + vram/20
-	ev := fmt.Sprintf("%s: %d MiB free, %d MiB needed", cfg.TemporaryFilePath, free>>20, need>>20)
+	ev := fmt.Sprintf("%s: %s free, %s needed", cfg.TemporaryFilePath, ui.Bytes(free), ui.Bytes(need))
 	if free >= need {
 		return doctor.Result{Status: doctor.OK, Evidence: ev}
 	}
