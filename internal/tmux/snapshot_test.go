@@ -11,9 +11,9 @@ import (
 
 func snapFake(sessions, windows, panes execx.Response) *execx.FakeRunner {
 	return &execx.FakeRunner{Responses: map[string]execx.Response{
-		"tmux -L s list-sessions -F " + sessionFormat:  sessions,
-		"tmux -L s list-windows -a -F " + windowFormat: windows,
-		"tmux -L s list-panes -a -F " + paneFormat:     panes,
+		"tmux -u -L s list-sessions -F " + sessionFormat:  sessions,
+		"tmux -u -L s list-windows -a -F " + windowFormat: windows,
+		"tmux -u -L s list-panes -a -F " + paneFormat:     panes,
 	}}
 }
 
@@ -119,11 +119,27 @@ func TestSnapshotConnectErrorNarrowed(t *testing.T) {
 	}
 }
 
-func TestSnapshotDefaultSocketHasNoFlag(t *testing.T) {
+func TestSnapshotDefaultSocketHasNoSocketFlag(t *testing.T) {
 	f := &execx.FakeRunner{Responses: map[string]execx.Response{
-		"tmux list-sessions -F " + sessionFormat: {Out: []byte("no server running on /tmp/tmux-1000/default\n"), Err: errors.New("exit status 1")},
+		"tmux -u list-sessions -F " + sessionFormat: {Out: []byte("no server running on /tmp/tmux-1000/default\n"), Err: errors.New("exit status 1")},
 	}}
 	if _, err := (Client{R: f}).Snapshot(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// In a C/POSIX locale (a systemd user unit, cron) tmux replaces the tab
+// separators of list output with "_", so every parse fails. -u forces UTF-8.
+func TestClientForcesUTF8(t *testing.T) {
+	for _, socket := range []string{"s", ""} {
+		f := &execx.FakeRunner{Responses: map[string]execx.Response{}}
+		c := Client{R: f, Socket: socket}
+		_, _ = c.Snapshot(context.Background()) // fake errors are fine; the argv is what matters
+		if len(f.Calls) == 0 {
+			t.Fatal("no tmux call")
+		}
+		if got := f.Calls[0]; len(got) < 2 || got[0] != "tmux" || got[1] != "-u" {
+			t.Fatalf("socket %q: tmux argv %v does not start with -u", socket, got)
+		}
 	}
 }

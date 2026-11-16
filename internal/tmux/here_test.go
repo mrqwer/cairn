@@ -12,13 +12,13 @@ import (
 
 func TestSocketPath(t *testing.T) {
 	ctx := context.Background()
-	f := fake(map[string]string{"tmux -L s display-message -p #{socket_path}": "/tmp/tmux-1/s\n"})
+	f := fake(map[string]string{"tmux -u -L s display-message -p #{socket_path}": "/tmp/tmux-1/s\n"})
 	p, err := Client{R: f, Socket: "s"}.SocketPath(ctx)
 	if err != nil || p != "/tmp/tmux-1/s" {
 		t.Fatalf("SocketPath = %q, %v", p, err)
 	}
 	f = &execx.FakeRunner{Responses: map[string]execx.Response{
-		"tmux -L s display-message -p #{socket_path}": {Out: []byte("no server running on /tmp/tmux-1/s\n"), Err: errors.New("exit status 1")},
+		"tmux -u -L s display-message -p #{socket_path}": {Out: []byte("no server running on /tmp/tmux-1/s\n"), Err: errors.New("exit status 1")},
 	}}
 	if _, err := (Client{R: f, Socket: "s"}).SocketPath(ctx); err == nil || !strings.Contains(err.Error(), "no tmux server") {
 		t.Fatalf("no server: %v", err)
@@ -27,7 +27,7 @@ func TestSocketPath(t *testing.T) {
 
 func TestSwitchClientHereArgs(t *testing.T) {
 	ctx := context.Background()
-	f := &execx.FakeRunner{Responses: map[string]execx.Response{"tmux -L s switch-client -t $4": {}}}
+	f := &execx.FakeRunner{Responses: map[string]execx.Response{"tmux -u -L s switch-client -t $4": {}}}
 	if err := (Client{R: f, Socket: "s"}).SwitchClientHere(ctx, "$4", "/tmp/tmux-1/s,10,0", "%2"); err != nil {
 		t.Fatal(err)
 	}

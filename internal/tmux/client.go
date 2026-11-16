@@ -53,11 +53,14 @@ func (c Client) runner() execx.Runner {
 	return r
 }
 
+// base is the global tmux flags. -u forces UTF-8: in a C/POSIX locale (a
+// systemd user unit, cron) tmux otherwise replaces the tab separators of list
+// output with "_" and nothing parses.
 func (c Client) base() []string {
 	if c.Socket == "" {
-		return nil
+		return []string{"-u"}
 	}
-	return []string{"-L", c.Socket}
+	return []string{"-u", "-L", c.Socket}
 }
 
 // output runs tmux with args and returns its output; a failure carries the

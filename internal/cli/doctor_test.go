@@ -116,6 +116,9 @@ func TestDoctorWorkspaceIsReadOnly(t *testing.T) {
 		switch c[0] {
 		case "tmux":
 			args := c[1:]
+			if len(args) >= 1 && args[0] == "-u" {
+				args = args[1:]
+			}
 			if len(args) >= 2 && args[0] == "-L" {
 				if args[1] != "cairn-test-doc" {
 					t.Errorf("wrong socket in %v", c)

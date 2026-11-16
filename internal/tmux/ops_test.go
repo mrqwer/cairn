@@ -31,14 +31,14 @@ func okCalls(f *execx.FakeRunner, calls [][]string) {
 
 func TestNewSessionArgs(t *testing.T) {
 	want := [][]string{
-		{"tmux", "-L", "s", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}",
+		{"tmux", "-u", "-L", "s", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}",
 			"-s", "demo", "-x", "200", "-y", "50", "-n", "editor", "-c", "/home/u/demo",
 			"-e", "A=1", "-e", "B=2", "--", "sh", "-c", `echo "a b" $HOME`},
-		{"tmux", "-L", "s", "set", "-p", "-t", "%9", "remain-on-exit", "on"},
-		{"tmux", "-L", "s", "set", "-t", "$3", "@cairn_s", "demo"},
-		{"tmux", "-L", "s", "set", "-w", "-t", "@7", "@cairn_w", "demo/editor"},
-		{"tmux", "-L", "s", "set", "-w", "-t", "@7", "automatic-rename", "off"},
-		{"tmux", "-L", "s", "set", "-p", "-t", "%9", "@cairn_p", "demo/editor/1"},
+		{"tmux", "-u", "-L", "s", "set", "-p", "-t", "%9", "remain-on-exit", "on"},
+		{"tmux", "-u", "-L", "s", "set", "-t", "$3", "@cairn_s", "demo"},
+		{"tmux", "-u", "-L", "s", "set", "-w", "-t", "@7", "@cairn_w", "demo/editor"},
+		{"tmux", "-u", "-L", "s", "set", "-w", "-t", "@7", "automatic-rename", "off"},
+		{"tmux", "-u", "-L", "s", "set", "-p", "-t", "%9", "@cairn_p", "demo/editor/1"},
 	}
 	f := fake(map[string]string{strings.Join(want[0], " "): "$3 @7 %9\n"})
 	okCalls(f, want[1:])
@@ -69,10 +69,10 @@ func TestNewSessionArgs(t *testing.T) {
 
 func TestNewSessionExplicitSize(t *testing.T) {
 	want := [][]string{
-		{"tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}", "-s", "demo", "-x", "120", "-y", "40", "-n", "main"},
-		{"tmux", "set", "-t", "$0", "@cairn_s", "demo"},
-		{"tmux", "set", "-w", "-t", "@1", "@cairn_w", "demo/main"},
-		{"tmux", "set", "-w", "-t", "@1", "automatic-rename", "off"},
+		{"tmux", "-u", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}", "-s", "demo", "-x", "120", "-y", "40", "-n", "main"},
+		{"tmux", "-u", "set", "-t", "$0", "@cairn_s", "demo"},
+		{"tmux", "-u", "set", "-w", "-t", "@1", "@cairn_w", "demo/main"},
+		{"tmux", "-u", "set", "-w", "-t", "@1", "automatic-rename", "off"},
 	}
 	f := fake(map[string]string{strings.Join(want[0], " "): "$0 @1 %2"})
 	okCalls(f, want[1:])
@@ -107,14 +107,14 @@ func TestEscSemi(t *testing.T) {
 
 func TestUserValuesEscaped(t *testing.T) {
 	want := [][]string{
-		{"tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}",
+		{"tmux", "-u", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}",
 			"-s", `s##1\;`, "-x", "200", "-y", "50", "-n", `a##{x}\;`, "-c", `/home/u/c##p\;`,
 			"-e", `K=#v\;`, "--", "sh", "-c", `echo hi\;`, `#{x}`},
-		{"tmux", "set", "-p", "-t", "%2", "remain-on-exit", "on"},
-		{"tmux", "set", "-t", "$0", "@cairn_s", "demo"},
-		{"tmux", "set", "-w", "-t", "@1", "@cairn_w", "demo/main"},
-		{"tmux", "set", "-w", "-t", "@1", "automatic-rename", "off"},
-		{"tmux", "set", "-p", "-t", "%2", "@cairn_p", "demo/main/1"},
+		{"tmux", "-u", "set", "-p", "-t", "%2", "remain-on-exit", "on"},
+		{"tmux", "-u", "set", "-t", "$0", "@cairn_s", "demo"},
+		{"tmux", "-u", "set", "-w", "-t", "@1", "@cairn_w", "demo/main"},
+		{"tmux", "-u", "set", "-w", "-t", "@1", "automatic-rename", "off"},
+		{"tmux", "-u", "set", "-p", "-t", "%2", "@cairn_p", "demo/main/1"},
 	}
 	f := fake(map[string]string{strings.Join(want[0], " "): "$0 @1 %2"})
 	okCalls(f, want[1:])
@@ -181,12 +181,12 @@ func TestSessionIDByKey(t *testing.T) {
 
 func TestNewWindowArgs(t *testing.T) {
 	want := [][]string{
-		{"tmux", "-L", "s", "new-window", "-d", "-P", "-F", "#{window_id} #{pane_id}", "-t", "$3:", "-n", "logs",
+		{"tmux", "-u", "-L", "s", "new-window", "-d", "-P", "-F", "#{window_id} #{pane_id}", "-t", "$3:", "-n", "logs",
 			"-c", "/home/u/demo", "--", "tail", "-f", "log.txt"},
-		{"tmux", "-L", "s", "set", "-p", "-t", "%4", "remain-on-exit", "on"},
-		{"tmux", "-L", "s", "set", "-w", "-t", "@2", "@cairn_w", "demo/logs"},
-		{"tmux", "-L", "s", "set", "-w", "-t", "@2", "automatic-rename", "off"},
-		{"tmux", "-L", "s", "set", "-p", "-t", "%4", "@cairn_p", "demo/logs/1"},
+		{"tmux", "-u", "-L", "s", "set", "-p", "-t", "%4", "remain-on-exit", "on"},
+		{"tmux", "-u", "-L", "s", "set", "-w", "-t", "@2", "@cairn_w", "demo/logs"},
+		{"tmux", "-u", "-L", "s", "set", "-w", "-t", "@2", "automatic-rename", "off"},
+		{"tmux", "-u", "-L", "s", "set", "-p", "-t", "%4", "@cairn_p", "demo/logs/1"},
 	}
 	f := fake(map[string]string{strings.Join(want[0], " "): "@2 %4\n"})
 	okCalls(f, want[1:])
@@ -204,10 +204,10 @@ func TestNewWindowArgs(t *testing.T) {
 
 func TestSingleElementRunIsShellString(t *testing.T) {
 	want := [][]string{
-		{"tmux", "-L", "s", "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", "%9", "-v", "-l", "30%",
+		{"tmux", "-u", "-L", "s", "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", "%9", "-v", "-l", "30%",
 			"-c", "/home/u/demo", "--", "npm run dev && echo 'done'"},
-		{"tmux", "-L", "s", "set", "-p", "-t", "%10", "remain-on-exit", "on"},
-		{"tmux", "-L", "s", "set", "-p", "-t", "%10", "@cairn_p", "demo/editor/2"},
+		{"tmux", "-u", "-L", "s", "set", "-p", "-t", "%10", "remain-on-exit", "on"},
+		{"tmux", "-u", "-L", "s", "set", "-p", "-t", "%10", "@cairn_p", "demo/editor/2"},
 	}
 	f := fake(map[string]string{strings.Join(want[0], " "): "%10\n"})
 	okCalls(f, want[1:])
@@ -223,8 +223,8 @@ func TestSingleElementRunIsShellString(t *testing.T) {
 
 func TestSplitPaneWithoutCommand(t *testing.T) {
 	want := [][]string{
-		{"tmux", "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", "%1", "-h", "-l", "50%", "-c", "/home/u", "-e", "K=v"},
-		{"tmux", "set", "-p", "-t", "%2", "remain-on-exit", "on"},
+		{"tmux", "-u", "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", "%1", "-h", "-l", "50%", "-c", "/home/u", "-e", "K=v"},
+		{"tmux", "-u", "set", "-p", "-t", "%2", "remain-on-exit", "on"},
 	}
 	f := fake(map[string]string{strings.Join(want[0], " "): "%2\n"})
 	okCalls(f, want[1:])
@@ -269,7 +269,7 @@ func TestSimpleOps(t *testing.T) {
 		{func(c Client) error { return c.SwitchClient(ctx, "$4") }, []string{"switch-client", "-t", "$4"}},
 	}
 	for _, tc := range cases {
-		want := append([]string{"tmux", "-L", "s"}, tc.want...)
+		want := append([]string{"tmux", "-u", "-L", "s"}, tc.want...)
 		f := &execx.FakeRunner{Responses: map[string]execx.Response{strings.Join(want, " "): {}}}
 		if err := tc.run(Client{R: f, Socket: "s"}); err != nil {
 			t.Fatalf("%q: %v", want, err)
@@ -290,7 +290,7 @@ var errExit = errors.New("exit status 1")
 
 func TestOpErrorIncludesOutput(t *testing.T) {
 	f := &execx.FakeRunner{Responses: map[string]execx.Response{
-		"tmux kill-pane -t %1": {Out: []byte("can't find pane: %1\n"), Err: errExit},
+		"tmux -u kill-pane -t %1": {Out: []byte("can't find pane: %1\n"), Err: errExit},
 	}}
 	err := Client{R: f}.KillPane(context.Background(), "%1")
 	if err == nil || !strings.Contains(err.Error(), "can't find pane") {
@@ -352,16 +352,16 @@ func (r *cancelRunner) Run(ctx context.Context, name string, args ...string) ([]
 		return nil, err
 	}
 	out, err := r.f.Run(ctx, name, args...)
-	if len(args) > 0 && args[0] == r.cancelOn {
+	if len(args) > 1 && args[0] == "-u" && args[1] == r.cancelOn {
 		r.cancel()
 	}
 	return out, err
 }
 
 func TestNewSessionKillsSessionWhenMarkerFails(t *testing.T) {
-	newSess := []string{"tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}", "-s", "demo", "-x", "200", "-y", "50", "-n", "main"}
-	marker := []string{"tmux", "set", "-t", "$3", "@cairn_s", "demo"}
-	kill := []string{"tmux", "kill-session", "-t", "$3"}
+	newSess := []string{"tmux", "-u", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}", "-s", "demo", "-x", "200", "-y", "50", "-n", "main"}
+	marker := []string{"tmux", "-u", "set", "-t", "$3", "@cairn_s", "demo"}
+	kill := []string{"tmux", "-u", "kill-session", "-t", "$3"}
 	f := fake(map[string]string{strings.Join(newSess, " "): "$3 @7 %9"})
 	f.Responses[strings.Join(marker, " ")] = execx.Response{Err: errors.New("boom")}
 	okCalls(f, [][]string{kill})
@@ -375,12 +375,12 @@ func TestNewSessionKillsSessionWhenMarkerFails(t *testing.T) {
 }
 
 func TestNewSessionCancelledAfterCreateCleansUp(t *testing.T) {
-	newSess := []string{"tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}", "-s", "demo", "-x", "200", "-y", "50", "-n", "main"}
+	newSess := []string{"tmux", "-u", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}", "-s", "demo", "-x", "200", "-y", "50", "-n", "main"}
 	rest := [][]string{
-		{"tmux", "set", "-t", "$3", "@cairn_s", "demo"},
-		{"tmux", "set", "-w", "-t", "@7", "@cairn_w", "demo/main"},
-		{"tmux", "set", "-w", "-t", "@7", "automatic-rename", "off"},
-		{"tmux", "kill-session", "-t", "$3"},
+		{"tmux", "-u", "set", "-t", "$3", "@cairn_s", "demo"},
+		{"tmux", "-u", "set", "-w", "-t", "@7", "@cairn_w", "demo/main"},
+		{"tmux", "-u", "set", "-w", "-t", "@7", "automatic-rename", "off"},
+		{"tmux", "-u", "kill-session", "-t", "$3"},
 	}
 	f := fake(map[string]string{strings.Join(newSess, " "): "$3 @7 %9"})
 	okCalls(f, rest)

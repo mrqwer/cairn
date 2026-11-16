@@ -263,10 +263,10 @@ func TestAdoptIssuesOnlyListAndSetOption(t *testing.T) {
 	mustRun(t, "", "--socket", "s", "adopt", "--release", "web")
 	sets := 0
 	for _, c := range r.calls {
-		if c[0] != "tmux" || c[1] != "-L" || c[2] != "s" {
+		if c[0] != "tmux" || c[1] != "-u" || c[2] != "-L" || c[3] != "s" {
 			t.Fatalf("call %q", c)
 		}
-		switch c[3] {
+		switch c[4] {
 		case "list-sessions", "list-windows", "list-panes", "display-message":
 		case "set":
 			sets++
@@ -291,10 +291,10 @@ type modelRunner struct {
 
 func (m *modelRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	m.calls = append(m.calls, append([]string{name}, args...))
-	if len(args) < 3 {
+	if len(args) < 4 {
 		return nil, fmt.Errorf("unexpected %q", args)
 	}
-	args = args[2:] // -L s
+	args = args[3:] // -u -L s
 	var b strings.Builder
 	switch args[0] {
 	case "list-sessions":
