@@ -278,9 +278,11 @@ func (a *applier) createWindow(ctx context.Context, w DesiredWindow) error {
 }
 
 // buildWindow splits the remaining panes of a new window in config order
-// and applies the layout. A layout that does not fit, or a pane that is
-// already gone (a command that exited before remain-on-exit was set,
-// decision E11), leaves the window as split; the next apply finishes it.
+// and applies the layout. Panes are created as shells and their command is
+// started only after their options and markers are set, so a command that
+// exits at once leaves a marked dead pane rather than a vanished one. A
+// layout that does not fit leaves the window as split; the next apply
+// finishes it.
 func (a *applier) buildWindow(ctx context.Context, w DesiredWindow, wid, firstPane string) error {
 	a.windows[w.Key] = wid
 	a.panes[w.Panes[0].Key] = firstPane
