@@ -1,13 +1,64 @@
 package layout
 
-import "sort"
+import (
+	"fmt"
+	"slices"
+	"sort"
+)
 
 // Rect is the cell rectangle of one pane (Pane is its 1-based position).
 type Rect struct{ Pane, X, Y, W, H int }
 
+// Order returns the leaf pane positions (1-based, config order) in traversal
+// order: in-order, A before B. This is the order the window's panes must have
+// in tmux before select-layout, since tmux assigns panes to the cells of a
+// layout string in traversal order and ignores the leaf numbers.
+func Order(n *Node) []int {
+	if n.isLeaf() {
+		return []int{n.Leaf}
+	}
+	return append(Order(n.A), Order(n.B)...)
+}
+
+func minLeaf(n *Node) int {
+	return slices.Min(Order(n))
+}
+
+// Check reports an error naming the pane position when the tree cannot be laid
+// out in w x h: a split with fewer than two content cells to share, or a leaf
+// smaller than 1x1.
+func Check(n *Node, w, h int) error {
+	if w < 1 || h < 1 {
+		return fmt.Errorf("layout: pane %d: window %dx%d is too small", minLeaf(n), w, h)
+	}
+	return check(n, area{0, 0, w, h})
+}
+
+func check(n *Node, a area) error {
+	if n.isLeaf() {
+		if a.w < 1 || a.h < 1 {
+			return fmt.Errorf("layout: pane %d would be %dx%d", n.Leaf, a.w, a.h)
+		}
+		return nil
+	}
+	size := a.w
+	if n.Split == "v" {
+		size = a.h
+	}
+	if size-1 < 2 {
+		return fmt.Errorf("layout: pane %d: no room to split a %dx%d area", minLeaf(n.B), a.w, a.h)
+	}
+	ca, cb := children(n, a)
+	if err := check(n.A, ca); err != nil {
+		return err
+	}
+	return check(n.B, cb)
+}
+
 // Geometry lays the tree out in a w x h area. Siblings are separated by one
 // border cell, so for a split wA + 1 + wB equals the parent size. Rects are
-// returned in pane-position order.
+// returned in pane-position order (Rect.Pane), not traversal order. It never
+// panics but is only meaningful after Check(n, w, h) has passed.
 func Geometry(n *Node, w, h int) []Rect {
 	var out []Rect
 	walk(n, 0, 0, w, h, &out)

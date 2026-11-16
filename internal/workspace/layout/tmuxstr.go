@@ -18,12 +18,21 @@ func Checksum(body string) string {
 
 // TmuxString renders the classic tmux layout string "<csum>,<body>" for the
 // tree in a w x h window. Splits of the same direction nested inside each
-// other are flattened into one child list, as tmux prints them.
-func TmuxString(n *Node, w, h int) string {
+// other are flattened into one child list, as tmux prints them. It returns
+// the Check error when the tree does not fit, instead of a string tmux would
+// reject.
+//
+// tmux ignores the trailing leaf numbers (emitted as config position - 1,
+// purely cosmetic) and assigns the window's existing panes to cells in
+// traversal order, which is Order(n).
+func TmuxString(n *Node, w, h int) (string, error) {
+	if err := Check(n, w, h); err != nil {
+		return "", err
+	}
 	var b strings.Builder
 	writeCell(&b, n, area{0, 0, w, h})
 	body := b.String()
-	return Checksum(body) + "," + body
+	return Checksum(body) + "," + body, nil
 }
 
 func writeCell(b *strings.Builder, n *Node, a area) {
@@ -71,7 +80,10 @@ var ErrNoCleanSplit = errors.New("layout: no clean split")
 // FromRects rebuilds a split tree from pane rects (the inverse of Geometry),
 // used by capture. It looks for a vertical gap column (h split), else a
 // horizontal gap row (v split), takes the leftmost/topmost one, and recurses.
-// The ratio is round(100*wB/(wA+wB)) over content cells, clamped to 5..95.
+// Each Ratio (clamped to 5..95) is chosen so the split of the rebuilt tree's
+// actual area puts B's start as close as possible to the true position;
+// round(100*wB/(wA+wB)) is only the tie-break. The result's Geometry matches
+// the input within one cell for positions and two for sizes.
 func FromRects(rs []Rect, w, h int) (*Node, error) {
 	if len(rs) == 0 {
 		return nil, errors.New("layout: no panes")

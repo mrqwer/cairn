@@ -44,7 +44,7 @@ func TestTmuxStringNested(t *testing.T) {
 	n, _ := Build(threePanes())
 	body := "200x50,0,0{120x50,0,0,0,79x50,121,0[79x25,121,0,1,79x24,121,26,2]}"
 	want := Checksum(body) + "," + body
-	if got := TmuxString(n, 200, 50); got != want {
+	if got, err := TmuxString(n, 200, 50); err != nil || got != want {
 		t.Fatalf("got %s\nwant %s", got, want)
 	}
 }
@@ -54,7 +54,10 @@ func TestTmuxStringFlattensSameDirection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := TmuxString(n, 100, 20)
+	got, err := TmuxString(n, 100, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
 	body := got[strings.Index(got, ",")+1:]
 	if strings.Count(body, "{") != 1 {
 		t.Fatalf("not flattened: %s", body)
@@ -240,4 +243,106 @@ func clamped(n *Node) bool {
 		return false
 	}
 	return n.Ratio <= 5 || n.Ratio >= 95 || clamped(n.A) || clamped(n.B)
+}
+
+func TestOrderIsTraversalOrder(t *testing.T) {
+	n, err := Build([]workspace.Pane{{}, {Split: "h", From: 1}, {Split: "v", From: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := Order(n)
+	want := []int{1, 3, 2}
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("Order = %v, want %v", got, want)
+	}
+	// Geometry stays indexed by config position.
+	for i, r := range Geometry(n, 100, 40) {
+		if r.Pane != i+1 {
+			t.Fatalf("rect %d has pane %d", i, r.Pane)
+		}
+	}
+	s, err := TmuxString(n, 100, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Leaf numbers are cosmetic (position-1) and appear in traversal order.
+	body := "100x40,0,0{50x40,0,0[50x20,0,0,0,50x19,0,21,2],49x40,51,0,1}"
+	if want := Checksum(body) + "," + body; s != want {
+		t.Fatalf("got %s\nwant %s", s, want)
+	}
+}
+
+func TestCheckFeasibility(t *testing.T) {
+	four := []workspace.Pane{{}, {Split: "h", From: 1, Size: 50}, {Split: "v", From: 1, Size: 50}, {Split: "v", From: 2, Size: 50}}
+	n, err := Build(four)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain, err := Build([]workspace.Pane{{}, {Split: "h", Size: 50}, {Split: "h", Size: 50}, {Split: "h", Size: 50}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sz := range [][2]int{{2, 2}, {1, 1}, {3, 3}} {
+		n := n
+		if sz[0] == 3 {
+			n = chain // the 2x2 grid of 1x1 panes fits 3x3; a 4-wide chain does not
+		}
+		if err := Check(n, sz[0], sz[1]); err == nil {
+			t.Errorf("%dx%d: expected error", sz[0], sz[1])
+		}
+		if s, err := TmuxString(n, sz[0], sz[1]); err == nil || s != "" {
+			t.Errorf("%dx%d: TmuxString = %q, %v", sz[0], sz[1], s, err)
+		}
+		_ = Geometry(n, sz[0], sz[1]) // must not panic
+	}
+	if err := Check(n, 20, 5); err != nil {
+		t.Fatalf("20x5: %v", err)
+	}
+	if _, err := TmuxString(n, 20, 5); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTmuxStringMixedFlatten(t *testing.T) {
+	n := &Node{Split: "h", Ratio: 50, A: &Node{Leaf: 1}, B: &Node{
+		Split: "h", Ratio: 50,
+		A: &Node{Split: "v", Ratio: 50, A: &Node{Leaf: 2}, B: &Node{Leaf: 3}},
+		B: &Node{Leaf: 4},
+	}}
+	body := "100x21,0,0{50x21,0,0,0,24x21,51,0[24x10,51,0,1,24x10,51,11,2],24x21,76,0,3}"
+	got, err := TmuxString(n, 100, 21)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := Checksum(body) + "," + body; got != want {
+		t.Fatalf("got %s\nwant %s", got, want)
+	}
+}
+
+func TestDeepTree(t *testing.T) {
+	ps := []workspace.Pane{{}}
+	for i := 2; i <= 6; i++ {
+		ps = append(ps, workspace.Pane{Split: []string{"h", "v"}[i%2], Size: 50})
+	}
+	n, err := Build(ps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := TmuxString(n, 200, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := s[strings.Index(s, ",")+1:]
+	if s[:4] != Checksum(body) {
+		t.Fatalf("bad checksum in %s", s)
+	}
+	if got := strings.Count(body, "{") + strings.Count(body, "["); got != 5 {
+		t.Fatalf("%d containers, want 5: %s", got, body)
+	}
+	rects := Geometry(n, 200, 100)
+	back, err := FromRects(rects, 200, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSameTol(t, Geometry(back, 200, 100), rects, 1, 2)
 }
