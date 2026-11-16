@@ -62,10 +62,16 @@ func checkArgv(argv []string) error {
 }
 
 func checkPane(p PaneSpec) error {
-	if p.Key != "" && strings.Count(p.Key, "/") != 2 {
+	if p.Key != "" && !threeParts(p.Key) {
 		return fmt.Errorf("tmux: pane key %q must be <project>/<window>/<n>", p.Key)
 	}
 	return checkArgv(p.Argv)
+}
+
+// threeParts reports whether key is "a/b/c" with no empty part.
+func threeParts(key string) bool {
+	parts := strings.Split(key, "/")
+	return len(parts) == 3 && parts[0] != "" && parts[1] != "" && parts[2] != ""
 }
 
 // checkWindow requires a managed window key "<project>/<window>".
@@ -159,10 +165,21 @@ func (c Client) NewSession(ctx context.Context, name string, w, h int, win Windo
 	if h <= 0 {
 		h = DefaultHeight
 	}
+	// Snapshot of the session ids before the call: if ctx is cancelled while
+	// new-session runs, the session may exist without a marker, and this is
+	// how it is told apart from one that was there before.
+	before, err := c.sessionIDs(ctx)
+	if err != nil {
+		return "", "", "", err
+	}
+	started := time.Now().Unix()
 	args := []string{"new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}",
 		"-s", escFormat(name), "-x", strconv.Itoa(w), "-y", strconv.Itoa(h), "-n", escFormat(win.Name)}
 	out, err := c.output(ctx, append(args, paneArgs(win.PaneSpec)...)...)
 	if err != nil {
+		if ctx.Err() != nil {
+			err = c.cleanupInterruptedNewSession(context.WithoutCancel(ctx), name, before, started, err)
+		}
 		return "", "", "", err
 	}
 	id, err := ids(out, 3)
@@ -197,6 +214,48 @@ func (c Client) NewSession(ctx context.Context, name string, w, h int, win Windo
 		return "", "", "", err
 	}
 	return sessionID, windowID, paneID, nil
+}
+
+// sessionIDs returns the ids of all sessions; none when no server runs.
+func (c Client) sessionIDs(ctx context.Context) (map[string]bool, error) {
+	lines, _, err := c.list(ctx, "list-sessions", "-F", "#{session_id}")
+	if err != nil {
+		return nil, err
+	}
+	ids := map[string]bool{}
+	for _, l := range lines {
+		ids[strings.TrimSpace(l)] = true
+	}
+	return ids, nil
+}
+
+// cleanupInterruptedNewSession handles a new-session call that ended with ctx
+// done: tmux may or may not have created the session before the client was
+// stopped. A session named name is killed only when it can be shown to come
+// from this call: its id is not in before, it was created at or after
+// started, it has no marker and holds a single window. Anything else (a
+// session that was already there, a marked one) is left alone. cause is
+// returned, extended when the outcome is uncertain so the user knows.
+func (c Client) cleanupInterruptedNewSession(ctx context.Context, name string, before map[string]bool, started int64, cause error) error {
+	lines, _, err := c.list(ctx, "list-sessions", "-F", "#{session_id}\t#{session_name}\t#{@cairn_s}\t#{session_created}\t#{session_windows}")
+	if err != nil {
+		return fmt.Errorf("%w; could not check whether tmux left an unmarked session %q behind (%v): look with tmux list-sessions", cause, name, err)
+	}
+	for _, l := range lines {
+		f := strings.Split(l, "\t")
+		if len(f) != 5 || f[1] != name {
+			continue
+		}
+		created, cerr := strconv.ParseInt(f[3], 10, 64)
+		if before[f[0]] || f[2] != "" || cerr != nil || created < started || f[4] != "1" {
+			return fmt.Errorf("%w; a session named %q exists and was not removed because it cannot be shown to be the one this call created", cause, name)
+		}
+		if kerr := c.KillSession(ctx, f[0]); kerr != nil {
+			return fmt.Errorf("%w; could not remove the unmarked session %q (%s) it left behind (%v): remove it with tmux kill-session", cause, name, f[0], kerr)
+		}
+		return cause
+	}
+	return cause
 }
 
 // NewWindow creates a window at the end of sessionID with its first pane and
@@ -362,10 +421,24 @@ func (c Client) SwitchClient(ctx context.Context, sessionName string) error {
 // sessionTarget targets a session id as is and a name by exact match ("=name"),
 // never by tmux's prefix or pattern matching.
 func sessionTarget(s string) string {
-	if strings.HasPrefix(s, "$") {
+	if isSessionID(s) {
 		return s
 	}
 	return escSemi("=" + s)
+}
+
+// isSessionID reports whether s is a tmux session id: "$" and digits only.
+// A name that merely starts with "$" is a name.
+func isSessionID(s string) bool {
+	if len(s) < 2 || s[0] != '$' {
+		return false
+	}
+	for _, r := range s[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // SessionIDByKey returns the id of the session whose @cairn_s marker is key.

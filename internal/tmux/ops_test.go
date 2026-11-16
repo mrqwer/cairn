@@ -42,8 +42,9 @@ func TestNewSessionArgs(t *testing.T) {
 		{"tmux", "-u", "-L", "s", "respawn-pane", "-k", "-t", "%9", "-c", "/home/u/demo",
 			"-e", "A=1", "-e", "B=2", "--", "sh", "-c", `echo "a b" $HOME`},
 	}
-	f := fake(map[string]string{strings.Join(want[0], " "): "$3 @7 %9\n"})
-	okCalls(f, want[1:])
+	want = append([][]string{{"tmux", "-u", "-L", "s", "list-sessions", "-F", "#{session_id}"}}, want...)
+	f := fake(map[string]string{strings.Join(want[1], " "): "$3 @7 %9\n"})
+	okCalls(f, want)
 	c := Client{R: f, Socket: "s"}
 	sid, wid, pid, err := c.NewSession(context.Background(), "demo", 0, 0, WindowSpec{
 		Key: "demo/editor", Name: "editor",
@@ -76,8 +77,9 @@ func TestNewSessionExplicitSize(t *testing.T) {
 		{"tmux", "-u", "set", "-w", "-t", "@1", "@cairn_w", "demo/main"},
 		{"tmux", "-u", "set", "-w", "-t", "@1", "automatic-rename", "off"},
 	}
-	f := fake(map[string]string{strings.Join(want[0], " "): "$0 @1 %2"})
-	okCalls(f, want[1:])
+	want = append([][]string{{"tmux", "-u", "list-sessions", "-F", "#{session_id}"}}, want...)
+	f := fake(map[string]string{strings.Join(want[1], " "): "$0 @1 %2"})
+	okCalls(f, want)
 	if _, _, _, err := (Client{R: f}).NewSession(context.Background(), "demo", 120, 40, WindowSpec{Key: "demo/main", Name: "main"}); err != nil {
 		t.Fatal(err)
 	}
@@ -120,8 +122,9 @@ func TestUserValuesEscaped(t *testing.T) {
 		{"tmux", "-u", "respawn-pane", "-k", "-t", "%2", "-c", `/home/u/c##p\;`,
 			"-e", `K=#v\;`, "--", "sh", "-c", `echo hi\;`, `#{x}`},
 	}
-	f := fake(map[string]string{strings.Join(want[0], " "): "$0 @1 %2"})
-	okCalls(f, want[1:])
+	want = append([][]string{{"tmux", "-u", "list-sessions", "-F", "#{session_id}"}}, want...)
+	f := fake(map[string]string{strings.Join(want[1], " "): "$0 @1 %2"})
+	okCalls(f, want)
 	_, _, _, err := Client{R: f}.NewSession(context.Background(), "s#1;", 0, 0, WindowSpec{
 		Key: "demo/main", Name: "a#{x};",
 		PaneSpec: PaneSpec{Key: "demo/main/1", Cwd: "/home/u/c#p;", Env: map[string]string{"K": "#v;"},
@@ -367,15 +370,17 @@ func (r *cancelRunner) Run(ctx context.Context, name string, args ...string) ([]
 func TestNewSessionKillsSessionWhenMarkerFails(t *testing.T) {
 	newSess := []string{"tmux", "-u", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}", "-s", "demo", "-x", "200", "-y", "50", "-n", "main"}
 	marker := []string{"tmux", "-u", "set", "-t", "$3", "@cairn_s", "demo"}
+	ls := []string{"tmux", "-u", "list-sessions", "-F", "#{session_id}"}
 	kill := []string{"tmux", "-u", "kill-session", "-t", "$3"}
 	f := fake(map[string]string{strings.Join(newSess, " "): "$3 @7 %9"})
+	okCalls(f, [][]string{ls})
 	f.Responses[strings.Join(marker, " ")] = execx.Response{Err: errors.New("boom")}
 	okCalls(f, [][]string{kill})
 	_, _, _, err := Client{R: f}.NewSession(context.Background(), "demo", 0, 0, WindowSpec{Key: "demo/main", Name: "main"})
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("err %v", err)
 	}
-	if want := [][]string{newSess, marker, kill}; !reflect.DeepEqual(f.Calls, want) {
+	if want := [][]string{ls, newSess, marker, kill}; !reflect.DeepEqual(f.Calls, want) {
 		t.Fatalf("calls\n got %q\nwant %q", f.Calls, want)
 	}
 }
@@ -388,8 +393,9 @@ func TestNewSessionCancelledAfterCreateCleansUp(t *testing.T) {
 		{"tmux", "-u", "set", "-w", "-t", "@7", "automatic-rename", "off"},
 		{"tmux", "-u", "kill-session", "-t", "$3"},
 	}
+	ls := []string{"tmux", "-u", "list-sessions", "-F", "#{session_id}"}
 	f := fake(map[string]string{strings.Join(newSess, " "): "$3 @7 %9"})
-	okCalls(f, rest)
+	okCalls(f, append(rest, ls))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r := &cancelRunner{f: f, cancelOn: "new-session", cancel: cancel}
@@ -399,7 +405,7 @@ func TestNewSessionCancelledAfterCreateCleansUp(t *testing.T) {
 	}
 	// The marker steps run detached from the cancellation; the session is
 	// then removed, so no unmarked session is left behind.
-	if want := append([][]string{newSess}, rest...); !reflect.DeepEqual(f.Calls, want) {
+	if want := append([][]string{ls, newSess}, rest...); !reflect.DeepEqual(f.Calls, want) {
 		t.Fatalf("calls\n got %q\nwant %q", f.Calls, want)
 	}
 }
@@ -496,5 +502,149 @@ func TestCancelBeforeStartStillStartsCommand(t *testing.T) {
 	}
 	if !r2.did("respawn-pane -k -t %10") {
 		t.Fatalf("split command not started: %q", r2.calls)
+	}
+}
+
+// scriptRunner answers by the tmux subcommand; new-session runs hook first
+// (to cancel the context) and then returns newErr.
+type scriptRunner struct {
+	calls   [][]string
+	lists   []string // successive list-sessions outputs
+	newErr  error
+	listErr error // error of the list-sessions after new-session
+	onNew   func()
+	newDone bool
+}
+
+func (r *scriptRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	r.calls = append(r.calls, append([]string{name}, args...))
+	i := 0
+	for i < len(args) && strings.HasPrefix(args[i], "-") && args[i] != "-F" {
+		i++
+		if args[i-1] == "-L" {
+			i++
+		}
+	}
+	switch args[i] {
+	case "list-sessions":
+		if r.newDone && r.listErr != nil {
+			return nil, r.listErr
+		}
+		out := ""
+		if len(r.lists) > 0 {
+			out, r.lists = r.lists[0], r.lists[1:]
+		}
+		return []byte(out), nil
+	case "new-session":
+		r.newDone = true
+		if r.onNew != nil {
+			r.onNew()
+		}
+		return nil, r.newErr
+	}
+	return nil, nil
+}
+
+func (r *scriptRunner) killed() []string {
+	var ids []string
+	for _, c := range r.calls {
+		if slices.Contains(c, "kill-session") {
+			ids = append(ids, c[len(c)-1])
+		}
+	}
+	return ids
+}
+
+func newSessionCancelled(t *testing.T, r *scriptRunner) error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.onNew = cancel
+	r.newErr = errors.New("signal: killed")
+	_, _, _, err := Client{R: r}.NewSession(ctx, "demo", 0, 0, WindowSpec{Key: "demo/main", Name: "main"})
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	return err
+}
+
+func TestNewSessionCancelledDuringCreateKillsItsOwnUnmarkedSession(t *testing.T) {
+	r := &scriptRunner{lists: []string{"$1\n", "$1\tother\t\t100\t1\n$2\tdemo\t\t9999999999\t1\n"}}
+	err := newSessionCancelled(t, r)
+	if got := r.killed(); !reflect.DeepEqual(got, []string{"$2"}) {
+		t.Fatalf("killed %v, calls %q", got, r.calls)
+	}
+	if !strings.Contains(err.Error(), "killed") {
+		t.Fatalf("original cause lost: %v", err)
+	}
+}
+
+func TestNewSessionCancelledLeavesSessionsItCannotProveItsOwn(t *testing.T) {
+	cases := map[string]string{
+		"was already there": "$2\tdemo\t\t9999999999\t1\n",
+		"has a marker":      "$3\tdemo\tdemo\t9999999999\t1\n",
+		"created earlier":   "$3\tdemo\t\t1\t1\n",
+		"several windows":   "$3\tdemo\t\t9999999999\t2\n",
+		"bad timestamp":     "$3\tdemo\t\tx\t1\n",
+	}
+	for name, after := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := &scriptRunner{lists: []string{"$2\n", after}}
+			err := newSessionCancelled(t, r)
+			if k := r.killed(); len(k) != 0 {
+				t.Fatalf("killed %v", k)
+			}
+			if !strings.Contains(err.Error(), "not removed") {
+				t.Fatalf("error should tell the user: %v", err)
+			}
+		})
+	}
+}
+
+func TestNewSessionCancelledWithNothingCreated(t *testing.T) {
+	r := &scriptRunner{lists: []string{"", ""}}
+	err := newSessionCancelled(t, r)
+	if k := r.killed(); len(k) != 0 || strings.Contains(err.Error(), "not removed") {
+		t.Fatalf("killed %v err %v", k, err)
+	}
+}
+
+func TestNewSessionCancelledUnableToCheckTellsTheUser(t *testing.T) {
+	r := &scriptRunner{lists: []string{""}, listErr: errors.New("boom")}
+	err := newSessionCancelled(t, r)
+	if !strings.Contains(err.Error(), "list-sessions") || !strings.Contains(err.Error(), "demo") {
+		t.Fatalf("error %v", err)
+	}
+}
+
+func TestNewSessionPlainFailureLooksNothingUp(t *testing.T) {
+	r := &scriptRunner{lists: []string{"$2\n"}, newErr: errors.New("duplicate session: demo")}
+	if _, _, _, err := (Client{R: r}).NewSession(context.Background(), "demo", 0, 0, WindowSpec{Key: "demo/main", Name: "main"}); err == nil {
+		t.Fatal("want error")
+	}
+	if len(r.calls) != 2 || len(r.killed()) != 0 {
+		t.Fatalf("calls %q", r.calls)
+	}
+}
+
+func TestSessionTargetOnlyTreatsRealIDsAsIDs(t *testing.T) {
+	cases := map[string]string{"$12": "$12", "$": "=$", "$abc": "=$abc", "$1x": "=$1x", "name": "=name", "a;": `=a\;`}
+	for in, want := range cases {
+		if got := sessionTarget(in); got != want {
+			t.Errorf("sessionTarget(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCheckPaneRejectsEmptyKeyParts(t *testing.T) {
+	for _, k := range []string{"a//", "a/b/", "/b/c", "//", "a/b", "a/b/c/d"} {
+		if checkPane(PaneSpec{Key: k}) == nil {
+			t.Errorf("key %q accepted", k)
+		}
+	}
+	for _, k := range []string{"", "a/b/1"} {
+		if err := checkPane(PaneSpec{Key: k}); err != nil {
+			t.Errorf("key %q: %v", k, err)
+		}
 	}
 }

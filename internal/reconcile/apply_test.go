@@ -785,7 +785,45 @@ func TestPlanRootThatIsAFileIsMissing(t *testing.T) {
 		t.Fatalf("ops %s", got)
 	}
 	p.Root = t.TempDir()
+	for wi := range p.Windows {
+		for pi := range p.Windows[wi].Panes {
+			p.Windows[wi].Panes[pi].Cwd = p.Root
+		}
+	}
 	if got := kinds(Plan([]workspace.Project{p}, tmux.Snapshot{}, Options{})); got != "demo:create-session:code" {
 		t.Fatalf("ops %s", got)
+	}
+}
+
+func TestLocatePinsTheSession(t *testing.T) {
+	snap := tmux.Snapshot{Sessions: []tmux.Session{
+		{ID: "$1", Key: "demo", Windows: []tmux.Window{{ID: "@1", Key: "demo/main", Panes: []tmux.Pane{{ID: "%1", Key: "demo/main/1"}}}}},
+		{ID: "$2", Key: "demo", Windows: []tmux.Window{{ID: "@2", Key: "demo/main", Panes: []tmux.Pane{{ID: "%2", Key: "demo/main/1"}}}}},
+	}}
+	if _, err := locate(snap, "demo", "$1", "main", "", "@1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := locate(snap, "demo", "$1", "main", "demo/main/1", "%1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"@2", "%2"} {
+		pk := ""
+		if id[0] == '%' {
+			pk = "demo/main/1"
+		}
+		if _, err := locate(snap, "demo", "$1", "main", pk, id); err == nil || !strings.Contains(err.Error(), "not in session $1") {
+			t.Fatalf("%s in the other marked session: err %v", id, err)
+		}
+	}
+	if _, err := locate(snap, "demo", "", "main", "", "@2"); err != nil {
+		t.Fatalf("no pin keeps the old behaviour: %v", err)
+	}
+}
+
+func TestApplyTreatsMissingCwdNoteAsNote(t *testing.T) {
+	f := &fakeDriver{}
+	res := Apply(context.Background(), f, []workspace.Project{devProject("demo")}, []Op{{Kind: KindNoteMissingCwd, Project: "demo", Detail: "x"}})
+	if len(res) != 1 || res[0].Err != nil || len(f.calls) != 0 {
+		t.Fatalf("res %+v calls %q", res, f.calls)
 	}
 }

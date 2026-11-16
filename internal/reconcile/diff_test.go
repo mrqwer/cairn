@@ -435,3 +435,36 @@ func TestDesired(t *testing.T) {
 		t.Error("root missing not detected")
 	}
 }
+
+func TestPlanNotesMissingPaneCwd(t *testing.T) {
+	p := devProject("demo")
+	missing := func(path string) bool { return !strings.Contains(path, "gone") }
+	p.Windows[0].Panes[1].Cwd = "/home/u/gone"
+	ops := Plan([]workspace.Project{p}, tmux.Snapshot{}, Options{RootExists: missing})
+	var notes []Op
+	for _, op := range ops {
+		if op.Kind == KindNoteMissingCwd {
+			notes = append(notes, op)
+		}
+	}
+	if len(notes) != 1 || !notes[0].IsNote() || notes[0].PaneKey != "demo/code/2" || !strings.Contains(notes[0].Detail, "/home/u/gone") || !strings.Contains(notes[0].Detail, "home directory") {
+		t.Fatalf("notes %+v from %s", notes, kinds(ops))
+	}
+	if ops[0].Kind != KindCreateSession {
+		t.Fatalf("the pane must still be created: %s", kinds(ops))
+	}
+	// An existing session missing that pane: note follows create-pane.
+	sess := tmux.Session{ID: "$1", Name: "demo", Key: "demo", Windows: []tmux.Window{{ID: "@1", Key: "demo/code", W: 200, H: 50,
+		Panes: []tmux.Pane{{ID: "%1", Key: "demo/code/1"}}}}}
+	got := kinds(Plan([]workspace.Project{p}, tmux.Snapshot{Sessions: []tmux.Session{sess}}, Options{RootExists: missing}))
+	if !strings.Contains(got, "demo:create-pane:code:demo/code/2 demo:note-missing-cwd:code:demo/code/2") {
+		t.Fatalf("ops %s", got)
+	}
+	// No note when everything exists.
+	p.Windows[0].Panes[1].Cwd = "/home/u/demo/ok"
+	for _, op := range Plan([]workspace.Project{p}, tmux.Snapshot{}, Options{RootExists: missing}) {
+		if op.Kind == KindNoteMissingCwd {
+			t.Fatalf("unexpected note %+v", op)
+		}
+	}
+}

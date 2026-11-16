@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mrqwer/cairn/internal/reconcile"
 )
 
 // mustRun runs cairn and fails the test on an error.
@@ -416,5 +418,16 @@ func TestJSONOutputIsOneDocument(t *testing.T) {
 	m = decode("status", "--json")
 	if string(m["projects"]) != "[]" || !strings.Contains(string(m["load_errors"]), "broken.toml") {
 		t.Fatalf("status --json: %v", m)
+	}
+}
+
+func TestPlanShowsMissingCwdNote(t *testing.T) {
+	var b strings.Builder
+	renderPlan(&b, []reconcile.Op{
+		{Kind: reconcile.KindCreateSession, Project: "demo", Detail: "session demo: 1 windows, 2 panes"},
+		{Kind: reconcile.KindNoteMissingCwd, Project: "demo", Detail: "pane demo/main/2: cwd /home/u/gone does not exist"},
+	})
+	if out := b.String(); !strings.Contains(out, "note-missing-cwd") || !strings.Contains(out, "/home/u/gone") {
+		t.Fatalf("plan output:\n%s", out)
 	}
 }

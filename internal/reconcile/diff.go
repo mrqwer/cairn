@@ -26,6 +26,10 @@ const (
 	KindSkipNameClash   = "skip-name-clash"
 	KindSkipLayout      = "skip-layout"
 	KindSkipInvalid     = "skip-invalid"
+	// KindNoteMissingCwd says a pane about to be created or restarted has a
+	// cwd that does not exist; tmux then starts it in the home directory
+	// (verified on tmux 3.8, for new-session, new-window and split-window).
+	KindNoteMissingCwd = "note-missing-cwd"
 )
 
 // Op is one planned change (or note). Target is a tmux id for existing
@@ -41,7 +45,7 @@ type Op struct {
 // IsNote reports whether the op only reports something.
 func (o Op) IsNote() bool {
 	switch o.Kind {
-	case KindReportExtra, KindReportDead, KindSkipMissingRoot, KindSkipNameClash, KindSkipLayout, KindSkipInvalid:
+	case KindReportExtra, KindReportDead, KindSkipMissingRoot, KindSkipNameClash, KindSkipLayout, KindSkipInvalid, KindNoteMissingCwd:
 		return true
 	}
 	return false
@@ -107,6 +111,7 @@ func planProject(p workspace.Project, snap tmux.Snapshot, opts Options) []Op {
 			Detail: fmt.Sprintf("session %s: %d windows, %d panes", d.Session, len(d.Windows), countPanes(d))}}
 		for _, w := range d.Windows {
 			ops = append(ops, newWindowLayoutNote(d, w, NewSize)...)
+			ops = append(ops, missingCwdNotes(d, w, w.Panes, d.Root, opts)...)
 		}
 		return ops
 	}
@@ -141,6 +146,7 @@ func planProject(p workspace.Project, snap tmux.Snapshot, opts Options) []Op {
 			ops = append(ops, Op{Kind: KindCreateWindow, Project: d.ID, Target: sess.ID, WindowKey: dw.Key,
 				Detail: fmt.Sprintf("window %s: %d panes", dw.Key, len(dw.Panes))})
 			ops = append(ops, newWindowLayoutNote(d, dw, size)...)
+			ops = append(ops, missingCwdNotes(d, dw, dw.Panes, d.Root, opts)...)
 			continue
 		}
 		ops = append(ops, planWindow(d, dw, tw, opts)...)
@@ -173,6 +179,26 @@ func newWindowLayoutNote(d DesiredProject, w DesiredWindow, size layout.Size) []
 			Detail: fmt.Sprintf("window %s: layout not applied: %v", w.Key, err)}}
 	}
 	return nil
+}
+
+// missingCwdNotes returns a note for each of panes whose cwd is not an
+// existing directory. The root is skipped: a missing root is a skip-missing-root
+// of the whole project.
+func missingCwdNotes(d DesiredProject, w DesiredWindow, panes []DesiredPane, root string, opts Options) []Op {
+	exists := opts.RootExists
+	if exists == nil {
+		exists = dirExists
+	}
+	var ops []Op
+	for _, p := range panes {
+		cwd := p.Spec.Cwd
+		if cwd == "" || cwd == root || exists(cwd) {
+			continue
+		}
+		ops = append(ops, Op{Kind: KindNoteMissingCwd, Project: d.ID, Target: cwd, WindowKey: w.Key, PaneKey: p.Key,
+			Detail: fmt.Sprintf("pane %s: cwd %s does not exist; the pane is still created and tmux starts it in the home directory", p.Key, cwd)})
+	}
+	return ops
 }
 
 func countPanes(d DesiredProject) int {
@@ -231,6 +257,7 @@ func planWindow(d DesiredProject, dw DesiredWindow, tw tmux.Window, opts Options
 				op.Detail = fmt.Sprintf("pane %s: split %s %d%% of pane %d", dp.Key, dp.Split, dp.Size, dp.From)
 			}
 			ops = append(ops, op)
+			ops = append(ops, missingCwdNotes(d, dw, []DesiredPane{dp}, d.Root, opts)...)
 			continue
 		}
 		if !tp.Dead {

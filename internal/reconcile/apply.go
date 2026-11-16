@@ -145,11 +145,27 @@ type location struct {
 // locate finds id in snap ("@n" a window, "%n" a pane) and checks that it is
 // still where the op expects it: in the session marked project, in the
 // window marked project/windowKey and, for a pane, carrying exactly the
-// marker paneKey. Anything else is an error and nothing may be done to the
+// marker paneKey. When sessionID is not empty the session must also be that
+// very tmux session, so a second session carrying the project marker is never
+// mistaken for it. Anything else is an error and nothing may be done to the
 // object.
-func locate(snap tmux.Snapshot, project, windowKey, paneKey, id string) (location, error) {
+func locate(snap tmux.Snapshot, project, sessionID, windowKey, paneKey, id string) (location, error) {
 	wantWindow := project + "/" + windowKey
 	for _, s := range snap.Sessions {
+		if sessionID != "" && s.ID != sessionID {
+			// An object that sits in another session is reported as such.
+			for _, w := range s.Windows {
+				if w.ID == id {
+					return location{}, fmt.Errorf("window %s is not in session %s of %s; not touched", id, sessionID, project)
+				}
+				for _, p := range w.Panes {
+					if p.ID == id {
+						return location{}, fmt.Errorf("pane %s is not in session %s of %s; not touched", id, sessionID, project)
+					}
+				}
+			}
+			continue
+		}
 		for _, w := range s.Windows {
 			if strings.HasPrefix(id, "@") && w.ID == id {
 				if s.Key != project || w.Key != wantWindow {
@@ -180,7 +196,7 @@ func (a *applier) fresh(ctx context.Context, windowKey, paneKey, id string) (loc
 	if err != nil {
 		return location{}, err
 	}
-	return locate(snap, a.dp.ID, windowKey, paneKey, id)
+	return locate(snap, a.dp.ID, a.session, windowKey, paneKey, id)
 }
 
 func (a *applier) window(key string) (DesiredWindow, error) {
