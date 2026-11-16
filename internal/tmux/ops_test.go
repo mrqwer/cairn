@@ -403,3 +403,98 @@ func TestNewSessionCancelledAfterCreateCleansUp(t *testing.T) {
 		t.Fatalf("calls\n got %q\nwant %q", f.Calls, want)
 	}
 }
+
+var errBoom = errors.New("boom")
+
+// failRespawn answers every command like okRunner but fails respawn-pane; an
+// optional hook runs after each command (to cancel a context).
+type failRespawn struct {
+	calls  [][]string
+	failAt string
+	after  func(args []string)
+}
+
+func (r *failRespawn) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	r.calls = append(r.calls, append([]string{name}, args...))
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if r.after != nil {
+		defer r.after(args) // runs once this command has succeeded
+	}
+	j := strings.Join(args, " ")
+	switch {
+	case strings.Contains(j, "new-window"):
+		return []byte("@2 %4\n"), nil
+	case strings.Contains(j, "split-window"):
+		return []byte("%10\n"), nil
+	case r.failAt != "" && strings.Contains(j, r.failAt):
+		return nil, errBoom
+	}
+	return nil, nil
+}
+
+func (r *failRespawn) did(sub string) bool {
+	for _, c := range r.calls {
+		if strings.Contains(strings.Join(c, " "), sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestNewWindowRespawnFailureRemovesWindow(t *testing.T) {
+	r := &failRespawn{failAt: "respawn-pane"}
+	wid, pid, err := Client{R: r}.NewWindow(context.Background(), "$3", WindowSpec{Key: "demo/logs", Name: "logs",
+		PaneSpec: PaneSpec{Key: "demo/logs/1", Argv: []string{"tail", "-f", "x"}}})
+	if !errors.Is(err, errBoom) || wid != "" || pid != "" {
+		t.Fatalf("%q %q %v", wid, pid, err)
+	}
+	if !r.did("kill-window -t @2") {
+		t.Fatalf("new window not killed: %q", r.calls)
+	}
+}
+
+func TestSplitPaneRespawnFailureRemovesPane(t *testing.T) {
+	r := &failRespawn{failAt: "respawn-pane"}
+	id, err := Client{R: r}.SplitPane(context.Background(), "%9", "h", 50, PaneSpec{Key: "demo/w/2", Argv: []string{"tail"}})
+	if !errors.Is(err, errBoom) || id != "" {
+		t.Fatalf("%q %v", id, err)
+	}
+	if !r.did("kill-pane -t %10") {
+		t.Fatalf("new pane not killed: %q", r.calls)
+	}
+}
+
+// Ctrl-C between the marker and the command start must not leave a marked
+// pane without its command: the start still runs.
+func TestCancelBeforeStartStillStartsCommand(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := &failRespawn{after: func(args []string) {
+		if strings.Contains(strings.Join(args, " "), "@cairn_p") {
+			cancel()
+		}
+	}}
+	_, _, err := Client{R: r}.NewWindow(ctx, "$3", WindowSpec{Key: "demo/logs", Name: "logs",
+		PaneSpec: PaneSpec{Key: "demo/logs/1", Argv: []string{"tail"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.did("respawn-pane -k -t %4") {
+		t.Fatalf("command not started: %q", r.calls)
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	r2 := &failRespawn{after: func(args []string) {
+		if strings.Contains(strings.Join(args, " "), "@cairn_p") {
+			cancel2()
+		}
+	}}
+	if _, err := (Client{R: r2}).SplitPane(ctx2, "%9", "h", 50, PaneSpec{Key: "demo/w/2", Argv: []string{"tail"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !r2.did("respawn-pane -k -t %10") {
+		t.Fatalf("split command not started: %q", r2.calls)
+	}
+}

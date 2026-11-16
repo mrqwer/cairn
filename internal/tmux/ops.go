@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // PaneSpec describes a pane to create. Argv of length 1 runs as a shell
@@ -224,7 +225,22 @@ func (c Client) NewWindow(ctx context.Context, sessionID string, win WindowSpec)
 	if err := c.paneMarker(ctx, paneID, win.PaneSpec); err != nil {
 		return windowID, paneID, err
 	}
-	return windowID, paneID, c.startCommand(ctx, paneID, win.PaneSpec)
+	// A marked pane that never got its command would look in sync forever, so
+	// the start is cancellation-proof and its failure removes the new window
+	// (its id came from this call's -P).
+	setupCtx, cancel := startContext(ctx)
+	defer cancel()
+	if err := c.startCommand(setupCtx, paneID, win.PaneSpec); err != nil {
+		_ = c.KillWindow(setupCtx, windowID)
+		return "", "", err
+	}
+	return windowID, paneID, nil
+}
+
+// startContext detaches the command start from the caller's cancellation,
+// bounded so a stuck tmux cannot hang it.
+func startContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 }
 
 // SplitPane splits targetPane ("h" left/right, "v" top/bottom), giving the new
@@ -251,7 +267,13 @@ func (c Client) SplitPane(ctx context.Context, targetPane string, dir string, pe
 	if err := c.paneMarker(ctx, id[0], p); err != nil {
 		return id[0], err
 	}
-	return id[0], c.startCommand(ctx, id[0], p)
+	setupCtx, cancel := startContext(ctx)
+	defer cancel()
+	if err := c.startCommand(setupCtx, id[0], p); err != nil {
+		_ = c.KillPane(setupCtx, id[0]) // the pane id came from this call's -P
+		return "", err
+	}
+	return id[0], nil
 }
 
 // SelectLayout applies a classic layout string to windowID.
