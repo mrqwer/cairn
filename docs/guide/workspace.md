@@ -42,13 +42,15 @@ afterwards. If a file changed after the event, undo refuses and writes nothing.
 Use a separate tmux server for every command:
 
 ```
+mkdir -p /tmp/demo
 cairn project add demo --root /tmp/demo
 cairn --socket try up
 cairn --socket try open demo
 ```
 
-Or `export CAIRN_TMUX_SOCKET=try`. Your default server is never touched. Remove the trial
-with `tmux -L try kill-server`.
+Or `export CAIRN_TMUX_SOCKET=try`. Your default server is never touched.
+Clean up: `tmux -L try kill-server`, then `cairn project archive demo` and `cairn project rm demo`.
+Without the last two, a later `cairn up` on the default server creates `demo` there.
 
 ## Check health
 

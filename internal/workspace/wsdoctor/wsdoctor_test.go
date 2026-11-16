@@ -67,7 +67,7 @@ func TestConfig(t *testing.T) {
 	bad := proj("api", "/srv/api")
 	bad.Root = "relative"
 	r = byID(t, Checks([]workspace.Project{bad}, nil, tmux.Snapshot{}, "3.4", exists), IDConfig)
-	if r.Status != doctor.Crit || !strings.Contains(r.Evidence, "api") || !strings.Contains(r.Evidence, "root") {
+	if r.Status != doctor.Crit || !strings.Contains(r.Evidence, "projects/api.toml") || !strings.Contains(r.Evidence, "root") {
 		t.Fatalf("validation: %+v", r)
 	}
 }
@@ -137,5 +137,25 @@ func TestServiceCheck(t *testing.T) {
 	ok[1].Enabled = "disabled"
 	if r = run(ok); r.Status != doctor.Warn || !strings.Contains(r.Evidence, workspace.UpUnit) {
 		t.Fatalf("disabled: %+v", r)
+	}
+}
+
+func TestDriftAttention(t *testing.T) {
+	api := proj("api", "/srv/api")
+	// A live unmanaged session with the same name: the plan skips api.
+	snap := tmux.Snapshot{Sessions: []tmux.Session{{ID: "$1", Name: "api"}}}
+	r := byID(t, Checks([]workspace.Project{api}, nil, snap, "3.4", exists), IDDrift)
+	if r.Status != doctor.Warn || !strings.Contains(r.Evidence, "1 project needs attention: cairn plan") {
+		t.Fatalf("name clash: %+v", r)
+	}
+	if strings.Contains(r.Evidence, "cairn apply") {
+		t.Fatalf("clash is not fixed by apply: %+v", r)
+	}
+}
+
+func TestFailed(t *testing.T) {
+	r := Failed(IDConfig, "Workspace config", doctor.Crit, errors.New("boom")).Run(t.Context())
+	if r.ID != IDConfig || r.Status != doctor.Crit || !strings.Contains(r.Evidence, "boom") {
+		t.Fatalf("%+v", r)
 	}
 }

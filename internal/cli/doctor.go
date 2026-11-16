@@ -76,13 +76,25 @@ var workspaceChecks = func(ctx context.Context, socket string) ([]doctor.Check, 
 	if out, err := client.R.Run(ctx, "tmux", "-V"); err == nil {
 		version = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "tmux"))
 	}
-	var snap tmux.Snapshot
+	var (
+		snap    tmux.Snapshot
+		snapErr error
+	)
 	if version != "" {
-		if snap, err = client.Snapshot(ctx); err != nil {
-			return nil, err
-		}
+		snap, snapErr = client.Snapshot(ctx)
 	}
 	checks := wsdoctor.Checks(ws.projects, ws.loadErrs, snap, version, wsRoot.Exists)
+	if snapErr != nil {
+		// Without a snapshot there is nothing to compare: say so, skip drift.
+		kept := []doctor.Check{wsdoctor.Failed(wsdoctor.IDTmux, "tmux available", doctor.Warn,
+			fmt.Errorf("cannot read tmux state: %w", snapErr))}
+		for _, c := range checks {
+			if c.ID() != wsdoctor.IDTmux && c.ID() != wsdoctor.IDDrift {
+				kept = append(kept, c)
+			}
+		}
+		checks = kept
+	}
 	units := workspace.QueryUnits(ctx, hostRunner, wsRoot, host.UserUnitDir(ws.dirs))
 	return append(checks, wsdoctor.ServiceCheck(units)), nil
 }
@@ -195,7 +207,7 @@ func newDoctorCmd() *cobra.Command {
 			if scope != "host" {
 				wc, err := workspaceChecks(ctx, socketName(cmd))
 				if err != nil {
-					return err
+					wc = []doctor.Check{wsdoctor.Failed(wsdoctor.IDConfig, "Workspace config", doctor.Crit, err)}
 				}
 				checks = append(checks, wc...)
 			}

@@ -162,3 +162,46 @@ func TestDoctorWithoutArgRunsHostAndWorkspace(t *testing.T) {
 		t.Fatalf("doctor host must not run workspace checks:\n%s", out)
 	}
 }
+
+func TestDoctorWorkspaceErrorsKeepHostResults(t *testing.T) {
+	wsTestEnv(t)
+	oldHost := hostChecks
+	t.Cleanup(func() { hostChecks = oldHost })
+	hostChecks = func(context.Context) ([]doctor.Check, error) {
+		return []doctor.Check{stubCheck{doctor.Result{ID: "h", Title: "HostCheck"}}}, nil
+	}
+	oldWS := workspaceChecks
+	t.Cleanup(func() { workspaceChecks = oldWS })
+	workspaceChecks = func(context.Context, string) ([]doctor.Check, error) {
+		return nil, errors.New("projects dir unreadable")
+	}
+	out, err := runDoctor(t, "doctor")
+	var ee *ExitError
+	if !errors.As(err, &ee) || !strings.Contains(out, "HostCheck") || !strings.Contains(out, "projects dir unreadable") {
+		t.Fatalf("err=%v\n%s", err, out)
+	}
+}
+
+// failSnap answers tmux -V but fails every list command with a non-"no server" error.
+type failSnap struct{ roRunner }
+
+func (f *failSnap) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if name == "tmux" && (len(args) != 1 || args[0] != "-V") {
+		return []byte("permission denied\n"), errors.New("exit status 1")
+	}
+	return f.roRunner.Run(ctx, name, args...)
+}
+
+func TestDoctorWorkspaceSnapshotErrorIsAResult(t *testing.T) {
+	wsTestEnv(t)
+	stubWorkspaceEnv(t, &roRunner{version: "3.4"})
+	r := &failSnap{roRunner{version: "3.4"}}
+	newTmuxClient = func(socket string) tmux.Client { return tmux.Client{R: r, Socket: socket} }
+	out, _ := runDoctor(t, "doctor", "workspace")
+	if !strings.Contains(out, "permission denied") || !strings.Contains(out, "Workspace config") {
+		t.Fatalf("%s", out)
+	}
+	if strings.Contains(out, "Workspace in sync") {
+		t.Fatalf("drift must not run on a failed snapshot:\n%s", out)
+	}
+}

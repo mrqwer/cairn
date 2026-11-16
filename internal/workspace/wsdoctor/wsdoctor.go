@@ -51,6 +51,11 @@ func Checks(ps []workspace.Project, errs []workspace.LoadError, snap tmux.Snapsh
 	}
 }
 
+// Failed is a check that reports an error met while gathering its input.
+func Failed(id, title string, st doctor.Status, err error) doctor.Check {
+	return check{id, title, func() doctor.Result { return doctor.Result{Status: st, Evidence: err.Error()} }}
+}
+
 var versionRe = regexp.MustCompile(`(\d+)\.(\d+)`)
 
 func tmuxResult(ver string) doctor.Result {
@@ -77,7 +82,7 @@ func configResult(ps []workspace.Project, errs []workspace.LoadError) doctor.Res
 	}
 	for _, p := range ps {
 		for _, fe := range p.Validate() {
-			bad = append(bad, fmt.Sprintf("project %s: %s", p.ID, fe))
+			bad = append(bad, fmt.Sprintf("projects/%s.toml: %s", p.ID, fe))
 		}
 	}
 	if len(bad) > 0 {
@@ -104,20 +109,40 @@ func driftResult(ps []workspace.Project, snap tmux.Snapshot, haveTmux bool, root
 	if !haveTmux {
 		return doctor.Result{Status: doctor.Unknown, Evidence: "tmux is missing, nothing to compare"}
 	}
-	drifting := map[string]bool{}
+	drifting, attention := map[string]bool{}, map[string]bool{}
 	for _, op := range reconcile.Plan(ps, snap, reconcile.Options{RootExists: rootExists}) {
-		if !op.IsNote() {
+		switch {
+		case !op.IsNote():
 			drifting[op.Project] = true
+		case op.Kind == reconcile.KindSkipNameClash || op.Kind == reconcile.KindSkipLayout:
+			attention[op.Project] = true
 		}
 	}
-	switch n := len(drifting); n {
-	case 0:
-		return doctor.Result{Status: doctor.OK, Evidence: "tmux matches the config"}
-	case 1:
-		return doctor.Result{Status: doctor.Warn, Evidence: "1 project needs `cairn apply`", Fix: "cairn plan, then cairn apply"}
-	default:
-		return doctor.Result{Status: doctor.Warn, Evidence: fmt.Sprintf("%d projects need `cairn apply`", n), Fix: "cairn plan, then cairn apply"}
+	for id := range drifting {
+		delete(attention, id)
 	}
+	var evidence, fix []string
+	if n := len(drifting); n > 0 {
+		evidence = append(evidence, fmt.Sprintf("%d %s `cairn apply`", n, plural(n, "project needs", "projects need")))
+		fix = append(fix, "cairn plan, then cairn apply")
+	}
+	if n := len(attention); n > 0 {
+		evidence = append(evidence, fmt.Sprintf("%d %s attention: cairn plan", n, plural(n, "project needs", "projects need")))
+		if len(fix) == 0 {
+			fix = append(fix, "cairn plan")
+		}
+	}
+	if len(evidence) == 0 {
+		return doctor.Result{Status: doctor.OK, Evidence: "tmux matches the config"}
+	}
+	return doctor.Result{Status: doctor.Warn, Evidence: strings.Join(evidence, "; "), Fix: strings.Join(fix, "")}
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // ServiceCheck reports whether the optional tmux user service is installed

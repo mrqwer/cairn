@@ -11,8 +11,8 @@ of imposing a fixed setup. The author's own setup is just one profile in `profil
 
 **Status:** the shared foundation, the optional Linux-laptop module (`cairn host`: sleep,
 hibernation, NVIDIA) and the workspace engine (M1; end-to-end verification pending) are
-implemented. AI agent sessions are the next milestone; the rest is in design. Every module gets a reviewed design document in
-`docs/specs/` before any code is written.
+implemented. AI agent sessions are the next milestone; the rest is in design.
+Every module gets a reviewed design document in `docs/specs/` before any code is written.
 
 ## Quickstart
 
