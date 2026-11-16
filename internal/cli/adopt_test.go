@@ -405,6 +405,16 @@ func TestAdoptRealTmux(t *testing.T) {
 			t.Fatal("editor never started")
 		}
 	}
+	// A fresh pane briefly reports "tmux" before its shell is exec'd; wait
+	// for every pane to settle so the before/after comparison is stable.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if !strings.Contains(tm("list-panes", "-a", "-F", "#{pane_current_command}"), "tmux") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("panes never settled")
+		}
+	}
 	snapDemo := func() tmux.Session {
 		t.Helper()
 		snap, err := client.Snapshot(context.Background())
