@@ -25,6 +25,7 @@ const (
 	KindSkipMissingRoot = "skip-missing-root"
 	KindSkipNameClash   = "skip-name-clash"
 	KindSkipLayout      = "skip-layout"
+	KindSkipInvalid     = "skip-invalid"
 )
 
 // Op is one planned change (or note). Target is a tmux id for existing
@@ -40,7 +41,7 @@ type Op struct {
 // IsNote reports whether the op only reports something.
 func (o Op) IsNote() bool {
 	switch o.Kind {
-	case KindReportExtra, KindReportDead, KindSkipMissingRoot, KindSkipNameClash, KindSkipLayout:
+	case KindReportExtra, KindReportDead, KindSkipMissingRoot, KindSkipNameClash, KindSkipLayout, KindSkipInvalid:
 		return true
 	}
 	return false
@@ -58,7 +59,9 @@ type Options struct {
 
 // Plan returns the operations that make snap match the active projects ps,
 // in a deterministic order: projects by id, windows and panes by config
-// order. It never touches anything without a cairn marker.
+// order. It never touches anything without a cairn marker. Projects must be
+// defaulted and valid (workspace.Project.Validate); an invalid one gets a
+// single skip-invalid note.
 func Plan(ps []workspace.Project, snap tmux.Snapshot, opts Options) []Op {
 	sorted := append([]workspace.Project(nil), ps...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
@@ -73,6 +76,9 @@ func Plan(ps []workspace.Project, snap tmux.Snapshot, opts Options) []Op {
 }
 
 func planProject(p workspace.Project, snap tmux.Snapshot, opts Options) []Op {
+	if err := validate(p); err != nil {
+		return []Op{{Kind: KindSkipInvalid, Project: p.ID, Detail: err.Error()}}
+	}
 	d := Desired(p, NewSize, opts.RootExists)
 	if d.RootMissing {
 		return []Op{{Kind: KindSkipMissingRoot, Project: d.ID, Target: d.Root,
@@ -141,7 +147,7 @@ func planProject(p workspace.Project, snap tmux.Snapshot, opts Options) []Op {
 	}
 	for _, w := range extras {
 		k := strings.TrimPrefix(w.Key, prefix)
-		if opts.Prune && len(w.Panes) > 0 && allPrunable(w.Panes, opts) {
+		if opts.Prune && windowPrunable(w, opts) {
 			ops = append(ops, Op{Kind: KindKillWindow, Project: d.ID, Target: w.ID, WindowKey: k, Destructive: true,
 				Detail: fmt.Sprintf("window %s is not in the config and all its panes are idle shells", w.Key)})
 			continue
@@ -184,6 +190,7 @@ func planWindow(d DesiredProject, dw DesiredWindow, tw tmux.Window, opts Options
 	byKey := map[string]tmux.Pane{}
 	foreign := false // a pane that will stay but is not in the config
 	changed := false
+	var extras []tmux.Pane
 	for _, tp := range tw.Panes {
 		if !strings.HasPrefix(tp.Key, prefix) {
 			foreign = true // the user's own pane (or another window's marker): left alone
@@ -194,7 +201,14 @@ func planWindow(d DesiredProject, dw DesiredWindow, tw tmux.Window, opts Options
 			byKey[tp.Key] = tp
 			continue
 		}
-		if configured || !opts.Prune || !prunable(tp, opts) {
+		extras = append(extras, tp)
+	}
+	for _, tp := range extras {
+		_, configured := dw.pane(tp.Key)
+		// With no configured pane left in the window, an extra pane may be
+		// its last one: it stays this round and the missing panes are
+		// created first.
+		if configured || !opts.Prune || len(byKey) == 0 || !prunable(tp, opts) {
 			foreign = true
 			ops = append(ops, Op{Kind: KindReportExtra, Project: d.ID, Target: tp.ID, WindowKey: dw.Key, PaneKey: tp.Key,
 				Detail: fmt.Sprintf("pane %s (%s) is not in the config", tp.Key, tp.ID)})
@@ -262,11 +276,33 @@ func prunable(tp tmux.Pane, opts Options) bool {
 	return err == nil && idle
 }
 
-func allPrunable(ps []tmux.Pane, opts Options) bool {
-	for _, p := range ps {
-		if !prunable(p, opts) {
+// windowPrunable reports whether an extra managed window may be killed by
+// --prune: it has panes, every one carries this window's marker prefix (a
+// user's pane, or one of another window or project, is never taken along)
+// and every one is prunable.
+func windowPrunable(w tmux.Window, opts Options) bool {
+	if len(w.Panes) == 0 {
+		return false
+	}
+	for _, p := range w.Panes {
+		if !strings.HasPrefix(p.Key, w.Key+"/") || !prunable(p, opts) {
 			return false
 		}
 	}
 	return true
+}
+
+// validate checks the precondition of Plan and Apply: a defaulted, valid
+// project (at least one window, each with at least one pane, a valid split
+// sequence).
+func validate(p workspace.Project) error {
+	errs := p.Validate()
+	if len(errs) == 0 {
+		return nil
+	}
+	msgs := make([]string, 0, len(errs))
+	for _, e := range errs {
+		msgs = append(msgs, e.Error())
+	}
+	return fmt.Errorf("invalid project %s: %s", p.ID, strings.Join(msgs, "; "))
 }

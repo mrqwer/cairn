@@ -158,17 +158,30 @@ func (c Client) NewSession(ctx context.Context, name string, w, h int, win Windo
 		return "", "", "", err
 	}
 	sessionID, windowID, paneID = id[0], id[1], id[2]
-	if err := c.remainOnExit(ctx, paneID, win.PaneSpec); err != nil {
-		return sessionID, windowID, paneID, err
+	// The session is provably ours (its id came from -P). The setup steps run
+	// detached from cancellation so Ctrl-C cannot stop them half way; if one
+	// fails, or ctx was cancelled meanwhile, the session is killed so no
+	// unmarked session is left behind.
+	setupCtx := context.WithoutCancel(ctx)
+	err = c.remainOnExit(setupCtx, paneID, win.PaneSpec)
+	if err == nil {
+		project, _, _ := strings.Cut(win.Key, "/")
+		err = c.SetOption(setupCtx, "session", sessionID, "@cairn_s", project)
 	}
-	project, _, _ := strings.Cut(win.Key, "/")
-	if err := c.SetOption(ctx, "session", sessionID, "@cairn_s", project); err != nil {
-		return sessionID, windowID, paneID, err
+	if err == nil {
+		err = c.setupWindow(setupCtx, windowID, win)
 	}
-	if err := c.setupWindow(ctx, windowID, win); err != nil {
-		return sessionID, windowID, paneID, err
+	if err == nil {
+		err = c.paneMarker(setupCtx, paneID, win.PaneSpec)
 	}
-	return sessionID, windowID, paneID, c.paneMarker(ctx, paneID, win.PaneSpec)
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		_ = c.KillSession(setupCtx, sessionID)
+		return "", "", "", err
+	}
+	return sessionID, windowID, paneID, nil
 }
 
 // NewWindow creates a window at the end of sessionID with its first pane and
@@ -243,12 +256,14 @@ func (c Client) SetOption(ctx context.Context, scope, target, name, value string
 	return c.run(ctx, append(args, target, name, escSemi(value))...)
 }
 
-// RespawnPane restarts paneID, with argv or its original command when empty.
+// RespawnPane restarts the dead pane paneID, with argv or its original
+// command when empty. Without -k tmux refuses a pane whose program is still
+// running, so a live program is never restarted.
 func (c Client) RespawnPane(ctx context.Context, paneID string, argv []string) error {
 	if err := checkArgv(argv); err != nil {
 		return err
 	}
-	args := []string{"respawn-pane", "-k", "-t", paneID}
+	args := []string{"respawn-pane", "-t", paneID}
 	if len(argv) > 0 {
 		args = append(args, "--")
 		for _, v := range argv {

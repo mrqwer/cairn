@@ -254,14 +254,14 @@ func TestSimpleOps(t *testing.T) {
 		{func(c Client) error { return c.SetOption(ctx, "session", "$1", "@cairn_s", "demo") }, []string{"set", "-t", "$1", "@cairn_s", "demo"}},
 		{func(c Client) error { return c.SetOption(ctx, "window", "@1", "@cairn_w", "demo/a") }, []string{"set", "-w", "-t", "@1", "@cairn_w", "demo/a"}},
 		{func(c Client) error { return c.SetOption(ctx, "pane", "%1", "@cairn_p", "demo/a/1") }, []string{"set", "-p", "-t", "%1", "@cairn_p", "demo/a/1"}},
-		{func(c Client) error { return c.RespawnPane(ctx, "%1", nil) }, []string{"respawn-pane", "-k", "-t", "%1"}},
-		{func(c Client) error { return c.RespawnPane(ctx, "%1", []string{"go", "run", "."}) }, []string{"respawn-pane", "-k", "-t", "%1", "--", "go", "run", "."}},
+		{func(c Client) error { return c.RespawnPane(ctx, "%1", nil) }, []string{"respawn-pane", "-t", "%1"}},
+		{func(c Client) error { return c.RespawnPane(ctx, "%1", []string{"go", "run", "."}) }, []string{"respawn-pane", "-t", "%1", "--", "go", "run", "."}},
 		{func(c Client) error { return c.SwapPanes(ctx, "%1", "%2") }, []string{"swap-pane", "-d", "-s", "%1", "-t", "%2"}},
 		{func(c Client) error { return c.KillWindow(ctx, "@1") }, []string{"kill-window", "-t", "@1"}},
 		{func(c Client) error { return c.KillPane(ctx, "%1") }, []string{"kill-pane", "-t", "%1"}},
 		{func(c Client) error { return c.KillSession(ctx, "$1") }, []string{"kill-session", "-t", "$1"}},
 		{func(c Client) error { return c.SetOption(ctx, "pane", "%1", "@x", "v;") }, []string{"set", "-p", "-t", "%1", "@x", `v\;`}},
-		{func(c Client) error { return c.RespawnPane(ctx, "%1", []string{"echo", "a;"}) }, []string{"respawn-pane", "-k", "-t", "%1", "--", "echo", `a\;`}},
+		{func(c Client) error { return c.RespawnPane(ctx, "%1", []string{"echo", "a;"}) }, []string{"respawn-pane", "-t", "%1", "--", "echo", `a\;`}},
 		{func(c Client) error { return c.SwitchClient(ctx, "demo") }, []string{"switch-client", "-t", "=demo"}},
 		{func(c Client) error { return c.SwitchClient(ctx, "$4") }, []string{"switch-client", "-t", "$4"}},
 	}
@@ -328,5 +328,66 @@ func TestAttachCommand(t *testing.T) {
 	}
 	if got := AttachArgs("", "demo"); !reflect.DeepEqual(got, []string{"tmux", "attach-session", "-t", "=demo"}) {
 		t.Fatalf("%q", got)
+	}
+}
+
+// cancelRunner wraps a FakeRunner: it cancels the caller's context when it
+// sees a command starting with cancelOn, and fails every later command whose
+// context is already cancelled (as exec.CommandContext would).
+type cancelRunner struct {
+	f        *execx.FakeRunner
+	cancelOn string
+	cancel   context.CancelFunc
+}
+
+func (r *cancelRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		r.f.Calls = append(r.f.Calls, append([]string{name}, args...))
+		return nil, err
+	}
+	out, err := r.f.Run(ctx, name, args...)
+	if len(args) > 0 && args[0] == r.cancelOn {
+		r.cancel()
+	}
+	return out, err
+}
+
+func TestNewSessionKillsSessionWhenMarkerFails(t *testing.T) {
+	newSess := []string{"tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}", "-s", "demo", "-x", "200", "-y", "50", "-n", "main"}
+	marker := []string{"tmux", "set", "-t", "$3", "@cairn_s", "demo"}
+	kill := []string{"tmux", "kill-session", "-t", "$3"}
+	f := fake(map[string]string{strings.Join(newSess, " "): "$3 @7 %9"})
+	f.Responses[strings.Join(marker, " ")] = execx.Response{Err: errors.New("boom")}
+	okCalls(f, [][]string{kill})
+	_, _, _, err := Client{R: f}.NewSession(context.Background(), "demo", 0, 0, WindowSpec{Key: "demo/main", Name: "main"})
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("err %v", err)
+	}
+	if want := [][]string{newSess, marker, kill}; !reflect.DeepEqual(f.Calls, want) {
+		t.Fatalf("calls\n got %q\nwant %q", f.Calls, want)
+	}
+}
+
+func TestNewSessionCancelledAfterCreateCleansUp(t *testing.T) {
+	newSess := []string{"tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}", "-s", "demo", "-x", "200", "-y", "50", "-n", "main"}
+	rest := [][]string{
+		{"tmux", "set", "-t", "$3", "@cairn_s", "demo"},
+		{"tmux", "set", "-w", "-t", "@7", "@cairn_w", "demo/main"},
+		{"tmux", "set", "-w", "-t", "@7", "automatic-rename", "off"},
+		{"tmux", "kill-session", "-t", "$3"},
+	}
+	f := fake(map[string]string{strings.Join(newSess, " "): "$3 @7 %9"})
+	okCalls(f, rest)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := &cancelRunner{f: f, cancelOn: "new-session", cancel: cancel}
+	_, _, _, err := Client{R: r}.NewSession(ctx, "demo", 0, 0, WindowSpec{Key: "demo/main", Name: "main"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err %v", err)
+	}
+	// The marker steps run detached from the cancellation; the session is
+	// then removed, so no unmarked session is left behind.
+	if want := append([][]string{newSess}, rest...); !reflect.DeepEqual(f.Calls, want) {
+		t.Fatalf("calls\n got %q\nwant %q", f.Calls, want)
 	}
 }

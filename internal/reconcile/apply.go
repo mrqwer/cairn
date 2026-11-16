@@ -38,7 +38,14 @@ var ErrNotRun = errors.New("not run: an earlier operation of this project failed
 
 // Apply runs ops in order. Notes (report-*, skip-*) do nothing. After the
 // first failing op of a project its remaining ops get ErrNotRun; other
-// projects continue. Every op gets a Result.
+// projects continue. Once ctx is done every remaining op gets ctx.Err().
+// Every op gets a Result. Projects must be defaulted and valid; an invalid
+// one fails its ops with an error.
+//
+// Safety (decision E13): every call that targets an existing tmux object is
+// preceded by a lookup on a fresh snapshot (locate) that checks the object
+// still sits in this project's marked session and window and carries the
+// expected marker; destructive ops are refused for anything in the config.
 func Apply(ctx context.Context, d Driver, ps []workspace.Project, ops []Op) []Result {
 	byID := map[string]workspace.Project{}
 	for _, p := range ps {
@@ -48,6 +55,10 @@ func Apply(ctx context.Context, d Driver, ps []workspace.Project, ops []Op) []Re
 	states := map[string]*applier{}
 	results := make([]Result, 0, len(ops))
 	for _, op := range ops {
+		if err := ctx.Err(); err != nil {
+			results = append(results, Result{op, err})
+			continue
+		}
 		if failed[op.Project] {
 			results = append(results, Result{op, ErrNotRun})
 			continue
@@ -80,7 +91,8 @@ func Apply(ctx context.Context, d Driver, ps []workspace.Project, ops []Op) []Re
 }
 
 // applier runs the ops of one project and remembers the tmux ids of its
-// session, windows (by config key) and panes (by @cairn_p key).
+// session, windows (by config key) and panes (by @cairn_p key). The ids are
+// only hints: every use goes through locate on a fresh snapshot.
 type applier struct {
 	d       Driver
 	dp      DesiredProject
@@ -90,6 +102,9 @@ type applier struct {
 }
 
 func newApplier(ctx context.Context, d Driver, p workspace.Project) (*applier, error) {
+	if err := validate(p); err != nil {
+		return nil, err
+	}
 	a := &applier{d: d, dp: Desired(p, NewSize, func(string) bool { return true }),
 		windows: map[string]string{}, panes: map[string]string{}}
 	snap, err := d.Snapshot(ctx)
@@ -110,7 +125,7 @@ func newApplier(ctx context.Context, d Driver, p workspace.Project) (*applier, e
 				a.windows[k] = w.ID
 			}
 			for _, p := range w.Panes {
-				if _, seen := a.panes[p.Key]; p.Key != "" && !seen {
+				if _, seen := a.panes[p.Key]; strings.HasPrefix(p.Key, w.Key+"/") && !seen {
 					a.panes[p.Key] = p.ID
 				}
 			}
@@ -118,6 +133,54 @@ func newApplier(ctx context.Context, d Driver, p workspace.Project) (*applier, e
 		break
 	}
 	return a, nil
+}
+
+// location is an object found by locate with what contains it.
+type location struct {
+	s tmux.Session
+	w tmux.Window
+	p tmux.Pane
+}
+
+// locate finds id in snap ("@n" a window, "%n" a pane) and checks that it is
+// still where the op expects it: in the session marked project, in the
+// window marked project/windowKey and, for a pane, carrying exactly the
+// marker paneKey. Anything else is an error and nothing may be done to the
+// object.
+func locate(snap tmux.Snapshot, project, windowKey, paneKey, id string) (location, error) {
+	wantWindow := project + "/" + windowKey
+	for _, s := range snap.Sessions {
+		for _, w := range s.Windows {
+			if strings.HasPrefix(id, "@") && w.ID == id {
+				if s.Key != project || w.Key != wantWindow {
+					return location{}, fmt.Errorf("window %s is no longer %s in the session of %s; not touched", id, wantWindow, project)
+				}
+				return location{s: s, w: w}, nil
+			}
+			for _, p := range w.Panes {
+				if !strings.HasPrefix(id, "%") || p.ID != id {
+					continue
+				}
+				if s.Key != project || w.Key != wantWindow || p.Key != paneKey {
+					return location{}, fmt.Errorf("pane %s is no longer %q in window %s of %s; not touched", id, paneKey, wantWindow, project)
+				}
+				return location{s: s, w: w, p: p}, nil
+			}
+		}
+	}
+	return location{}, fmt.Errorf("%s (%s) no longer exists", id, wantWindow)
+}
+
+// fresh takes a snapshot and locates id in it.
+func (a *applier) fresh(ctx context.Context, windowKey, paneKey, id string) (location, error) {
+	if id == "" {
+		return location{}, fmt.Errorf("%s/%s: no tmux id", a.dp.ID, windowKey)
+	}
+	snap, err := a.d.Snapshot(ctx)
+	if err != nil {
+		return location{}, err
+	}
+	return locate(snap, a.dp.ID, windowKey, paneKey, id)
 }
 
 func (a *applier) window(key string) (DesiredWindow, error) {
@@ -147,15 +210,7 @@ func (a *applier) do(ctx context.Context, op Op) error {
 		}
 		return a.setLayout(ctx, w, true)
 	case KindRespawnPane:
-		w, err := a.window(op.WindowKey)
-		if err != nil {
-			return err
-		}
-		dp, ok := w.pane(op.PaneKey)
-		if !ok || !dp.HasRun() {
-			return fmt.Errorf("pane %s has no configured command", op.PaneKey)
-		}
-		return a.d.RespawnPane(ctx, op.Target, dp.Spec.Argv)
+		return a.respawn(ctx, op)
 	case KindKillPane, KindKillWindow:
 		return a.kill(ctx, op)
 	}
@@ -185,9 +240,19 @@ func (a *applier) createSession(ctx context.Context) error {
 	return nil
 }
 
+// createWindow adds a window to the project's session after checking, on a
+// fresh snapshot, that the session still carries the project's marker.
 func (a *applier) createWindow(ctx context.Context, w DesiredWindow) error {
-	if a.session == "" {
-		return fmt.Errorf("session of %s does not exist", a.dp.ID)
+	snap, err := a.d.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	ok := false
+	for _, s := range snap.Sessions {
+		ok = ok || (a.session != "" && s.ID == a.session && s.Key == a.dp.ID)
+	}
+	if !ok {
+		return fmt.Errorf("session of %s (%s) is gone or no longer marked; window %s not created", a.dp.ID, a.session, w.Key)
 	}
 	wid, pid, err := a.d.NewWindow(ctx, a.session, w.Spec)
 	if err != nil {
@@ -204,18 +269,34 @@ func (a *applier) buildWindow(ctx context.Context, w DesiredWindow, wid, firstPa
 	a.windows[w.Key] = wid
 	a.panes[w.Panes[0].Key] = firstPane
 	for _, dp := range w.Panes[1:] {
-		id, err := a.d.SplitPane(ctx, a.panes[w.Panes[dp.From-1].Key], dp.Split, dp.Size, dp.Spec)
-		if err != nil {
+		from := w.Panes[dp.From-1].Key
+		if err := a.split(ctx, w, from, a.panes[from], dp.Split, dp.Size, dp); err != nil {
 			return err
 		}
-		a.panes[dp.Key] = id
 	}
 	return a.setLayout(ctx, w, false)
 }
 
+// split splits the pane id (expected to carry marker targetKey, "" for an
+// unmarked pane) of window w after re-checking it on a fresh snapshot.
+func (a *applier) split(ctx context.Context, w DesiredWindow, targetKey, id, dir string, size int, dp DesiredPane) error {
+	if _, err := a.fresh(ctx, w.Key, targetKey, id); err != nil {
+		return err
+	}
+	nid, err := a.d.SplitPane(ctx, id, dir, size, dp.Spec)
+	if err != nil {
+		return err
+	}
+	a.panes[dp.Key] = nid
+	return nil
+}
+
 // createPane recreates a missing pane of an existing window by splitting
-// its From pane (or, when that is gone too or it is the first pane, any
-// pane of the window); set-layout puts it in place afterwards.
+// its From pane. When that is gone too (or it is the first pane) it splits
+// the window's last managed pane: the new pane then sits among the managed
+// ones, and splitting a user's pane would shrink their space. Only a window
+// with no managed pane at all falls back to its last pane. set-layout puts
+// the new pane in place afterwards.
 func (a *applier) createPane(ctx context.Context, op Op) error {
 	w, err := a.window(op.WindowKey)
 	if err != nil {
@@ -225,41 +306,44 @@ func (a *applier) createPane(ctx context.Context, op Op) error {
 	if !ok {
 		return fmt.Errorf("pane %s is not in the config", op.PaneKey)
 	}
-	wid := a.windows[w.Key]
-	if wid == "" {
-		return fmt.Errorf("window %s does not exist", w.FullKey())
-	}
-	dir, size, target := dp.Split, dp.Size, ""
-	if dp.From > 0 {
-		target = a.panes[w.Panes[dp.From-1].Key]
-	} else {
-		dir, size = workspace.SplitH, workspace.DefaultSize
-	}
-	if target == "" {
-		snap, err := a.d.Snapshot(ctx)
-		if err != nil {
-			return err
-		}
-		if tw, ok := findWindow(snap, wid); ok && len(tw.Panes) > 0 {
-			target = tw.Panes[len(tw.Panes)-1].ID
-		}
-	}
-	if target == "" {
-		return fmt.Errorf("window %s has no pane to split", w.FullKey())
-	}
-	id, err := a.d.SplitPane(ctx, target, dir, size, dp.Spec)
+	loc, err := a.fresh(ctx, w.Key, "", a.windows[w.Key])
 	if err != nil {
 		return err
 	}
-	a.panes[dp.Key] = id
-	return nil
+	dir, size := dp.Split, dp.Size
+	if dp.From == 0 {
+		dir, size = workspace.SplitH, workspace.DefaultSize
+	}
+	var target tmux.Pane
+	found := false
+	if dp.From > 0 {
+		fromKey := w.Panes[dp.From-1].Key
+		for _, p := range loc.w.Panes {
+			if p.Key == fromKey && p.ID == a.panes[fromKey] {
+				target, found = p, true
+			}
+		}
+	}
+	for i := len(loc.w.Panes) - 1; i >= 0 && !found; i-- {
+		if _, managed := w.pane(loc.w.Panes[i].Key); managed {
+			target, found = loc.w.Panes[i], true
+		}
+	}
+	if !found && len(loc.w.Panes) > 0 {
+		target, found = loc.w.Panes[len(loc.w.Panes)-1], true
+	}
+	if !found {
+		return fmt.Errorf("window %s has no pane to split", w.FullKey())
+	}
+	return a.split(ctx, w, target.Key, target.ID, dir, size, dp)
 }
 
 // setLayout reads the window from a fresh snapshot, orders its panes by
 // layout traversal with SwapPanes (decision E6) and selects the layout for
-// the window's current size. It only acts when the window holds exactly the
-// configured panes; otherwise, or when the layout does not fit, strict
-// returns an error and non-strict returns nil.
+// the window's current size. It only acts when the window, in the project's
+// marked session, holds exactly the configured panes; otherwise, or when
+// the layout does not fit, strict returns an error and non-strict returns
+// nil.
 func (a *applier) setLayout(ctx context.Context, w DesiredWindow, strict bool) error {
 	if len(w.Panes) < 2 && !strict {
 		return nil
@@ -270,14 +354,11 @@ func (a *applier) setLayout(ctx context.Context, w DesiredWindow, strict bool) e
 		}
 		return fmt.Errorf("window %s: layout not applied: %s", w.FullKey(), fmt.Sprintf(format, args...))
 	}
-	snap, err := a.d.Snapshot(ctx)
+	loc, err := a.fresh(ctx, w.Key, "", a.windows[w.Key])
 	if err != nil {
-		return err
+		return skip("%v", err)
 	}
-	tw, ok := findWindow(snap, a.windows[w.Key])
-	if !ok {
-		return skip("window is gone")
-	}
+	tw := loc.w
 	current := make([]string, 0, len(tw.Panes))
 	ids := map[string]string{}
 	for _, p := range tw.Panes {
@@ -314,30 +395,74 @@ func (a *applier) setLayout(ctx context.Context, w DesiredWindow, strict bool) e
 	return a.d.SelectLayout(ctx, tw.ID, s)
 }
 
-// kill re-checks, on a fresh snapshot, that every pane involved still
-// carries the expected marker and is an idle shell, then kills.
-func (a *applier) kill(ctx context.Context, op Op) error {
-	snap, err := a.d.Snapshot(ctx)
+// respawn restarts a configured pane only while it is still dead and still
+// where the plan saw it; a live program is never restarted.
+func (a *applier) respawn(ctx context.Context, op Op) error {
+	w, err := a.window(op.WindowKey)
 	if err != nil {
 		return err
 	}
+	dp, ok := w.pane(op.PaneKey)
+	if !ok || !dp.HasRun() {
+		return fmt.Errorf("pane %s has no configured command", op.PaneKey)
+	}
+	loc, err := a.fresh(ctx, op.WindowKey, op.PaneKey, op.Target)
+	if err != nil {
+		return err
+	}
+	if !loc.p.Dead {
+		return fmt.Errorf("pane %s (%s) is running again; not restarted", op.PaneKey, op.Target)
+	}
+	return a.d.RespawnPane(ctx, op.Target, dp.Spec.Argv)
+}
+
+// kill re-checks, on a fresh snapshot, that the window or pane is not in the
+// config, is still in this project's marked session and window with its
+// marker, and that every pane involved carries this window's marker and is
+// an idle shell; only then it kills.
+func (a *applier) kill(ctx context.Context, op Op) error {
 	var panes []tmux.Pane
 	if op.Kind == KindKillWindow {
-		tw, ok := findWindow(snap, op.Target)
-		if !ok || tw.Key != a.dp.ID+"/"+op.WindowKey {
-			return fmt.Errorf("window %s (%s) changed since the plan; not killed", op.WindowKey, op.Target)
+		if _, configured := a.dp.window(op.WindowKey); configured {
+			return fmt.Errorf("window %s is in the config; not killed", op.WindowKey)
 		}
-		panes = tw.Panes
+		loc, err := a.fresh(ctx, op.WindowKey, "", op.Target)
+		if err != nil {
+			return err
+		}
+		panes = loc.w.Panes
 	} else {
-		tp, ok := findPane(snap, op.Target)
-		if !ok || tp.Key != op.PaneKey {
-			return fmt.Errorf("pane %s (%s) changed since the plan; not killed", op.PaneKey, op.Target)
+		if w, ok := a.dp.window(op.WindowKey); ok {
+			if _, configured := w.pane(op.PaneKey); configured {
+				return fmt.Errorf("pane %s is in the config; not killed", op.PaneKey)
+			}
 		}
-		panes = []tmux.Pane{tp}
+		if !strings.HasPrefix(op.PaneKey, a.dp.ID+"/"+op.WindowKey+"/") {
+			return fmt.Errorf("pane %s does not belong to window %s; not killed", op.PaneKey, op.WindowKey)
+		}
+		loc, err := a.fresh(ctx, op.WindowKey, op.PaneKey, op.Target)
+		if err != nil {
+			return err
+		}
+		if len(loc.w.Panes) < 2 {
+			return fmt.Errorf("pane %s is the last pane of its window; not killed", op.PaneKey)
+		}
+		panes = []tmux.Pane{loc.p}
 	}
-	if len(panes) == 0 || !allPrunable(panes, Options{PaneIdle: a.d.PaneIdle}) {
-		return fmt.Errorf("%s %s is no longer an idle shell; not killed", strings.TrimPrefix(op.Kind, "kill-"), op.Target)
+	prefix := a.dp.ID + "/" + op.WindowKey + "/"
+	opts := Options{PaneIdle: a.d.PaneIdle}
+	for _, p := range panes {
+		if !strings.HasPrefix(p.Key, prefix) {
+			return fmt.Errorf("%s holds pane %s (%q) that cairn does not own here; not killed", op.Target, p.ID, p.Key)
+		}
+		if !prunable(p, opts) {
+			return fmt.Errorf("pane %s (%s) is no longer an idle shell; not killed", p.Key, p.ID)
+		}
 	}
+	if len(panes) == 0 {
+		return fmt.Errorf("%s has no panes; not killed", op.Target)
+	}
+	var err error
 	if op.Kind == KindKillWindow {
 		err = a.d.KillWindow(ctx, op.Target)
 	} else {
@@ -353,28 +478,4 @@ func (a *applier) kill(ctx context.Context, op Op) error {
 		}
 	}
 	return err
-}
-
-func findWindow(snap tmux.Snapshot, id string) (tmux.Window, bool) {
-	for _, s := range snap.Sessions {
-		for _, w := range s.Windows {
-			if w.ID == id {
-				return w, true
-			}
-		}
-	}
-	return tmux.Window{}, false
-}
-
-func findPane(snap tmux.Snapshot, id string) (tmux.Pane, bool) {
-	for _, s := range snap.Sessions {
-		for _, w := range s.Windows {
-			for _, p := range w.Panes {
-				if p.ID == id {
-					return p, true
-				}
-			}
-		}
-	}
-	return tmux.Pane{}, false
 }

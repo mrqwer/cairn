@@ -256,6 +256,13 @@ func TestIntegrationDeadPaneAndRespawn(t *testing.T) {
 		p, _ = findPane(snap(t, c), pid)
 		return !p.Dead && p.Cmd == "sleep"
 	})
+	// Without -k tmux refuses to respawn a live pane.
+	if err := c.RespawnPane(ctx, pid, []string{"sleep", "31"}); err == nil {
+		t.Fatal("a live pane was respawned")
+	}
+	if p2, _ := findPane(snap(t, c), pid); p2.PID != p.PID {
+		t.Fatalf("live pane restarted: pid %d -> %d", p.PID, p2.PID)
+	}
 }
 
 func TestIntegrationSwapPanes(t *testing.T) {

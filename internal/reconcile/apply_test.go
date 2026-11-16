@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -25,6 +26,7 @@ type fakeDriver struct {
 	seq      int
 	idle     map[int]bool
 	fail     map[string]error // call prefix -> error
+	hook     func(call string)
 }
 
 type fSession struct {
@@ -54,6 +56,9 @@ func (f *fakeDriver) next() int { f.seq++; return f.seq }
 func (f *fakeDriver) rec(format string, a ...any) error {
 	c := fmt.Sprintf(format, a...)
 	f.calls = append(f.calls, c)
+	if f.hook != nil {
+		f.hook(c)
+	}
 	for p, err := range f.fail {
 		if strings.HasPrefix(c, p) {
 			return err
@@ -274,9 +279,11 @@ func TestApplyOrderAndMarkers(t *testing.T) {
 	want := []string{
 		"Snapshot",
 		"NewSession demo 200x50 demo/code code demo/code/1 cwd=/home/u/demo argv=[nvim] remain=true",
+		"Snapshot", // E13: the split target is re-checked
 		"SplitPane %2 h 35 demo/code/2 argv=[]",
 		"Snapshot",
 		"SelectLayout @3 " + ls,
+		"Snapshot", // E13: the session is re-checked before new-window
 		"NewWindow $1 demo/run run demo/run/1 argv=[]",
 	}
 	if !slices.Equal(f.calls, want) {
@@ -351,7 +358,7 @@ func TestApplyRecreatesMiddlePaneAndReorders(t *testing.T) {
 	if !slices.ContainsFunc(f.calls, func(c string) bool { return strings.HasPrefix(c, "SwapPanes") }) {
 		t.Errorf("expected a swap: %q", f.calls)
 	}
-	if !strings.HasPrefix(f.calls[1], "SplitPane "+w.panes[0].id+" h 40 demo/main/2") {
+	if !hasCall(f, "SplitPane "+w.panes[0].id+" h 40 demo/main/2") {
 		t.Errorf("pane 2 must be split from pane 1: %q", f.calls)
 	}
 	want := []string{"demo/main/1", "demo/main/3", "demo/main/2", "demo/main/4"}
@@ -505,5 +512,280 @@ func TestApplyNotesDoNothing(t *testing.T) {
 	res := Apply(context.Background(), f, nil, ops)
 	if len(res) != 2 || res[0].Err != nil || res[1].Err != nil || len(f.calls) != 0 {
 		t.Fatalf("results %+v calls %q", res, f.calls)
+	}
+}
+
+func hasCall(f *fakeDriver, prefix string) bool {
+	return slices.ContainsFunc(f.calls, func(c string) bool { return strings.HasPrefix(c, prefix) })
+}
+
+// applied returns a fake with demo (and the given extra projects) applied.
+func applied(t *testing.T, ps ...workspace.Project) *fakeDriver {
+	t.Helper()
+	f := &fakeDriver{idle: map[int]bool{}}
+	mustApply(t, f, ps, f.plan(t, ps, Options{}))
+	f.calls = nil
+	return f
+}
+
+func (f *fakeDriver) session(key string) *fSession {
+	for _, s := range f.sessions {
+		if s.key == key {
+			return s
+		}
+	}
+	return nil
+}
+
+func applyExpectRefused(t *testing.T, f *fakeDriver, ps []workspace.Project, ops []Op, forbidden string) {
+	t.Helper()
+	f.calls = nil
+	res := Apply(context.Background(), f, ps, ops)
+	if res[0].Err == nil {
+		t.Fatalf("op %s was not refused", res[0].Op.Kind)
+	}
+	for _, r := range res[1:] {
+		if r.Op.Project == res[0].Op.Project && !r.Op.IsNote() && !errors.Is(r.Err, ErrNotRun) {
+			t.Errorf("later op ran: %+v", r)
+		}
+	}
+	if hasCall(f, forbidden) {
+		t.Fatalf("%s called: %q", forbidden, f.calls)
+	}
+}
+
+func deadEditorOps(t *testing.T, f *fakeDriver, demo workspace.Project) ([]Op, *fPane) {
+	t.Helper()
+	ed := f.window("demo/code").panes[0]
+	ed.dead, ed.status = true, 1
+	ops := f.plan(t, []workspace.Project{demo}, Options{})
+	if got := kinds(ops); got != "demo:respawn-pane:code:demo/code/1" {
+		t.Fatalf("ops %s", got)
+	}
+	return ops, ed
+}
+
+func TestApplyRespawnRefusesPaneAliveAgain(t *testing.T) {
+	demo := devProject("demo")
+	f := applied(t, demo)
+	ops, ed := deadEditorOps(t, f, demo)
+	ed.dead = false // the program came back (or another process now runs there)
+	applyExpectRefused(t, f, []workspace.Project{demo}, ops, "RespawnPane")
+}
+
+func TestApplyRespawnRefusesStaleIDInUnmarkedSession(t *testing.T) {
+	demo := devProject("demo")
+	f := applied(t, demo)
+	ops, ed := deadEditorOps(t, f, demo)
+	w := f.window("demo/code")
+	w.panes = w.panes[1:]
+	// The id now names a dead pane of the user's own session.
+	f.sessions = append(f.sessions, &fSession{id: "$50", name: "mine", w: 200, h: 50, windows: []*fWindow{
+		{id: "@50", name: "mine", w: 200, h: 50, panes: []*fPane{{id: ed.id, pid: 5000, dead: true, status: 1, cmd: "sh"}}}}})
+	applyExpectRefused(t, f, []workspace.Project{demo}, ops, "RespawnPane")
+}
+
+func TestApplyRespawnRefusesPaneMovedToAnotherSession(t *testing.T) {
+	demo, web := devProject("demo"), devProject("web")
+	f := applied(t, demo, web)
+	ops, ed := deadEditorOps(t, f, demo)
+	w := f.window("demo/code")
+	w.panes = w.panes[1:]
+	wr := f.window("web/run")
+	wr.panes = append(wr.panes, ed)
+	applyExpectRefused(t, f, []workspace.Project{demo}, ops, "RespawnPane")
+}
+
+func TestPlanPruneNeverKillsWindowWithForeignPanes(t *testing.T) {
+	demo := devProject("demo")
+	for _, foreignKey := range []string{"", "web/old/1", "demo/other/1"} {
+		t.Run("key="+foreignKey, func(t *testing.T) {
+			f := applied(t, demo)
+			s := f.session("demo")
+			s.windows = append(s.windows, &fWindow{id: "@90", key: "demo/old", w: 200, h: 50, panes: []*fPane{
+				{id: "%91", key: "demo/old/1", pid: 901, cmd: "bash"},
+				{id: "%92", key: foreignKey, pid: 902, cmd: "bash"},
+			}})
+			f.idle[901], f.idle[902] = true, true
+			ops := f.plan(t, []workspace.Project{demo}, Options{Prune: true})
+			if got := kinds(ops); got != "demo:report-extra:old" {
+				t.Fatalf("ops %s", got)
+			}
+			mustApply(t, f, []workspace.Project{demo}, ops)
+			if hasCall(f, "Kill") {
+				t.Fatalf("killed: %q", f.calls)
+			}
+		})
+	}
+}
+
+func extraWindowKillOps(t *testing.T, f *fakeDriver, demo workspace.Project) ([]Op, *fWindow) {
+	t.Helper()
+	s := f.session("demo")
+	w := &fWindow{id: "@90", key: "demo/old", w: 200, h: 50, panes: []*fPane{{id: "%91", key: "demo/old/1", pid: 901, cmd: "bash"}}}
+	s.windows = append(s.windows, w)
+	f.idle[901] = true
+	ops := f.plan(t, []workspace.Project{demo}, Options{Prune: true})
+	if got := kinds(ops); got != "demo:kill-window:old" {
+		t.Fatalf("ops %s", got)
+	}
+	return ops, w
+}
+
+func TestApplyKillWindowRefusesUserPaneAddedAfterPlan(t *testing.T) {
+	demo := devProject("demo")
+	f := applied(t, demo)
+	ops, w := extraWindowKillOps(t, f, demo)
+	w.panes = append(w.panes, &fPane{id: "%93", pid: 903, cmd: "bash"})
+	f.idle[903] = true
+	applyExpectRefused(t, f, []workspace.Project{demo}, ops, "Kill")
+}
+
+func TestApplyKillWindowRefusesWindowMovedToUserSession(t *testing.T) {
+	demo := devProject("demo")
+	f := applied(t, demo)
+	ops, w := extraWindowKillOps(t, f, demo)
+	s := f.session("demo")
+	s.windows = s.windows[:len(s.windows)-1]
+	f.sessions = append(f.sessions, &fSession{id: "$50", name: "mine", w: 200, h: 50, windows: []*fWindow{w}})
+	applyExpectRefused(t, f, []workspace.Project{demo}, ops, "Kill")
+}
+
+func TestApplyKillPaneRefusesPaneJoinedIntoUserWindow(t *testing.T) {
+	demo := devProject("demo")
+	f := applied(t, demo)
+	w := f.window("demo/code")
+	extra := &fPane{id: "%90", key: "demo/code/3", pid: 900, cmd: "zsh"}
+	w.panes = append(w.panes, extra)
+	f.idle[900] = true
+	ops := f.plan(t, []workspace.Project{demo}, Options{Prune: true})
+	if got := kinds(ops); got != "demo:kill-pane:code:demo/code/3 demo:set-layout:code" {
+		t.Fatalf("ops %s", got)
+	}
+	w.panes = w.panes[:2]
+	s := f.session("demo")
+	s.windows = append(s.windows, &fWindow{id: "@60", name: "mine", w: 200, h: 50, panes: []*fPane{extra}})
+	applyExpectRefused(t, f, []workspace.Project{demo}, ops, "Kill")
+}
+
+func TestApplyRefusesHandcraftedKillOfConfiguredObjects(t *testing.T) {
+	demo := devProject("demo")
+	f := applied(t, demo)
+	for _, p := range f.window("demo/code").panes {
+		p.cmd = "bash"
+		f.idle[p.pid] = true
+	}
+	shell := f.window("demo/code").panes[1]
+	for _, op := range []Op{
+		{Kind: KindKillPane, Project: "demo", Target: shell.id, WindowKey: "code", PaneKey: "demo/code/2", Destructive: true},
+		{Kind: KindKillWindow, Project: "demo", Target: f.window("demo/code").id, WindowKey: "code", Destructive: true},
+	} {
+		applyExpectRefused(t, f, []workspace.Project{demo}, []Op{op}, "Kill")
+	}
+}
+
+func TestApplyFinishesSessionAfterFailedSplit(t *testing.T) {
+	demo := devProject("demo")
+	ps := []workspace.Project{demo}
+	f := &fakeDriver{}
+	ops := f.plan(t, ps, Options{})
+	f.fail = map[string]error{"SplitPane": errors.New("boom")}
+	if res := Apply(context.Background(), f, ps, ops); res[0].Err == nil {
+		t.Fatal("split failure not reported")
+	}
+	f.fail = nil
+	ops = f.plan(t, ps, Options{})
+	if got := kinds(ops); got != "demo:create-pane:code:demo/code/2 demo:set-layout:code demo:create-window:run" {
+		t.Fatalf("ops %s", got)
+	}
+	mustApply(t, f, ps, ops)
+	if again := f.plan(t, ps, Options{}); len(again) != 0 {
+		t.Fatalf("not finished: %s", kinds(again))
+	}
+}
+
+func TestPlanNeverKillsLastPaneOfWindowMissingConfiguredPanes(t *testing.T) {
+	demo := devProject("demo")
+	f := applied(t, demo)
+	w := f.window("demo/code")
+	w.panes = []*fPane{{id: "%90", key: "demo/code/3", pid: 900, cmd: "zsh"}}
+	f.idle[900] = true
+	ops := f.plan(t, []workspace.Project{demo}, Options{Prune: true})
+	want := "demo:report-extra:code:demo/code/3 demo:create-pane:code:demo/code/1 demo:create-pane:code:demo/code/2 demo:skip-layout:code"
+	if got := kinds(ops); got != want {
+		t.Fatalf("ops\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestApplyCreatePaneFallbackPrefersManagedPane(t *testing.T) {
+	demo := devProject("demo")
+	f := applied(t, demo)
+	w := f.window("demo/code")
+	shell := w.panes[1]
+	w.panes = []*fPane{shell, {id: "%99", pid: 999, cmd: "sh"}} // pane 1 gone, a user pane after pane 2
+	ops := f.plan(t, []workspace.Project{demo}, Options{})
+	if got := kinds(ops); got != "demo:create-pane:code:demo/code/1 demo:skip-layout:code" {
+		t.Fatalf("ops %s", got)
+	}
+	mustApply(t, f, []workspace.Project{demo}, ops)
+	if !hasCall(f, "SplitPane "+shell.id+" ") {
+		t.Fatalf("calls %q", f.calls)
+	}
+}
+
+func TestApplyStopsOnCancel(t *testing.T) {
+	demo, web := devProject("demo"), devProject("web")
+	ps := []workspace.Project{demo, web}
+	f := &fakeDriver{}
+	ops := f.plan(t, ps, Options{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.hook = func(c string) {
+		if strings.HasPrefix(c, "NewWindow $1") {
+			cancel()
+		}
+	}
+	res := Apply(ctx, f, ps, ops)
+	if len(res) != 2 || res[0].Err != nil || !errors.Is(res[1].Err, context.Canceled) {
+		t.Fatalf("results %+v", res)
+	}
+	if hasCall(f, "NewSession web") {
+		t.Fatal("ran an op after cancellation")
+	}
+}
+
+func TestInvalidProjectIsAnErrorNotAPanic(t *testing.T) {
+	bad := workspace.Project{ID: "demo", Root: "/home/u/demo"}
+	bad.ApplyDefaults("/home/u")
+	ops := Plan([]workspace.Project{bad}, tmux.Snapshot{}, Options{RootExists: allRoots})
+	if len(ops) != 1 || ops[0].Kind != KindSkipInvalid || !ops[0].IsNote() || !strings.Contains(ops[0].Detail, "window") {
+		t.Fatalf("ops %+v", ops)
+	}
+	f := &fakeDriver{}
+	res := Apply(context.Background(), f, []workspace.Project{bad}, []Op{{Kind: KindCreateSession, Project: "demo", Target: "demo"}})
+	if len(res) != 1 || res[0].Err == nil || hasCall(f, "New") {
+		t.Fatalf("results %+v calls %q", res, f.calls)
+	}
+	nopanes := devProject("demo")
+	nopanes.Windows[1].Panes = nil
+	res = Apply(context.Background(), f, []workspace.Project{nopanes}, []Op{{Kind: KindCreateSession, Project: "demo", Target: "demo"}})
+	if res[0].Err == nil || hasCall(f, "New") {
+		t.Fatalf("results %+v calls %q", res, f.calls)
+	}
+}
+
+func TestPlanRootThatIsAFileIsMissing(t *testing.T) {
+	file := t.TempDir() + "/root"
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := devProject("demo")
+	p.Root = file
+	if got := kinds(Plan([]workspace.Project{p}, tmux.Snapshot{}, Options{})); got != "demo:skip-missing-root" {
+		t.Fatalf("ops %s", got)
+	}
+	p.Root = t.TempDir()
+	if got := kinds(Plan([]workspace.Project{p}, tmux.Snapshot{}, Options{})); got != "demo:create-session:code" {
+		t.Fatalf("ops %s", got)
 	}
 }
