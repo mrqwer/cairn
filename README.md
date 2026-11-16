@@ -9,10 +9,24 @@ live from a CLI, a terminal UI and a web dashboard.
 It is built to be used by anyone: it adopts *your* tmux, Neovim and AI-tool configs instead
 of imposing a fixed setup. The author's own setup is just one profile in `profiles/`.
 
-**Status:** the shared foundation and the optional Linux-laptop module (`cairn host`: sleep,
-hibernation, NVIDIA) are implemented. The workspace engine and AI agent sessions are the
-next milestones; the rest is in design. Every module gets a reviewed design document in
+**Status:** the shared foundation, the optional Linux-laptop module (`cairn host`: sleep,
+hibernation, NVIDIA) and the workspace engine (M1; end-to-end verification pending) are
+implemented. AI agent sessions are the next milestone; the rest is in design. Every module gets a reviewed design document in
 `docs/specs/` before any code is written.
+
+## Quickstart
+
+Needs Go, tmux 3.2+ and a Linux user session. Full guide: [docs/guide/workspace.md](docs/guide/workspace.md).
+
+```
+go build -o cairn ./cmd/cairn          # then put it on PATH
+cairn project add api --root ~/code/api --template dev
+cairn up                               # create every project's session
+cairn open api                         # switch to it
+cairn doctor workspace                 # read-only health check
+```
+
+Try it without touching your tmux: add `--socket try` to every command.
 
 ## Why
 
