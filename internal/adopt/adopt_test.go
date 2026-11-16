@@ -27,6 +27,11 @@ type fakeDriver struct {
 	sets    int
 	before  func(n int, s *tmux.Snapshot)
 	failSet int
+	// failSetApplied: the failing set still changes the option (tmux
+	// applied it, then reported an error).
+	failSetApplied bool
+	failUnset      string
+	afterSet       func()
 }
 
 func clone(s tmux.Snapshot) tmux.Snapshot {
@@ -77,10 +82,16 @@ func (f *fakeDriver) key(scope, target string) *string {
 func (f *fakeDriver) SetOption(_ context.Context, scope, target, name, value string) error {
 	f.calls = append(f.calls, fmt.Sprintf("set %s %s %s %s", scope, target, name, value))
 	f.sets++
-	if f.sets == f.failSet {
-		return errors.New("tmux set: boom")
+	if f.afterSet != nil {
+		defer f.afterSet()
 	}
 	k := f.key(scope, target)
+	if f.sets == f.failSet {
+		if f.failSetApplied && k != nil {
+			*k = value
+		}
+		return errors.New("tmux set: boom")
+	}
 	if k == nil {
 		return fmt.Errorf("no %s %s", scope, target)
 	}
@@ -90,6 +101,9 @@ func (f *fakeDriver) SetOption(_ context.Context, scope, target, name, value str
 
 func (f *fakeDriver) UnsetOption(_ context.Context, scope, target, name string) error {
 	f.calls = append(f.calls, fmt.Sprintf("unset %s %s %s", scope, target, name))
+	if target == f.failUnset {
+		return errors.New("tmux set -u: boom")
+	}
 	k := f.key(scope, target)
 	if k == nil {
 		return fmt.Errorf("no %s %s", scope, target)
@@ -369,5 +383,155 @@ func TestReleaseSkipsObjectsChangedMeanwhile(t *testing.T) {
 	}
 	if n != 6 || slices.Contains(f.calls, "unset window @4 @cairn_w") {
 		t.Fatalf("removed %d, calls %q", n, f.calls)
+	}
+}
+
+// webMarks applies the adoption of "web" to a fresh liveServer model.
+func webMarks(t *testing.T) (*fakeDriver, []Mark) {
+	t.Helper()
+	f := &fakeDriver{snap: liveServer(t)}
+	snap := clone(f.snap)
+	marks := Markers(captureWeb(t, snap))
+	if err := Apply(context.Background(), f, snap, marks); err != nil {
+		t.Fatal(err)
+	}
+	f.calls, f.snaps = nil, 0
+	return f, marks
+}
+
+// A child marker that cannot be removed keeps the session marker, so the
+// session stays findable by --release; a later release cleans up.
+func TestUnmarkKeepsSessionMarkerWhenAChildFails(t *testing.T) {
+	f, marks := webMarks(t)
+	f.failUnset = "%9"
+	err := Unmark(context.Background(), f, marks)
+	if err == nil || !strings.Contains(err.Error(), "%9") {
+		t.Fatalf("err %v", err)
+	}
+	if m := f.markers(); !slices.Contains(m, "$3=web") || !slices.Contains(m, "%9=web/code/3") || len(m) != 5 {
+		t.Fatalf("markers %v", m)
+	}
+	f.failUnset = ""
+	n, err := Release(context.Background(), f, "web")
+	if err != nil || n != 2 {
+		t.Fatalf("release %d %v", n, err)
+	}
+	if m := f.markers(); !reflect.DeepEqual(m, []string{"$1=api", "@1=api/main", "%1=api/main/1"}) {
+		t.Fatalf("markers %v", m)
+	}
+}
+
+// Rollback that fails names the release command, and that command works.
+func TestApplyRollbackFailureHint(t *testing.T) {
+	f := &fakeDriver{snap: liveServer(t)}
+	snap := clone(f.snap)
+	marks := Markers(captureWeb(t, snap))
+	f.failSet, f.failUnset = 6, "%5"
+	err := Apply(context.Background(), f, snap, marks)
+	if err == nil || !strings.Contains(err.Error(), "cairn adopt --release web") {
+		t.Fatalf("err %v", err)
+	}
+	if !slices.Contains(f.markers(), "$3=web") {
+		t.Fatalf("session marker removed although a child failed: %v", f.markers())
+	}
+	f.failUnset = ""
+	if _, err := Release(context.Background(), f, "web"); err != nil {
+		t.Fatal(err)
+	}
+	if m := f.markers(); len(m) != 3 {
+		t.Fatalf("markers %v", m)
+	}
+}
+
+// A release interrupted after the session marker went leaves orphan
+// window and pane markers in an unmarked session; release reaches them,
+// but never inside another project's session nor other prefixes.
+func TestReleaseReachesOrphanMarkers(t *testing.T) {
+	f, _ := webMarks(t)
+	f.snap.Sessions[1].Key = "" // interrupted release
+	// web-prefixed window inside the managed api session: not ours to touch.
+	f.snap.Sessions[0].Windows = append(f.snap.Sessions[0].Windows, tmux.Window{ID: "@30", Key: "web/stray",
+		Panes: []tmux.Pane{{ID: "%30", Key: "web/stray/1"}}})
+	// an unmarked session with another project's leftovers and a web one.
+	f.snap.Sessions = append(f.snap.Sessions, tmux.Session{ID: "$9", Name: "misc", Windows: []tmux.Window{
+		{ID: "@40", Key: "webby/x", Panes: []tmux.Pane{{ID: "%40", Key: "webby/x/1"}, {ID: "%41", Key: "web/old/2"}}}}})
+	n, err := Release(context.Background(), f, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 7 { // 2 windows + 4 panes of the old session, %41 in misc
+		t.Fatalf("removed %d (calls %q)", n, f.calls)
+	}
+	want := []string{"$1=api", "@1=api/main", "%1=api/main/1", "@30=web/stray", "%30=web/stray/1", "@40=webby/x", "%40=webby/x/1"}
+	if m := f.markers(); !reflect.DeepEqual(m, want) {
+		t.Fatalf("markers\n got %v\nwant %v", m, want)
+	}
+	if _, err := Release(context.Background(), f, "web"); err == nil {
+		t.Fatal("second release found something")
+	}
+}
+
+// An orphan whose session meanwhile became another project's is skipped.
+func TestReleaseSkipsOrphanWhoseSessionWasClaimed(t *testing.T) {
+	f, _ := webMarks(t)
+	f.snap.Sessions[1].Key = ""
+	f.before = func(n int, s *tmux.Snapshot) {
+		if n == 2 {
+			s.Sessions[1].Key = "api2"
+		}
+	}
+	n, err := Release(context.Background(), f, "web")
+	if err != nil || n != 0 {
+		t.Fatalf("removed %d, err %v, calls %q", n, err, f.calls)
+	}
+}
+
+// A pane moved or resized between capture and apply aborts the adoption.
+func TestApplyAbortsOnPaneGeometryChange(t *testing.T) {
+	f := &fakeDriver{snap: liveServer(t)}
+	snap := clone(f.snap)
+	marks := Markers(captureWeb(t, snap))
+	f.before = func(n int, s *tmux.Snapshot) {
+		if n == 4 {
+			s.Sessions[1].Windows[0].Panes[0].W -= 5
+		}
+	}
+	err := Apply(context.Background(), f, snap, marks)
+	if err == nil || !strings.Contains(err.Error(), "pane %7 (web/code/1)") || !strings.Contains(err.Error(), "moved or resized") {
+		t.Fatalf("err %v", err)
+	}
+	if m := f.markers(); len(m) != 3 {
+		t.Fatalf("markers %v", m)
+	}
+}
+
+// A set that failed after tmux applied it is rolled back too.
+func TestApplyRollsBackAFailedButAppliedSet(t *testing.T) {
+	f := &fakeDriver{snap: liveServer(t)}
+	snap := clone(f.snap)
+	marks := Markers(captureWeb(t, snap))
+	f.failSet, f.failSetApplied = 2, true
+	if err := Apply(context.Background(), f, snap, marks); err == nil {
+		t.Fatal("no error")
+	}
+	if m := f.markers(); len(m) != 3 {
+		t.Fatalf("markers %v (calls %q)", m, f.calls)
+	}
+}
+
+// Cancellation (Ctrl-C) between marks stops the adoption and the rollback
+// still runs.
+func TestApplyCancelledRollsBack(t *testing.T) {
+	f := &fakeDriver{snap: liveServer(t)}
+	snap := clone(f.snap)
+	marks := Markers(captureWeb(t, snap))
+	ctx, cancel := context.WithCancel(context.Background())
+	f.afterSet = cancel
+	err := Apply(ctx, f, snap, marks)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err %v", err)
+	}
+	if m := f.markers(); len(m) != 3 || f.sets != 1 {
+		t.Fatalf("markers %v, %d sets", m, f.sets)
 	}
 }

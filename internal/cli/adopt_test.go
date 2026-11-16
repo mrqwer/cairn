@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,7 +91,7 @@ func TestAdoptMarksSessionWritesConfigAndPlansNothing(t *testing.T) {
 	// Release removes the markers, keeps the file and touches nothing else.
 	fd.calls = nil
 	out = mustRun(t, "", "adopt", "--release", "web")
-	if !strings.Contains(out, "removed 6 markers of project web") {
+	if !strings.Contains(out, "removed 6 markers of project web") || !strings.Contains(out, "name clash") {
 		t.Fatalf("release output:\n%s", out)
 	}
 	if m := liveMarkers(fd.live); !slices.Equal(m, apiOnly) {
@@ -507,5 +509,142 @@ func TestAdoptUndoRemovesConfigOnly(t *testing.T) {
 	}
 	if out := mustRun(t, "", "adopt", "--release", "web"); !strings.Contains(out, "removed 6 markers") || strings.Contains(out, "config stays") {
 		t.Fatalf("release:\n%s", out)
+	}
+}
+
+func TestUndoOfAdoptionHintsRelease(t *testing.T) {
+	root, fd := wsTestEnv(t)
+	fd.live = liveSnapshot()
+	mustRun(t, "", "adopt", "web", "--root", root)
+	if out := mustRun(t, "", "undo"); !strings.Contains(out, "markers on the live session remain; run: cairn adopt --release web") {
+		t.Fatalf("undo:\n%s", out)
+	}
+	mustRun(t, "", "project", "add", "demo", "--root", root)
+	if out := mustRun(t, "", "undo"); strings.Contains(out, "--release") {
+		t.Fatalf("undo of add:\n%s", out)
+	}
+}
+
+// A rollback whose pane unset fails keeps the session marker, so the hint
+// in the error is true and a release cleans up.
+func TestAdoptRollbackFailureLeavesReleasableSession(t *testing.T) {
+	root, fd := wsTestEnv(t)
+	fd.live = liveSnapshot()
+	fd.failOption, fd.failUnset = "%3", "%2"
+	_, _, err := runSplit(t, "adopt", "web", "--root", root)
+	if err == nil || !strings.Contains(err.Error(), "cairn adopt --release web") {
+		t.Fatalf("err %v", err)
+	}
+	if m := liveMarkers(fd.live); !slices.Contains(m, "$1=web") {
+		t.Fatalf("session marker gone: %v", m)
+	}
+	fd.failOption, fd.failUnset = "", ""
+	mustRun(t, "", "adopt", "--release", "web")
+	if m := liveMarkers(fd.live); !slices.Equal(m, apiOnly) {
+		t.Fatalf("markers %v", m)
+	}
+}
+
+// A release interrupted after the session marker went is finished by
+// running it again.
+func TestAdoptReleaseFinishesInterruptedRelease(t *testing.T) {
+	root, fd := wsTestEnv(t)
+	fd.live = liveSnapshot()
+	mustRun(t, "", "adopt", "web", "--root", root)
+	fd.live.Sessions[0].Key = ""
+	if out := mustRun(t, "", "adopt", "--release", "web"); !strings.Contains(out, "removed 5 markers") {
+		t.Fatalf("release:\n%s", out)
+	}
+	if m := liveMarkers(fd.live); !slices.Equal(m, apiOnly) {
+		t.Fatalf("markers %v", m)
+	}
+}
+
+// When the config names another session than the live one, release warns
+// that apply would create a new session instead of claiming a clash.
+func TestAdoptReleaseWarnsAboutSessionNameMismatch(t *testing.T) {
+	root, fd := wsTestEnv(t)
+	fd.live = liveSnapshot()
+	mustRun(t, "", "adopt", "web", "--root", root)
+	path := projectPath(t, "web")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(string(data), "name = ", "session = \"other\"\nname = ", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runSplit(t, "adopt", "--release", "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `warning: project web will create a NEW tmux session "other" on cairn apply/up (the live session is named "web") — run cairn project archive web or cairn undo first`
+	if !strings.Contains(stderr, want) || strings.Contains(stdout+stderr, "name clash") {
+		t.Fatalf("stdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+}
+
+// History fails and the config cannot be removed: the markers go and the
+// leftover config is flagged.
+func TestAdoptHistoryFailureWithStuckConfigWarns(t *testing.T) {
+	root, fd := wsTestEnv(t)
+	fd.live = liveSnapshot()
+	d := testDirs(t)
+	if err := os.MkdirAll(filepath.Join(d.State, "history.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := removeProjectFile
+	t.Cleanup(func() { removeProjectFile = old })
+	removeProjectFile = func(string) error { return errors.New("read-only file system") }
+	// The config's session name differs from the live one: an id that is
+	// not the session name and a session name cairn cannot use.
+	fd.live.Sessions[1].Name = "my proj"
+	_, stderr, err := runSplit(t, "adopt", "my proj", "--id", "mine", "--root", root)
+	if err == nil || !strings.Contains(err.Error(), "history") {
+		t.Fatalf("err %v", err)
+	}
+	if m := liveMarkers(fd.live); !slices.Equal(m, apiOnly) {
+		t.Fatalf("markers %v", m)
+	}
+	if !strings.Contains(stderr, `warning: project mine will create a NEW tmux session "mine" on cairn apply/up (the live session is named "my proj")`) {
+		t.Fatalf("stderr:\n%s", stderr)
+	}
+}
+
+// Ctrl-C: a command started with a cancelled context stops at once; a
+// cancel during adopt rolls the markers back and writes nothing.
+func TestCancelledContext(t *testing.T) {
+	root, fd := wsTestEnv(t)
+	fd.live = liveSnapshot()
+	run := func(ctx context.Context, args ...string) error {
+		cmd := NewRootCmd()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetIn(strings.NewReader(""))
+		cmd.SetArgs(args)
+		return cmd.ExecuteContext(ctx)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := run(ctx, "plan"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("plan: %v", err)
+	}
+	if len(fd.calls) != 0 {
+		t.Fatalf("calls %v", fd.calls)
+	}
+
+	ctx, cancel = context.WithCancel(context.Background())
+	fd.afterSet = cancel
+	if err := run(ctx, "adopt", "web", "--root", root); !errors.Is(err, context.Canceled) {
+		t.Fatalf("adopt: %v", err)
+	}
+	if m := liveMarkers(fd.live); !slices.Equal(m, apiOnly) {
+		t.Fatalf("markers %v", m)
+	}
+	if !fd.called("UnsetOption session $1") {
+		t.Fatalf("no rollback: %v", fd.calls)
+	}
+	if _, err := os.Stat(projectPath(t, "web")); !os.IsNotExist(err) {
+		t.Fatalf("config written: %v", err)
 	}
 }

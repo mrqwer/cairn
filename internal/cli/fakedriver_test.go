@@ -27,8 +27,10 @@ type fakeDriver struct {
 	// the modelled sessions (capture tests need pane geometry and paths);
 	// SetOption and UnsetOption change its markers.
 	live *tmux.Snapshot
-	// failOption makes SetOption on this target fail.
-	failOption string
+	// failOption makes SetOption on this target fail, failUnset
+	// UnsetOption; afterSet runs after every SetOption.
+	failOption, failUnset string
+	afterSet              func()
 }
 
 type fSession struct {
@@ -155,6 +157,9 @@ func (f *fakeDriver) SelectLayout(_ context.Context, windowID, _ string) error {
 
 func (f *fakeDriver) SetOption(_ context.Context, scope, target, name, value string) error {
 	f.rec("SetOption %s %s %s %s", scope, target, name, value)
+	if f.afterSet != nil {
+		defer f.afterSet()
+	}
 	if target == f.failOption {
 		return fmt.Errorf("tmux set: no such %s %s", scope, target)
 	}
@@ -166,6 +171,9 @@ func (f *fakeDriver) SetOption(_ context.Context, scope, target, name, value str
 
 func (f *fakeDriver) UnsetOption(_ context.Context, scope, target, name string) error {
 	f.rec("UnsetOption %s %s %s", scope, target, name)
+	if target == f.failUnset {
+		return fmt.Errorf("tmux set -u: no such %s %s", scope, target)
+	}
 	if k := f.liveKey(scope, target); k != nil {
 		*k = ""
 	}

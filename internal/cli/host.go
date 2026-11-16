@@ -273,7 +273,10 @@ func sudoApplyRoot(ctx context.Context, cmd *cobra.Command, self, mode string, y
 	if force {
 		args = append(args, "--force")
 	}
-	c := exec.CommandContext(ctx, "sudo", args...)
+	// Never killed through ctx: a SIGTERM to cairn must not cut the root
+	// side off halfway. sudo stays in the terminal's foreground process
+	// group, so a Ctrl-C reaches it (and apply-root) directly, as before.
+	c := exec.CommandContext(context.WithoutCancel(ctx), "sudo", args...)
 	c.Stdin, c.Stdout, c.Stderr = bytes.NewReader(request), cmd.OutOrStdout(), cmd.ErrOrStderr()
 	if err := c.Run(); err != nil {
 		return fmt.Errorf("sudo %s host apply-root: %w", self, err)

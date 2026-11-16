@@ -155,10 +155,17 @@ func adoptSession(cmd *cobra.Command, name, id, root string, dryRun, force bool)
 		return err
 	}
 	undoMarks := func(cause error) error {
+		if errors.Is(cause, context.Canceled) {
+			cause = fmt.Errorf("adopt interrupted: %w", cause)
+		}
 		if err := adopt.Unmark(ctx, drv, marks); err != nil {
 			return fmt.Errorf("%w; removing the markers again failed (remove them with: cairn adopt --release %s): %v", cause, p.ID, err)
 		}
 		return fmt.Errorf("%w; the markers were removed again, nothing was adopted", cause)
+	}
+	// Interrupted after the markers: take them back, write nothing.
+	if err := ctx.Err(); err != nil {
+		return undoMarks(err)
 	}
 	if err := wsRoot.MkdirAll(projectsDir(dirs), 0o755); err != nil {
 		return undoMarks(err)
@@ -172,8 +179,13 @@ func adoptSession(cmd *cobra.Command, name, id, root string, dryRun, force bool)
 	if _, err := historyStore(dirs).Append("adopt", fmt.Sprintf("adopt session %s as project %s", s.Name, p.ID),
 		[]history.FileChange{{Path: path, After: data, AfterExists: true}}); err != nil {
 		cause := fmt.Errorf("recording the adoption in history failed: %w", err)
-		if rerr := wsRoot.Remove(path); rerr != nil {
+		if rerr := removeProjectFile(path); rerr != nil {
 			cause = fmt.Errorf("%w; removing %s failed: %v", cause, path, rerr)
+			sess := p.Session
+			if sess == "" {
+				sess = p.ID
+			}
+			warnNewSession(cmd.ErrOrStderr(), p.ID, sess, s.Name)
 		}
 		return undoMarks(cause)
 	}
@@ -226,15 +238,22 @@ func adoptPlan(ctx context.Context, w io.Writer, drv wsDriver, id string) error 
 	return nil
 }
 
-// adoptRelease removes project id's markers from its live session. The
-// project file is not needed (an interrupted adopt can be released too)
-// and is never changed.
+// adoptRelease removes project id's markers from its live session (and
+// orphan markers in unmarked sessions). The project file is not needed (an
+// interrupted adopt can be released too) and is never changed; when it
+// exists, its session name decides what apply will do next.
 func adoptRelease(cmd *cobra.Command, id string) error {
 	drv, err := newDriver(socketName(cmd))
 	if err != nil {
 		return err
 	}
-	n, err := adopt.Release(ctxOf(cmd), drv, id)
+	ctx := ctxOf(cmd)
+	snap, err := drv.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	live := adopt.Sessions(snap, id)
+	n, err := adopt.Release(ctx, drv, id)
 	out := cmd.OutOrStdout()
 	if n > 0 {
 		_, _ = fmt.Fprintf(out, "removed %s of project %s; the tmux session, windows and panes are unchanged\n",
@@ -243,9 +262,39 @@ func adoptRelease(cmd *cobra.Command, id string) error {
 	if err != nil {
 		return err
 	}
-	if dirs, derr := xdg.Resolve(os.Getenv); derr == nil && wsRoot.Exists(projectFile(dirs, id)) {
-		_, _ = fmt.Fprintf(out, "the project config stays (%s); while the session keeps its name, cairn plan reports a name clash\n",
-			projectFile(dirs, id))
+	ws, err := loadWorkspace()
+	if err != nil {
+		return err
+	}
+	p, ok := ws.project(id)
+	if !ok {
+		return nil
+	}
+	path := projectFile(ws.dirs, id)
+	for _, s := range live {
+		if s.Name == p.Session {
+			_, _ = fmt.Fprintf(out, "the project config stays (%s); while the live session keeps the name %q, cairn plan reports a name clash\n",
+				path, s.Name)
+			continue
+		}
+		warnNewSession(cmd.ErrOrStderr(), id, p.Session, s.Name)
 	}
 	return nil
 }
+
+// warnNewSession warns that a project config names another session than
+// the live one it was adopted from, so apply/up would start a second one.
+func warnNewSession(w io.Writer, id, session, live string) {
+	if session == live {
+		return
+	}
+	msg := fmt.Sprintf("warning: project %s will create a NEW tmux session %q on cairn apply/up (the live session is named %q) — run cairn project archive %s or cairn undo first",
+		id, session, live, id)
+	if st, styled := styleFor(w); styled {
+		msg = st.Yellow(msg)
+	}
+	_, _ = fmt.Fprintln(w, msg)
+}
+
+// removeProjectFile removes a project file (a seam for tests).
+var removeProjectFile = func(path string) error { return wsRoot.Remove(path) }

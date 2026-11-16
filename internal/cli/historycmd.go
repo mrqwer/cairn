@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -129,6 +131,7 @@ func newUndoCmd() *cobra.Command {
 					return nil
 				}
 			}
+			undoing, _ := s.Get(id)
 			e, err := s.Undo(id)
 			switch {
 			case errors.Is(err, history.ErrAlreadyApplied):
@@ -144,6 +147,10 @@ func newUndoCmd() *cobra.Command {
 				return err
 			}
 			_, _ = fmt.Fprintf(out, "%s\nRun: cairn apply   (config only; tmux was not changed)\n", e.Summary)
+			if undoing.Kind == "adopt" && len(undoing.Files) == 1 {
+				project := strings.TrimSuffix(filepath.Base(undoing.Files[0].Path), ".toml")
+				_, _ = fmt.Fprintf(out, "markers on the live session remain; run: cairn adopt --release %s\n", project)
+			}
 			return nil
 		},
 	}

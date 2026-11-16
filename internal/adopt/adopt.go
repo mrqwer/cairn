@@ -69,6 +69,7 @@ func Markers(r capture.Result) []Mark {
 type object struct {
 	sess tmux.Session
 	win  tmux.Window
+	pane tmux.Pane
 	key  string
 }
 
@@ -87,7 +88,7 @@ func find(snap tmux.Snapshot, scope, target string) (object, bool) {
 			}
 			for _, p := range w.Panes {
 				if p.ID == target {
-					return object{sess: s, win: w, key: p.Key}, true
+					return object{sess: s, win: w, pane: p, key: p.Key}, true
 				}
 			}
 		}
@@ -107,9 +108,10 @@ func scopeRank(scope string) int {
 
 // verify checks mark m against cur, the server now, given orig, the
 // snapshot the marks were made from: the object still exists, in the same
-// session (and window) under the same session name, and carries no cairn
-// marker or exactly m.Value; its session is unmarked or marked with m's
-// project. It returns the object as it is now.
+// session (and window) under the same session name, a pane at the same
+// position and size (no swap-pane or resize in between), and carries no
+// cairn marker or exactly m.Value; its session is unmarked or marked with
+// m's project. It returns the object as it is now.
 func verify(orig, cur tmux.Snapshot, m Mark) (object, error) {
 	o, ok := find(orig, m.Scope, m.Target)
 	if !ok {
@@ -121,6 +123,9 @@ func verify(orig, cur tmux.Snapshot, m Mark) (object, error) {
 		return object{}, fmt.Errorf("%s no longer exists", m)
 	case c.sess.ID != o.sess.ID || c.win.ID != o.win.ID:
 		return object{}, fmt.Errorf("%s was moved to another session or window", m)
+	case m.Scope == "pane" && (c.pane.Left != o.pane.Left || c.pane.Top != o.pane.Top || c.pane.W != o.pane.W || c.pane.H != o.pane.H):
+		return object{}, fmt.Errorf("%s was moved or resized since the capture (%d,%d %dx%d, now %d,%d %dx%d)", m,
+			o.pane.Left, o.pane.Top, o.pane.W, o.pane.H, c.pane.Left, c.pane.Top, c.pane.W, c.pane.H)
 	case c.sess.Name != o.sess.Name:
 		return object{}, fmt.Errorf("%s: session %q was renamed to %q", m, o.sess.Name, c.sess.Name)
 	case c.key != "" && c.key != m.Value:
@@ -148,13 +153,16 @@ func Check(snap tmux.Snapshot, marks []Mark) error {
 // reads a fresh snapshot and requires the object to still exist where snap
 // (the snapshot the marks were made from) saw it, under the same session
 // name, carrying no cairn marker or exactly the one to set (then nothing is
-// written). On any failure the marks this run set are removed again and the
-// error names the object.
+// written). On any failure, and when ctx is cancelled between marks, the
+// marks this run set are removed again and the error names the object.
 func Apply(ctx context.Context, d Driver, snap tmux.Snapshot, marks []Mark) error {
 	ordered := append([]Mark(nil), marks...)
 	sort.SliceStable(ordered, func(i, j int) bool { return scopeRank(ordered[i].Scope) < scopeRank(ordered[j].Scope) })
 	var set []Mark
 	for _, m := range ordered {
+		if err := ctx.Err(); err != nil {
+			return rollback(ctx, d, set, fmt.Errorf("adopt interrupted: %w", err))
+		}
 		cur, err := d.Snapshot(ctx)
 		if err != nil {
 			return rollback(ctx, d, set, fmt.Errorf("adopt: %w", err))
@@ -166,10 +174,12 @@ func Apply(ctx context.Context, d Driver, snap tmux.Snapshot, marks []Mark) erro
 		if c.key == m.Value {
 			continue
 		}
+		// Recorded first: a set that fails after tmux applied it is rolled
+		// back too (Unmark only removes a marker carrying m.Value).
+		set = append(set, m)
 		if err := d.SetOption(ctx, m.Scope, m.Target, m.Name, m.Value); err != nil {
 			return rollback(ctx, d, set, fmt.Errorf("adopt aborted: %s: %w", m, err))
 		}
-		set = append(set, m)
 	}
 	return nil
 }
@@ -179,42 +189,63 @@ func rollback(ctx context.Context, d Driver, set []Mark, cause error) error {
 		return cause
 	}
 	if err := Unmark(ctx, d, set); err != nil {
-		return fmt.Errorf("%w; removing the %d markers already set failed: %v", cause, len(set), err)
+		project, _, _ := strings.Cut(set[0].Value, "/")
+		return fmt.Errorf("%w; removing the %d markers already set failed (remove them with: cairn adopt --release %s): %v",
+			cause, len(set), project, err)
 	}
 	return fmt.Errorf("%w; the %d markers already set were removed", cause, len(set))
 }
 
 // Unmark removes marks in reverse order, each only while its object (on a
-// fresh snapshot) still carries exactly the mark's value. It runs to the end
-// even when ctx is cancelled and returns the joined errors.
+// fresh snapshot) still carries exactly the mark's value. It may therefore
+// also remove an identical marker left over from before the run. Session
+// markers come last and are kept when removing any window or pane marker
+// failed, so the session stays findable by Release. It runs to the end even
+// when ctx is cancelled and returns the joined errors.
 func Unmark(ctx context.Context, d Driver, marks []Mark) error {
 	ctx = context.WithoutCancel(ctx)
 	var errs []error
-	for i := len(marks) - 1; i >= 0; i-- {
-		m := marks[i]
+	unmark := func(m Mark) {
 		cur, err := d.Snapshot(ctx)
 		if err != nil {
 			errs = append(errs, err)
-			continue
+			return
 		}
 		if c, ok := find(cur, m.Scope, m.Target); !ok || c.key != m.Value {
-			continue // gone, or no longer ours: nothing to remove
+			return // gone, or no longer ours: nothing to remove
 		}
 		if err := d.UnsetOption(ctx, m.Scope, m.Target, m.Name); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", m, err))
 		}
 	}
+	for i := len(marks) - 1; i >= 0; i-- {
+		if marks[i].Scope != "session" {
+			unmark(marks[i])
+		}
+	}
+	for i := len(marks) - 1; i >= 0; i-- {
+		if marks[i].Scope != "session" {
+			continue
+		}
+		if len(errs) > 0 {
+			errs = append(errs, fmt.Errorf("%s kept so that cairn adopt --release %s can find the session", marks[i], marks[i].Value))
+			continue
+		}
+		unmark(marks[i])
+	}
 	return errors.Join(errs...)
 }
 
-// Release removes the markers of project id from the live session(s)
-// marked @cairn_s = id: the session marker first (so an interrupted release
-// leaves an unmanaged session, which apply never touches), then every
-// window and pane of that session whose marker starts with "<id>/". Each
-// object is checked on a fresh snapshot (still in that session, still
-// carrying exactly that marker) and skipped otherwise; other projects'
-// markers and unmarked objects are never touched. It returns how many
-// markers were removed.
+// Release removes the markers of project id: on the session(s) marked
+// @cairn_s = id the session marker first (so an interrupted release leaves
+// an unmanaged session, which apply never touches), then every window and
+// pane whose marker starts with "<id>/" in those sessions and in unmarked
+// sessions (orphans of an interrupted release or a failed rollback).
+// Sessions marked for another project are never looked into. Each object
+// is checked on a fresh snapshot (still in the same session, that session
+// still unmarked or marked id, still carrying exactly that marker) and
+// skipped otherwise; other markers and unmarked objects are never touched.
+// It returns how many markers were removed.
 func Release(ctx context.Context, d Driver, id string) (int, error) {
 	snap, err := d.Snapshot(ctx)
 	if err != nil {
@@ -224,39 +255,42 @@ func Release(ctx context.Context, d Driver, id string) (int, error) {
 		m       Mark
 		session string
 	}
-	var targets []target
+	var sessions, windows, panes []target
 	prefix := id + "/"
-	for _, s := range snap.Sessions {
-		if s.Key != id {
-			continue
+	for _, s := range Sessions(snap, id) {
+		if s.Key == id {
+			sessions = append(sessions, target{Mark{Scope: "session", Target: s.ID, Name: OptSession, Value: id}, s.ID})
 		}
-		targets = append(targets, target{Mark{Scope: "session", Target: s.ID, Name: OptSession, Value: id}, s.ID})
 		for _, w := range s.Windows {
 			if strings.HasPrefix(w.Key, prefix) {
-				targets = append(targets, target{Mark{Scope: "window", Target: w.ID, Name: OptWindow, Value: w.Key}, s.ID})
+				windows = append(windows, target{Mark{Scope: "window", Target: w.ID, Name: OptWindow, Value: w.Key}, s.ID})
 			}
-		}
-		for _, w := range s.Windows {
 			for _, p := range w.Panes {
 				if strings.HasPrefix(p.Key, prefix) {
-					targets = append(targets, target{Mark{Scope: "pane", Target: p.ID, Name: OptPane, Value: p.Key}, s.ID})
+					panes = append(panes, target{Mark{Scope: "pane", Target: p.ID, Name: OptPane, Value: p.Key}, s.ID})
 				}
 			}
 		}
 	}
+	targets := append(append(sessions, windows...), panes...)
 	if len(targets) == 0 {
-		return 0, fmt.Errorf("no live tmux session carries the marker of project %s", id)
+		return 0, fmt.Errorf("no live tmux session carries a marker of project %s", id)
 	}
 	removed := 0
 	var errs []error
 	for _, t := range targets {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, fmt.Errorf("release interrupted (run it again to finish): %w", err))
+			break
+		}
 		cur, err := d.Snapshot(ctx)
 		if err != nil {
 			errs = append(errs, err)
 			break
 		}
-		if c, ok := find(cur, t.m.Scope, t.m.Target); !ok || c.sess.ID != t.session || c.key != t.m.Value {
-			continue // gone, moved or re-marked meanwhile: not ours to touch
+		c, ok := find(cur, t.m.Scope, t.m.Target)
+		if !ok || c.sess.ID != t.session || c.key != t.m.Value || (c.sess.Key != "" && c.sess.Key != id) {
+			continue // gone, moved or claimed meanwhile: not ours to touch
 		}
 		if err := d.UnsetOption(ctx, t.m.Scope, t.m.Target, t.m.Name); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", t.m, err))
@@ -265,4 +299,35 @@ func Release(ctx context.Context, d Driver, id string) (int, error) {
 		removed++
 	}
 	return removed, errors.Join(errs...)
+}
+
+// Sessions returns the live sessions Release would act on for project id:
+// those marked id, and unmarked ones holding a window or pane marker
+// starting with "<id>/".
+func Sessions(snap tmux.Snapshot, id string) []tmux.Session {
+	prefix := id + "/"
+	var out []tmux.Session
+	for _, s := range snap.Sessions {
+		switch {
+		case s.Key == id:
+			out = append(out, s)
+		case s.Key == "" && hasPrefixedMarker(s, prefix):
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func hasPrefixedMarker(s tmux.Session, prefix string) bool {
+	for _, w := range s.Windows {
+		if strings.HasPrefix(w.Key, prefix) {
+			return true
+		}
+		for _, p := range w.Panes {
+			if strings.HasPrefix(p.Key, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }

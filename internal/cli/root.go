@@ -15,6 +15,11 @@ func NewRootCmd() *cobra.Command {
 		Short:         "cairn: declarative host and tooling management",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// main cancels the context on SIGINT/SIGTERM; a command that has
+		// not started yet does not start.
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			return ctxOf(cmd).Err()
+		},
 	}
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
