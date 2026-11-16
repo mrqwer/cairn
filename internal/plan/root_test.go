@@ -22,7 +22,7 @@ import (
 
 const (
 	selfBin    = "/usr/local/bin/cairn"
-	nvidiaTmp  = "/home/.nvidia-suspend"
+	nvidiaTmp  = "/home/nvidia-suspend"
 	conflicter = "/etc/systemd/system/sleep-fallback.service"
 )
 

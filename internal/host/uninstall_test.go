@@ -26,7 +26,7 @@ func TestUninstallPlan(t *testing.T) {
 	sysInv := &inventory.Inventory{}
 	for _, e := range []inventory.Entry{
 		{Path: plan.SysStateDir, Class: inventory.ManagedDir},
-		{Path: "/home/.nvidia-suspend", Class: inventory.ManagedDir},
+		{Path: "/home/nvidia-suspend", Class: inventory.ManagedDir},
 		{Path: "/etc/modprobe.d/nvidia-utils.conf", Class: inventory.Mask, Backup: plan.BackupDir + "/x"},
 		{Path: "/etc/systemd/sleep.conf.d/50-cairn.conf", Class: inventory.DropIn},
 		{Path: "/boot/loader/entries/arch.conf", Class: inventory.Repaired},
@@ -52,7 +52,7 @@ func TestUninstallPlan(t *testing.T) {
 		"DisableUnit cairn-x.service [root]",
 		"RemoveFile /etc/modprobe.d/nvidia-utils.conf [root]",
 		"RemoveFile /etc/systemd/sleep.conf.d/50-cairn.conf [root]",
-		"RemoveFile /home/.nvidia-suspend [root]",
+		"RemoveFile /home/nvidia-suspend [root]",
 		"RunCommand systemctl daemon-reload [root]",
 		"DisableUnit cairn-host-notify.path",
 		"RemoveFile /config/systemd/user/cairn-host-notify.path",
@@ -67,7 +67,7 @@ func TestUninstallPlan(t *testing.T) {
 	}
 	for _, a := range p.Actions {
 		if a.NeedsRoot {
-			if err := plan.CheckRootAction(a, []string{"/home/.nvidia-suspend"}, plan.ModeUninstall); err != nil {
+			if err := plan.CheckRootAction(a, []string{"/home/nvidia-suspend"}, plan.ModeUninstall); err != nil {
 				t.Errorf("root allowlist rejects %s: %v", describe(a), err)
 			}
 		} else if err := plan.CheckUserAction(a); err != nil {

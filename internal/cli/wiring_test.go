@@ -26,7 +26,7 @@ func TestInitWritesOnlyDetectedSwap(t *testing.T) {
 		return detect.System{Swaps: []detect.Swap{
 			{Path: "/swap/other", Type: "file", Priority: 20},
 			{Path: "/dev/zram0", Type: "partition", Priority: -50},
-			{Path: "/hibernate-swap/swapfile", Type: "file", Priority: -10},
+			{Path: "/swap/hibernate.swap", Type: "file", Priority: -10},
 		}}, nil
 	}
 	out, err := runHost(t, "", "init", "--host")
@@ -44,10 +44,10 @@ func TestInitWritesOnlyDetectedSwap(t *testing.T) {
 			settings = append(settings, l)
 		}
 	}
-	if strings.Join(settings, "\n") != "[host.sleep.hibernation_swap]\npath = \"/hibernate-swap/swapfile\"" {
+	if strings.Join(settings, "\n") != "[host.sleep.hibernation_swap]\npath = \"/swap/hibernate.swap\"" {
 		t.Fatalf("config:\n%s", data)
 	}
-	if out, err := runHost(t, "", "config", "explain", swapKey); err != nil || !strings.Contains(out, "/hibernate-swap/swapfile") {
+	if out, err := runHost(t, "", "config", "explain", swapKey); err != nil || !strings.Contains(out, "/swap/hibernate.swap") {
 		t.Fatalf("written config does not load: %v\n%s", err, out)
 	}
 

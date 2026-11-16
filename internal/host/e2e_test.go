@@ -23,7 +23,7 @@ const (
 	e2eSelf     = "/usr/local/bin/cairn"
 	e2eUnitDir  = "/config/systemd/user"
 	e2eUserInv  = "/state/cairn/host/managed.json"
-	e2eNvTmp    = "/home/.nvidia-suspend"
+	e2eNvTmp    = "/home/nvidia-suspend"
 	e2eGsSchema = "org.gnome.settings-daemon.plugins.power"
 	e2eGsKey    = "sleep-inactive-battery-type"
 	foreignMask = "options nvidia NVreg_DynamicPowerManagement=0x02\n"

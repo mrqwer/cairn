@@ -61,11 +61,11 @@ func TestDetectArchNvidia(t *testing.T) {
 	if len(s.Swaps) != 3 {
 		t.Fatalf("swaps = %d", len(s.Swaps))
 	}
-	if sw := s.Swaps[2]; sw.Path != "/hibernate-swap/swapfile" || sw.Type != "file" ||
-		sw.SizeKiB != 25165820 || sw.UsedKiB != 0 || sw.Priority != -1 {
+	if sw := s.Swaps[2]; sw.Path != "/swap/hibernate.swap" || sw.Type != "file" ||
+		sw.SizeKiB != 8388604 || sw.UsedKiB != 0 || sw.Priority != -1 {
 		t.Errorf("swap[2] = %+v", sw)
 	}
-	if s.Resume != (Resume{Device: "259:3", Offset: 61112320}) {
+	if s.Resume != (Resume{Device: "259:3", Offset: 20971520}) {
 		t.Errorf("resume = %+v", s.Resume)
 	}
 	if !s.MemSleepDeep || s.InitramfsResume != Yes || !s.UPowerDropIns {

@@ -131,7 +131,7 @@ func TestRenderGroups(t *testing.T) {
 }
 
 func TestAllowedRootPath(t *testing.T) {
-	extra := []string{"/home/.nvidia-suspend"}
+	extra := []string{"/home/nvidia-suspend"}
 	cases := []struct {
 		path         string
 		apply, repai bool
@@ -145,7 +145,7 @@ func TestAllowedRootPath(t *testing.T) {
 		{"/etc/modprobe.d/nvidia-utils.conf", true, true},
 		{"/var/lib/cairn/host", true, true},
 		{"/var/lib/cairn/host/backup/%etc%x", true, true},
-		{"/home/.nvidia-suspend", true, true},
+		{"/home/nvidia-suspend", true, true},
 		{"/etc/passwd", false, false},
 		{"/etc/systemd/sleep.conf.d/../../passwd", false, false},
 		{"/var/lib/cairn/../../../etc/shadow", false, false},
@@ -163,7 +163,7 @@ func TestAllowedRootPath(t *testing.T) {
 		{"/boot/loader/entries/arch.conf", false, true},
 		{"/boot/loader/loader.conf", false, false},
 		{"/boot/loader/entries/sub/arch.conf", false, false},
-		{"/home/.nvidia-suspend/x", false, false},
+		{"/home/nvidia-suspend/x", false, false},
 		{"/home/other", false, false},
 		{"/var/lib/cairnx/host", false, false},
 		{"/usr/lib/systemd/system-sleep/other", false, false},
@@ -176,7 +176,7 @@ func TestAllowedRootPath(t *testing.T) {
 			t.Errorf("repair mode %s: got %v, want %v", c.path, got, c.repai)
 		}
 	}
-	if plan.AllowedRootPath("/home/.nvidia-suspend", nil, plan.ModeApply) {
+	if plan.AllowedRootPath("/home/nvidia-suspend", nil, plan.ModeApply) {
 		t.Error("extra path allowed without extra list")
 	}
 	if plan.AllowedRootPath(sleepConf, nil, "bogus") {
@@ -185,15 +185,15 @@ func TestAllowedRootPath(t *testing.T) {
 }
 
 func TestCheckRootActionKinds(t *testing.T) {
-	extra := []string{"/home/.nvidia-suspend"}
+	extra := []string{"/home/nvidia-suspend"}
 	cases := []struct {
 		name string
 		a    plan.Action
 		mode string
 		ok   bool
 	}{
-		{"makedir extra", plan.Action{Kind: plan.MakeDir, Path: "/home/.nvidia-suspend"}, plan.ModeApply, true},
-		{"write extra", plan.Action{Kind: plan.WriteFile, Path: "/home/.nvidia-suspend"}, plan.ModeApply, false},
+		{"makedir extra", plan.Action{Kind: plan.MakeDir, Path: "/home/nvidia-suspend"}, plan.ModeApply, true},
+		{"write extra", plan.Action{Kind: plan.WriteFile, Path: "/home/nvidia-suspend"}, plan.ModeApply, false},
 		{"repair remove unit", plan.Action{Kind: plan.RemoveFile, Path: "/etc/systemd/system/sleep-fallback.service"}, plan.ModeRepair, true},
 		{"repair write unit", plan.Action{Kind: plan.WriteFile, Path: "/etc/systemd/system/sleep-fallback.service"}, plan.ModeRepair, false},
 		{"apply remove unit", plan.Action{Kind: plan.RemoveFile, Path: "/etc/systemd/system/sleep-fallback.service"}, plan.ModeApply, false},
