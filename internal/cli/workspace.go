@@ -10,9 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/history"
@@ -72,10 +74,16 @@ var (
 		if !ok {
 			return false
 		}
-		fi, err := f.Stat()
-		return err == nil && fi.Mode()&os.ModeCharDevice != 0
+		return isTerminal(f)
 	}
 )
+
+// isTerminal reports whether f is a terminal: /dev/null and other character
+// devices answer no, only a tty accepts the termios query.
+func isTerminal(f *os.File) bool {
+	_, err := unix.IoctlGetTermios(int(f.Fd()), unix.TCGETS)
+	return err == nil
+}
 
 // wsRoot is the filesystem the workspace commands read and write.
 var wsRoot = fsx.Root{Dir: "/"}
@@ -166,13 +174,67 @@ func historyStore(d xdg.Dirs) history.Store {
 	return history.Store{Root: wsRoot, Path: filepath.Join(d.State, "history.jsonl"), AllowedRoots: []string{projectsDir(d)}}
 }
 
-// ask prints question and reports whether the answer is yes.
-func ask(in io.Reader, out io.Writer, question string) bool {
+// prompting is true while ask waits for an answer; main does not announce
+// "finishing the current step" for an interrupt that lands on a prompt.
+var prompting atomic.Bool
+
+// Prompting reports whether a confirmation prompt is waiting for input.
+func Prompting() bool { return prompting.Load() }
+
+// exitInterrupted is the exit code of a prompt abandoned with Ctrl-C (128+SIGINT).
+const exitInterrupted = 130
+
+// ask prints question and reports whether the answer is yes. When ctx is
+// cancelled (Ctrl-C, SIGTERM) before an answer arrives it returns an
+// ExitError with code 130 and nothing is applied; the goroutine still
+// reading in is left behind and ends with the process.
+func ask(ctx context.Context, in io.Reader, out io.Writer, question string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, &ExitError{Code: exitInterrupted}
+	}
 	_, _ = fmt.Fprint(out, question+" [y/N] ")
-	line, _ := bufio.NewReader(in).ReadString('\n')
-	ans := strings.ToLower(strings.TrimSpace(line))
-	return ans == "y" || ans == "yes"
+	prompting.Store(true)
+	defer prompting.Store(false)
+	lines := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(in).ReadString('\n')
+		lines <- line
+	}()
+	select {
+	case <-ctx.Done():
+		_, _ = fmt.Fprintln(out, "\ninterrupted, nothing changed")
+		return false, &ExitError{Code: exitInterrupted}
+	case line := <-lines:
+		ans := strings.ToLower(strings.TrimSpace(line))
+		return ans == "y" || ans == "yes", nil
+	}
 }
+
+// mayBeMidApply reports whether c, with its flags as parsed, can be in the
+// middle of changing the system or the tmux server.
+func mayBeMidApply(c *cobra.Command) bool {
+	if c == nil {
+		return false
+	}
+	switch c.CommandPath() {
+	case "cairn up", "cairn apply", "cairn open", "cairn adopt", "cairn undo",
+		"cairn history restore", "cairn host apply", "cairn host uninstall", "cairn host repair",
+		"cairn tmux service install", "cairn tmux service uninstall", "cairn init":
+		return true
+	case "cairn capture":
+		w, _ := c.Flags().GetBool("write")
+		return w
+	}
+	return false
+}
+
+// running is the command main is executing (set before its RunE).
+var running atomic.Pointer[cobra.Command]
+
+// MayBeMidApply reports whether the running command is one that can be
+// interrupted in the middle of applying changes, so that main may say it is
+// finishing the current step. Prompts and read-only commands are not.
+func MayBeMidApply() bool { return !Prompting() && mayBeMidApply(running.Load()) }
 
 // tmuxClientSocket is the socket path of the tmux client cairn runs in
 // (TMUX is "<socket path>,<pid>,<session>"), or "" outside tmux.

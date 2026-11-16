@@ -29,6 +29,11 @@ func run() int {
 		select {
 		case <-finished:
 		default:
+			// Only a command that can be in the middle of applying has a
+			// step to finish; a read-only command or a prompt just ends.
+			if !cli.MayBeMidApply() {
+				return
+			}
 			fmt.Fprintln(os.Stderr, "cairn: interrupted; finishing the current step and undoing partial changes (press Ctrl-C again to quit at once)")
 		}
 	}()

@@ -193,3 +193,23 @@ func TestDecodeErrorsNameTOMLKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadIgnoresStaleTempFiles(t *testing.T) {
+	root := setup(t, "demo.toml")
+	pdir := root.Path(filepath.Join(dirs.Config, "projects"))
+	data, err := os.ReadFile(filepath.Join("testdata", "projects", "demo.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Leftovers of WriteAtomic and CreateExclusive that died half way, plus
+	// editor droppings, none of which may load or be reported.
+	for _, name := range []string{".demo.toml.tmp123456", ".web.toml.tmp9", "web.toml.tmp", "web.toml~", "web.toml.swp", "web.tmp"} {
+		if err := os.WriteFile(filepath.Join(pdir, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ps, lerrs, err := workspace.Load(root, dirs)
+	if err != nil || len(lerrs) != 0 || len(ps) != 1 || ps[0].ID != "demo" {
+		t.Fatalf("got %+v %v %v", ps, lerrs, err)
+	}
+}

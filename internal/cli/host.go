@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -241,11 +240,9 @@ func (hs *hostState) renderSleepBlockers(ctx context.Context, w io.Writer) {
 	}
 }
 
-func confirm(in io.Reader, out io.Writer) bool {
-	_, _ = fmt.Fprint(out, "Apply these changes? [y/N] ")
-	line, _ := bufio.NewReader(in).ReadString('\n')
-	ans := strings.ToLower(strings.TrimSpace(line))
-	return ans == "y" || ans == "yes"
+// confirm asks whether to apply; see ask for the Ctrl-C behaviour.
+func confirm(ctx context.Context, in io.Reader, out io.Writer) (bool, error) {
+	return ask(ctx, in, out, "Apply these changes?")
 }
 
 // sudoApplyRoot runs `sudo <self> host apply-root --mode <m> [--yes]
@@ -342,9 +339,15 @@ func runHostOp(cmd *cobra.Command, mode string, yes, force bool) error {
 			return err
 		}
 	}
-	if userNeeded && !yes && !confirm(cmd.InOrStdin(), cmd.OutOrStdout()) {
-		cmd.Println("aborted")
-		return nil
+	if userNeeded && !yes {
+		ok, err := confirm(ctx, cmd.InOrStdin(), cmd.OutOrStdout())
+		if err != nil {
+			return err
+		}
+		if !ok {
+			cmd.Println("aborted")
+			return nil
+		}
 	}
 	var priv host.Privileged
 	if rootNeeded {

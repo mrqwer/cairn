@@ -400,9 +400,15 @@ func newProjectRmCmd() *cobra.Command {
 			if !yes && !interactive(cmd.InOrStdin()) {
 				return fmt.Errorf("removing %s needs confirmation: re-run with --yes", path)
 			}
-			if !yes && !ask(cmd.InOrStdin(), out, "Remove "+path+"?") {
-				_, _ = fmt.Fprintln(out, "nothing removed")
-				return nil
+			if !yes {
+				ok, err := ask(ctxOf(cmd), cmd.InOrStdin(), out, "Remove "+path+"?")
+				if err != nil {
+					return err
+				}
+				if !ok {
+					_, _ = fmt.Fprintln(out, "nothing removed")
+					return nil
+				}
 			}
 			// History first: the content is kept before the file goes.
 			if _, err := historyStore(dirs).Append("project.rm", "remove project "+id, []history.FileChange{

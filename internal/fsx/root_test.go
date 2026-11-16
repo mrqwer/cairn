@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/mrqwer/cairn/internal/fsx"
@@ -136,5 +137,32 @@ func TestLstatSeesSymlink(t *testing.T) {
 	}
 	if fi, err := r.Lstat("/l"); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
 		t.Fatalf("Lstat: %v %v", fi, err)
+	}
+}
+
+func TestCreateExclusiveOnFilesystemWithoutHardLinks(t *testing.T) {
+	for _, errno := range []error{syscall.EPERM, syscall.ENOTSUP, syscall.EOPNOTSUPP, syscall.EXDEV} {
+		restore := fsx.SetLink(func(string, string) error { return &os.LinkError{Op: "link", Err: errno} })
+		r := fsx.Root{Dir: t.TempDir()}
+		err := r.CreateExclusive("/a/f", []byte("x"), 0o644)
+		restore()
+		if err == nil || !strings.Contains(err.Error(), "does not support hard links") || !errors.Is(err, errno) {
+			t.Fatalf("%v: err %v", errno, err)
+		}
+		if errors.Is(err, fs.ErrExist) {
+			t.Fatalf("%v: must not look like an existing file", errno)
+		}
+		entries, _ := os.ReadDir(r.Path("/a"))
+		if len(entries) != 0 {
+			t.Fatalf("%v: left files behind: %v", errno, entries)
+		}
+	}
+	// An existing target keeps its ErrExist identity.
+	r := fsx.Root{Dir: t.TempDir()}
+	if err := r.CreateExclusive("/f", []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.CreateExclusive("/f", []byte("2"), 0o644); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("err %v", err)
 	}
 }

@@ -578,3 +578,16 @@ func TestUndoneIDs(t *testing.T) {
 		t.Fatal("non-undo event counted")
 	}
 }
+
+func TestAppendRejectsUndoKind(t *testing.T) {
+	s, _ := newStore(t)
+	if _, err := s.Append(history.KindUndo, "undo H-1: forged", nil); err == nil {
+		t.Fatal("Append accepted an undo event")
+	}
+	if all, err := s.List(0); err != nil || len(all) != 0 {
+		t.Fatalf("history changed: %v %v", all, err)
+	}
+	if _, err := s.Append("project.add", "x", nil); err != nil {
+		t.Fatal(err)
+	}
+}

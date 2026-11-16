@@ -303,7 +303,11 @@ func newWsApplyCmd() *cobra.Command {
 					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "destructive changes need confirmation: re-run with --yes")
 					return &ExitError{Code: 1}
 				}
-				if !ask(cmd.InOrStdin(), out, "Apply?") {
+				ok, err := ask(ctxOf(cmd), cmd.InOrStdin(), out, "Apply?")
+				if err != nil {
+					return err
+				}
+				if !ok {
 					_, _ = fmt.Fprintln(out, "nothing changed")
 					return nil
 				}

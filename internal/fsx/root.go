@@ -6,9 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // Root anchors absolute paths under Dir. Dir "/" is the real system.
@@ -117,8 +119,8 @@ func (r Root) CreateExclusive(p string, data []byte, perm fs.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Link(name, full); err != nil {
-		return err
+	if err := link(name, full); err != nil {
+		return linkError(full, err)
 	}
 	if err := os.Remove(name); err != nil {
 		return err
@@ -129,6 +131,26 @@ func (r Root) CreateExclusive(p string, data []byte, perm fs.FileMode) error {
 	}
 	defer func() { _ = d.Close() }()
 	return d.Sync()
+}
+
+// link is os.Link; tests replace it to simulate a filesystem without hard links.
+var link = os.Link
+
+// linkError turns the errors of a filesystem that cannot hard-link into one
+// that says so. There is deliberately no fallback: creating p with O_EXCL and
+// writing into it would expose a partly written file after a crash, and a
+// rename would silently replace an existing p. An existing p (fs.ErrExist)
+// and other errors pass through unchanged.
+func linkError(p string, err error) error {
+	if errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	for _, e := range []error{syscall.EPERM, syscall.ENOTSUP, syscall.EOPNOTSUPP, syscall.EXDEV} {
+		if errors.Is(err, e) {
+			return fmt.Errorf("cannot create %s without overwriting: the filesystem does not support hard links (%w); put the config directory on a filesystem that does, or create the file by hand", p, err)
+		}
+	}
+	return err
 }
 
 // Header returns the marker line placed at the top of files managed by cairn.

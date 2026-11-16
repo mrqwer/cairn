@@ -136,8 +136,13 @@ func (s Store) lock() (*os.File, func(), error) {
 // Append records an event and fsyncs. The file is locked exclusively while the
 // next ID is computed and the line written, so concurrent processes never
 // produce the same ID. IDs are unique and ordered per file. A torn trailing
-// line is terminated first so the new record is not merged into it.
+// line is terminated first so the new record is not merged into it. Kind
+// "undo" is refused: only Undo writes undo events (they carry the
+// "undo <id>: ..." summary UndoneIDs relies on).
 func (s Store) Append(kind, summary string, files []FileChange) (Event, error) {
+	if kind == KindUndo {
+		return Event{}, errors.New("history: undo events are written by Undo only")
+	}
 	f, unlock, err := s.lock()
 	if err != nil {
 		return Event{}, err

@@ -18,6 +18,7 @@ func NewRootCmd() *cobra.Command {
 		// main cancels the context on SIGINT/SIGTERM; a command that has
 		// not started yet does not start.
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			running.Store(cmd)
 			return ctxOf(cmd).Err()
 		},
 	}

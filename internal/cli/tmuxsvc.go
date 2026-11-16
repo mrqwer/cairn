@@ -70,24 +70,33 @@ func (s *svcState) applyPlan(cmd *cobra.Command, p plan.Plan, title string, yes,
 	if len(p.Pending()) == 0 {
 		return nil
 	}
-	if !yes && !confirm(cmd.InOrStdin(), out) {
-		_, _ = fmt.Fprintln(out, "aborted, nothing changed")
-		return nil
+	if !yes {
+		ok, err := confirm(ctxOf(cmd), cmd.InOrStdin(), out)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			_, _ = fmt.Fprintln(out, "aborted, nothing changed")
+			return nil
+		}
 	}
 	return plan.Apply(ctxOf(cmd), p, s.env, plan.Options{UserOnly: true, Force: force})
 }
 
 // recordedSocket is the socket of the installed, cairn-managed unit.
-func (s *svcState) recordedSocket() (string, bool) {
+// recorded is false when the inventory has no such unit. known is false when
+// it has one but the file is missing or unreadable, so the socket it was
+// installed for cannot be told.
+func (s *svcState) recordedSocket() (socket string, recorded, known bool) {
 	path := filepath.Join(s.unitDir, workspace.TmuxUnit)
 	if _, ok := s.inv.Get(path); !ok {
-		return "", false
+		return "", false, false
 	}
 	b, err := wsRoot.ReadFile(path)
 	if err != nil {
-		return "", false
+		return "", true, false
 	}
-	return workspace.RecordedSocket(b), true
+	return workspace.RecordedSocket(b), true, true
 }
 
 func socketLabel(s string) string {
@@ -126,7 +135,14 @@ ends that server and its sessions.`,
 				return err
 			}
 			p := plan.Resolve(workspace.ServiceActions(self, socket, s.unitDir), wsRoot, s.inv)
-			if old, ok := s.recordedSocket(); ok && old != socket {
+			switch old, recorded, known := s.recordedSocket(); {
+			case recorded && !known:
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "replaces the recorded units whose socket is unknown (%s is missing or unreadable); the new units run %s\n",
+					workspace.TmuxUnit, socketLabel(socket))
+				if yes && !force {
+					return fmt.Errorf("the socket of the existing units is unknown (%s is missing or unreadable); re-run with --force or without --yes to replace them", workspace.TmuxUnit)
+				}
+			case recorded && old != socket:
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "replaces units for socket %s (the new units run %s)\n", socketLabel(old), socketLabel(socket))
 				if yes && !force {
 					return fmt.Errorf("existing units were installed for socket %s; re-run with --force or without --yes to replace them", socketLabel(old))
