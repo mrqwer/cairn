@@ -353,9 +353,14 @@ func newWsApplyCmd() *cobra.Command {
 					_, _ = fmt.Fprintln(out, "nothing changed")
 					return nil
 				}
-				if unlock, err = lockApply(cmd); err != nil {
-					return err
+				// Re-take the lock; a failure must not clobber unlock with nil
+				// (the deferred call would panic).
+				relock, lerr := lockApply(cmd)
+				if lerr != nil {
+					unlock = func() {}
+					return lerr
 				}
+				unlock = relock
 			}
 			_, _ = fmt.Fprintln(out)
 			return renderResults(out, reconcile.Apply(ctxOf(cmd), r.drv, r.ws.projects, ops))

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,4 +151,53 @@ func TestApplyLockHeldByAnotherProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	unlock()
+}
+
+// readerFunc lets a test act at the moment the prompt reads the answer.
+type readerFunc func(p []byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+
+// The lock is released while the prompt waits; if another cairn takes it
+// meanwhile, apply must fail with the lock message, not panic.
+func TestApplyPruneRelockFailureIsAnErrorNotAPanic(t *testing.T) {
+	dir, fd := wsTestEnv(t)
+	addProject(t, "demo", dir)
+	mustRun(t, "", "up")
+	s := fd.session(t, "demo")
+	s.windows = append(s.windows, &fWindow{id: "@90", key: "demo/old", name: "old",
+		panes: []*fPane{{id: "%90", key: "demo/old/1", pid: 990, cmd: "bash"}}})
+	fd.idle = true
+	old := applyLockWait
+	applyLockWait = 100 * time.Millisecond
+	t.Cleanup(func() { applyLockWait = old })
+	interactive = func(io.Reader) bool { return true }
+	t.Cleanup(func() { interactive = func(io.Reader) bool { return false } })
+
+	var unlock func()
+	answered := false
+	in := readerFunc(func(p []byte) (int, error) {
+		if answered {
+			return 0, io.EOF
+		}
+		answered = true
+		var err error
+		if unlock, err = lockApply(NewRootCmd()); err != nil { // another cairn wins the lock
+			t.Error(err)
+		}
+		return copy(p, "y\n"), nil
+	})
+	cmd := NewRootCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetIn(in)
+	cmd.SetArgs([]string{"apply", "--prune"})
+	err := cmd.Execute()
+	if unlock != nil {
+		unlock()
+	}
+	if err == nil || !strings.Contains(err.Error(), "apply.lock") || fd.called("Kill") {
+		t.Fatalf("err=%v kills=%v\n%s", err, fd.calls, buf.String())
+	}
 }
