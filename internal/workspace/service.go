@@ -55,6 +55,12 @@ func ServiceActions(self, socket, userUnitDir string) []plan.Action {
 		tmux += " -L " + socket
 		up += " --socket " + socket
 	}
+	// The start is idempotent: a server that already holds cairn-base (it
+	// predates the unit, or the unit is restarted) is left as it is, instead
+	// of failing with "duplicate session" and taking cairn-up with it. No
+	// -f: the user's tmux.conf must load. The shell words are the validated
+	// socket name and constants, nothing user-controlled and no "$" or "%".
+	start := "ExecStart=/bin/sh -c '" + tmux + " has-session -t =" + baseSession + " 2>/dev/null || exec " + tmux + " new-session -d -s " + baseSession + "'\n"
 	// Without a socket the unit shares the owner's default tmux server, which
 	// may predate it and hold hand-made sessions: never kill-server there.
 	// KillMode=control-group already ends a server the unit started itself.
@@ -67,9 +73,9 @@ func ServiceActions(self, socket, userUnitDir string) []plan.Action {
 Description=tmux server for cairn workspaces
 
 [Service]
-Type=forking
-ExecStart=` + tmux + ` -f /dev/null new-session -d -s ` + baseSession + `
-ExecStartPost=` + tmux + ` set -g exit-empty off
+Type=oneshot
+RemainAfterExit=yes
+` + start + `ExecStartPost=` + tmux + ` set -g exit-empty off
 ` + stop + `KillMode=control-group
 
 [Install]
@@ -153,11 +159,14 @@ func QueryUnits(ctx context.Context, r execx.Runner, root fsx.Root, userUnitDir 
 // was written for ("" for the default server).
 func RecordedSocket(unit []byte) string {
 	for _, line := range strings.Split(string(unit), "\n") {
-		if rest, ok := strings.CutPrefix(line, "ExecStart=/usr/bin/env tmux "); ok {
-			if f := strings.Fields(rest); len(f) > 1 && f[0] == "-L" {
-				return f[1]
+		if strings.HasPrefix(line, "ExecStart=") {
+			if m := recordedSocketRe.FindStringSubmatch(line); m != nil {
+				return m[1]
 			}
 		}
 	}
 	return ""
 }
+
+// recordedSocketRe finds the first "tmux -L <socket>" of an ExecStart line.
+var recordedSocketRe = regexp.MustCompile(`/usr/bin/env tmux -L (\S+)`)

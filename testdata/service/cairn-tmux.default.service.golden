@@ -3,8 +3,9 @@
 Description=tmux server for cairn workspaces
 
 [Service]
-Type=forking
-ExecStart=/usr/bin/env tmux -f /dev/null new-session -d -s cairn-base
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/usr/bin/env tmux has-session -t =cairn-base 2>/dev/null || exec /usr/bin/env tmux new-session -d -s cairn-base'
 ExecStartPost=/usr/bin/env tmux set -g exit-empty off
 KillMode=control-group
 

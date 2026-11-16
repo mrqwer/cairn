@@ -96,6 +96,31 @@ func TestServiceActionsShape(t *testing.T) {
 	}
 }
 
+func TestServiceTmuxUnitStartIsIdempotentAndLoadsUserConfig(t *testing.T) {
+	for _, sock := range []string{"", "work"} {
+		unit := string(fileContent(t, ServiceActions(testSelf, sock, testUnitDir), "cairn-tmux.service"))
+		if strings.Contains(unit, "-f ") || strings.Contains(unit, "/dev/null new-session") {
+			t.Errorf("socket %q: the user's tmux.conf must load, no -f:\n%s", sock, unit)
+		}
+		l := "tmux"
+		if sock != "" {
+			l = "tmux -L " + sock
+		}
+		want := "ExecStart=/bin/sh -c '/usr/bin/env " + l + " has-session -t =cairn-base 2>/dev/null || exec /usr/bin/env " + l + " new-session -d -s cairn-base'\n"
+		if !strings.Contains(unit, want) {
+			t.Errorf("socket %q: want line %q in\n%s", sock, want, unit)
+		}
+		if !strings.Contains(unit, "Type=oneshot\nRemainAfterExit=yes\n") {
+			t.Errorf("socket %q: a start that may exit with nothing to fork needs oneshot+RemainAfterExit:\n%s", sock, unit)
+		}
+		for _, line := range strings.Split(unit, "\n") {
+			if strings.HasPrefix(line, "ExecStart") && strings.ContainsAny(line, "$%;`\"") {
+				t.Errorf("systemd or shell metacharacter in %q", line)
+			}
+		}
+	}
+}
+
 func TestServiceRejectsUnsafeInput(t *testing.T) {
 	for _, self := range []string{"/opt/my cairn/cairn", "/opt/c%h/cairn", "/o/c\"x", "/o/$x", "/o/a;b", "/o/`x`", "/o/a'b", "/o/a\\b", "relative/cairn", ""} {
 		if CheckServiceInput(self, "") == nil || ServiceActions(self, "", testUnitDir) != nil {

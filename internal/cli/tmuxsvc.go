@@ -119,7 +119,11 @@ replaces the existing ones and needs --force or an interactive confirmation.
 Prefer an explicit --socket: its unit stops its own server with kill-server.
 On the default socket the unit never runs kill-server, but if it started the
 server itself (no tmux was running at login) stopping the unit or logging out
-ends that server and its sessions.`,
+ends that server and its sessions.
+
+The unit starts the server with your own tmux.conf (no -f) and only when no
+server with the session cairn-base is running yet, so restarting it or
+installing it beside a running server is harmless.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			self, err := selfPath()
