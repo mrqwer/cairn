@@ -10,7 +10,7 @@ cairn up
 cairn open api
 ```
 
-`project add` writes `~/.config/cairn/projects/api.toml`. `up` creates every active
+The root directory must exist. `project add` writes `~/.config/cairn/projects/api.toml`. `up` creates every active
 project's session. `open` switches to it (or attaches). Templates: `dev`, `service`, `shell`.
 
 ## After a reboot
@@ -55,7 +55,7 @@ Without the last two, a later `cairn up` on the default server creates `demo` th
 ## Check health
 
 `cairn doctor workspace` is read-only. It checks the tmux version, config files, project roots,
-drift from config (`cairn apply` fixes it) and the optional service.
+drift from config (`cairn apply` fixes it; clashes need `cairn plan` and a manual fix) and the optional service.
 
 ## Playbook
 

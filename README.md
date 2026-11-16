@@ -20,6 +20,7 @@ Needs Go, tmux 3.2+ and a Linux user session. Full guide: [docs/guide/workspace.
 
 ```
 go build -o cairn ./cmd/cairn          # then put it on PATH
+mkdir -p ~/code/api                    # the project root must exist
 cairn project add api --root ~/code/api --template dev
 cairn up                               # create every project's session
 cairn open api                         # switch to it
