@@ -107,8 +107,10 @@ func newSvcInstallCmd() *cobra.Command {
 
 There is one set of units per user: installing for a different socket
 replaces the existing ones and needs --force or an interactive confirmation.
-Only units for an explicit socket stop their server with kill-server; the
-default-socket unit never kills your default tmux server.`,
+Prefer an explicit --socket: its unit stops its own server with kill-server.
+On the default socket the unit never runs kill-server, but if it started the
+server itself (no tmux was running at login) stopping the unit or logging out
+ends that server and its sessions.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			self, err := selfPath()
