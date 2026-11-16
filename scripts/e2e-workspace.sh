@@ -4,21 +4,24 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-go build ./...
+bin_dir=$(mktemp -d)
+trap 'rm -rf "$bin_dir"' EXIT
+go build -o "$bin_dir/cairn" ./cmd/cairn
 go test -tags e2e -count=1 ./internal/e2e/
 
-cat <<'MSG'
+cat <<MSG
 
-Try it by hand beside your own tmux (separate server "try"):
+Try it by hand beside your own tmux (separate server "try"). The binary built
+above is deleted on exit; use your own cairn, or rebuild: go build -o /tmp/cairn ./cmd/cairn
 
-  mkdir -p /tmp/demo
-  cairn project add demo --root /tmp/demo
+  mkdir -p /tmp/cairn-try
+  cairn project add cairn-try --root /tmp/cairn-try
   cairn --socket try up
-  cairn --socket try open demo
+  cairn --socket try open cairn-try
 
 Clean up:
 
   tmux -L try kill-server
-  cairn project archive demo
-  cairn project rm demo
+  cairn project archive cairn-try
+  cairn project rm cairn-try --yes
 MSG

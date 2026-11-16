@@ -63,6 +63,6 @@ drift from config (`cairn apply` fixes it; clashes need `cairn plan` and a manua
 |---|---|
 | How many sessions? | One session per project. Name it after the project (`session` in the config). |
 | When does a window get its own entry? | When it runs a long process (server, watcher, logs) or needs its own layout. Everything else is a pane in an existing window. |
-| Which restart policy? | `never` for shells and editors (default). `on-failure` for services (default for `role = "service"`). `always` only for processes that must never stay dead. |
+| Which restart policy? | `never` for shells and editors (default). `on-failure` for services (default for `role = "service"`); it also respawns a pane killed by a signal (Ctrl-C, SIGTERM, OOM). `always` only for processes that must never stay dead. |
 | What does `apply --prune` kill? | Managed windows and panes that left the config, and only when they are idle shells. Busy panes, hand-made windows and other sessions are kept. It asks first; `--yes` skips the question. |
 | A root directory is gone? | `cairn doctor workspace` warns. Fix the path with `cairn project edit <id>`, or `cairn project archive <id>`. |

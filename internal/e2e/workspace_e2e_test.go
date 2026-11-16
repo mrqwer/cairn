@@ -186,6 +186,9 @@ func defaultSessions() (string, bool) {
 	return string(out), err == nil
 }
 
+// The tests share one tmux socket (cairn-e2e-<pid>), each starting and killing
+// the server in newEnv. They must stay sequential: never call t.Parallel.
+
 func TestWorkspaceLifecycle(t *testing.T) {
 	before, hadDefault := defaultSessions()
 	e := newEnv(t)
@@ -290,15 +293,10 @@ func TestPruneKillsIdleKeepsBusy(t *testing.T) {
 	waitFor(t, "run pane busy", func() bool {
 		return strings.TrimSpace(e.tmux("display", "-p", "-t", "demo:run.0", "#{pane_current_command}")) == "sleep"
 	})
-	// drop both panes from the config: run window and the split pane
-	b, _ := os.ReadFile(e.projectFile("demo"))
-	s := string(b)
-	i := strings.Index(s, "[[windows.panes]]\nsplit")
-	if i < 0 {
-		t.Fatalf("no split pane in:\n%s", s)
-	}
-	s = s[:i]
-	if err := os.WriteFile(e.projectFile("demo"), []byte(s), 0o644); err != nil {
+	// the config now has only the editor pane: the split pane (idle shell)
+	// and the whole run window (busy) left it
+	cfg := fmt.Sprintf("id = \"demo\"\nname = \"demo\"\nroot = %q\n\n[[windows]]\nkey = \"code\"\nname = \"code\"\n\n[[windows.panes]]\nrole = \"editor\"\nrun = [\"sleep\", \"600\"]\nrestart = \"on-failure\"\n", e.root)
+	if err := os.WriteFile(e.projectFile("demo"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out := e.cairn("apply", "--prune", "--yes")
@@ -326,8 +324,11 @@ func TestDoctorWorkspaceReadOnly(t *testing.T) {
 			e.tmux("list-sessions", "-F", "#{session_id} #{session_name} #{@cairn_s}")
 	}
 	before := snap()
-	out, _ := e.cmd(binPath, "doctor", "workspace") // exit code reflects findings, not a failure
-	contains(t, out, "tmux")
+	out, err := e.cmd(binPath, "doctor", "workspace")
+	if err != nil {
+		t.Fatalf("doctor workspace: %v\n%s", err, out)
+	}
+	contains(t, out, "Workspace in sync")
 	if after := snap(); after != before {
 		t.Fatalf("doctor workspace changed tmux state\nbefore:\n%s\nafter:\n%s", before, after)
 	}
