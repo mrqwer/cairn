@@ -2,7 +2,6 @@ package tmux
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +33,9 @@ type Session struct {
 // Snapshot is the state of a tmux server.
 type Snapshot struct {
 	Sessions []Session
+	// Skipped holds list lines that could not be parsed (e.g. a tab or
+	// newline in a foreign pane's path); they are left out, not fatal.
+	Skipped []string
 }
 
 const (
@@ -44,7 +46,11 @@ const (
 
 // noServer reports whether tmux output says there is no server to talk to.
 func noServer(out string) bool {
-	return strings.Contains(out, "no server running") || strings.Contains(out, "error connecting")
+	if strings.Contains(out, "no server running") {
+		return true
+	}
+	return strings.Contains(out, "error connecting") &&
+		(strings.Contains(out, "No such file or directory") || strings.Contains(out, "Connection refused"))
 }
 
 // list runs a list command; ok is false when no server is running.
@@ -93,39 +99,24 @@ func (c Client) Snapshot(ctx context.Context) (Snapshot, error) {
 
 	panes := map[string][]Pane{}
 	for _, l := range pl {
-		f, err := fields(l, 13)
-		if err != nil {
-			return Snapshot{}, err
-		}
-		if f[4] == "" { // a dead pane has no pid
-			f[4] = "0"
-		}
-		n, err := ints(f, 2, 4, 5, 6, 7, 8)
-		if err != nil {
-			return Snapshot{}, fmt.Errorf("tmux: pane line %q: %w", l, err)
-		}
-		status := 0
-		if f[10] != "" {
-			if status, err = strconv.Atoi(f[10]); err != nil {
-				return Snapshot{}, fmt.Errorf("tmux: pane line %q: %w", l, err)
-			}
+		f, n, ok := parseLine(l, 13, 2, 4, 5, 6, 7, 8, 10)
+		if !ok {
+			snap.Skipped = append(snap.Skipped, l)
+			continue
 		}
 		panes[f[0]] = append(panes[f[0]], Pane{
 			ID: f[1], Key: markerKey(f[3], 2), Index: n[0], PID: n[1],
 			Left: n[2], Top: n[3], W: n[4], H: n[5],
-			Dead: f[9] == "1", DeadStatus: status, Cwd: f[11], Cmd: f[12],
+			Dead: f[9] == "1", DeadStatus: n[6], Cwd: f[11], Cmd: f[12],
 		})
 	}
 
 	windows := map[string][]Window{}
 	for _, l := range wl {
-		f, err := fields(l, 7)
-		if err != nil {
-			return Snapshot{}, err
-		}
-		n, err := ints(f, 2, 5, 6)
-		if err != nil {
-			return Snapshot{}, fmt.Errorf("tmux: window line %q: %w", l, err)
+		f, n, ok := parseLine(l, 7, 2, 5, 6)
+		if !ok {
+			snap.Skipped = append(snap.Skipped, l)
+			continue
 		}
 		ps := panes[f[1]]
 		sort.Slice(ps, func(i, j int) bool { return ps[i].Index < ps[j].Index })
@@ -135,13 +126,10 @@ func (c Client) Snapshot(ctx context.Context) (Snapshot, error) {
 	}
 
 	for _, l := range sl {
-		f, err := fields(l, 4)
-		if err != nil {
-			return Snapshot{}, err
-		}
-		n, err := ints(f, 3)
-		if err != nil {
-			return Snapshot{}, fmt.Errorf("tmux: session line %q: %w", l, err)
+		f, n, ok := parseLine(l, 4, 3)
+		if !ok {
+			snap.Skipped = append(snap.Skipped, l)
+			continue
 		}
 		ws := windows[f[0]]
 		sort.Slice(ws, func(i, j int) bool { return ws[i].Index < ws[j].Index })
@@ -152,24 +140,24 @@ func (c Client) Snapshot(ctx context.Context) (Snapshot, error) {
 	return snap, nil
 }
 
-// fields splits a tab-separated line into exactly n fields; extra tabs end up
-// in the last field.
-func fields(line string, n int) ([]string, error) {
-	f := strings.SplitN(line, "\t", n)
+// parseLine splits a tab-separated line into exactly n fields and parses the
+// fields at idx as integers (an empty field is 0: tmux prints no pid or
+// status for some panes). ok is false for a malformed line.
+func parseLine(line string, n int, idx ...int) (f []string, nums []int, ok bool) {
+	f = strings.Split(line, "\t")
 	if len(f) != n {
-		return nil, fmt.Errorf("tmux: want %d fields, got %d in %q", n, len(f), line)
+		return nil, nil, false
 	}
-	return f, nil
-}
-
-func ints(f []string, idx ...int) ([]int, error) {
-	out := make([]int, len(idx))
+	nums = make([]int, len(idx))
 	for i, k := range idx {
+		if f[k] == "" {
+			continue
+		}
 		v, err := strconv.Atoi(f[k])
 		if err != nil {
-			return nil, err
+			return nil, nil, false
 		}
-		out[i] = v
+		nums[i] = v
 	}
-	return out, nil
+	return f, nums, true
 }

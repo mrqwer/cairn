@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -12,9 +13,27 @@ import (
 // procFS reads files under /proc; tests replace it.
 var procFS = os.ReadFile
 
-// PaneIdle reports whether the pane process pid sits at its prompt: it owns
-// the terminal's foreground process group (tpgid == pgrp) and has no
-// children. A process that no longer exists counts as idle.
+// shells are the program names accepted as an interactive shell, besides the
+// basename of $SHELL.
+var shells = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "fish": true, "dash": true, "ksh": true,
+	"mksh": true, "tcsh": true, "csh": true, "nu": true, "elvish": true, "xonsh": true,
+}
+
+func isShell(comm string) bool {
+	comm = strings.TrimPrefix(comm, "-")
+	if shells[comm] {
+		return true
+	}
+	sh := filepath.Base(os.Getenv("SHELL"))
+	return sh != "." && sh != "/" && comm == sh
+}
+
+// PaneIdle reports whether the pane process pid is a shell sitting at its
+// prompt: its comm is a known shell (a program exec'd directly as the pane
+// process, such as "sleep" or "nvim", is never idle), it owns the terminal's
+// foreground process group (tpgid == pgrp) and it has no children. A process
+// that no longer exists counts as idle.
 func (c Client) PaneIdle(pid int) (bool, error) {
 	statPath := fmt.Sprintf("/proc/%d/stat", pid)
 	stat, err := procFS(statPath)
@@ -42,16 +61,33 @@ func (c Client) PaneIdle(pid int) (bool, error) {
 	if tpgid != pgrp {
 		return false, nil
 	}
-	children, err := procFS(fmt.Sprintf("/proc/%d/task/%d/children", pid, pid))
+	comm, gone, err := readMore(statPath, fmt.Sprintf("/proc/%d/comm", pid))
+	if gone || err != nil {
+		return gone, err
+	}
+	if !isShell(strings.TrimSpace(comm)) {
+		return false, nil
+	}
+	children, gone, err := readMore(statPath, fmt.Sprintf("/proc/%d/task/%d/children", pid, pid))
+	if gone || err != nil {
+		return gone, err
+	}
+	return strings.TrimSpace(children) == "", nil
+}
+
+// readMore reads another /proc file of a process whose stat was readable.
+// gone is true when the process vanished in between; a missing file of a
+// live process (e.g. a kernel without the children file) is an error.
+func readMore(statPath, path string) (data string, gone bool, err error) {
+	b, err := procFS(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		// Gone between the two reads, or a kernel without the children file.
 		if _, serr := procFS(statPath); errors.Is(serr, fs.ErrNotExist) {
-			return true, nil
+			return "", true, nil
 		}
-		return false, fmt.Errorf("tmux: cannot read children of %d: %w", pid, err)
+		return "", false, fmt.Errorf("tmux: cannot read %s: %w", path, err)
 	}
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
-	return strings.TrimSpace(string(children)) == "", nil
+	return string(b), false, nil
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Runner runs a command and returns its combined output.
@@ -21,6 +22,9 @@ type OSRunner struct {
 
 func (r OSRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	// A grandchild holding the output pipe open must not block Run forever
+	// after ctx is cancelled.
+	cmd.WaitDelay = 5 * time.Second
 	if r.Env != nil {
 		cmd.Env = r.Env
 	}

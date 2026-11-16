@@ -68,18 +68,114 @@ func TestNewSessionArgs(t *testing.T) {
 }
 
 func TestNewSessionExplicitSize(t *testing.T) {
-	first := "tmux new-session -d -P -F #{session_id} #{window_id} #{pane_id} -s demo -x 120 -y 40 -n main"
 	want := [][]string{
 		{"tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}", "-s", "demo", "-x", "120", "-y", "40", "-n", "main"},
+		{"tmux", "set", "-t", "$0", "@cairn_s", "demo"},
+		{"tmux", "set", "-w", "-t", "@1", "@cairn_w", "demo/main"},
 		{"tmux", "set", "-w", "-t", "@1", "automatic-rename", "off"},
 	}
-	f := fake(map[string]string{first: "$0 @1 %2"})
+	f := fake(map[string]string{strings.Join(want[0], " "): "$0 @1 %2"})
 	okCalls(f, want[1:])
-	if _, _, _, err := (Client{R: f}).NewSession(context.Background(), "demo", 120, 40, WindowSpec{Name: "main"}); err != nil {
+	if _, _, _, err := (Client{R: f}).NewSession(context.Background(), "demo", 120, 40, WindowSpec{Key: "demo/main", Name: "main"}); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(f.Calls, want) {
 		t.Fatalf("calls\n got %q\nwant %q", f.Calls, want)
+	}
+}
+
+func TestEscSemi(t *testing.T) {
+	// tmux drops a trailing ';' as a command separator; one '\' before it keeps
+	// it, and a '\' already there must survive (verified on 3.8).
+	cases := map[string]string{
+		"":     "",
+		"a":    "a",
+		`a\`:   `a\`,
+		"a;b":  "a;b",
+		"a;":   `a\;`,
+		";":    `\;`,
+		"a;;":  `a;\;`,
+		`a\;`:  `a\\;`,
+		`a\\;`: `a\\\;`,
+	}
+	for in, want := range cases {
+		if got := escSemi(in); got != want {
+			t.Errorf("escSemi(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestUserValuesEscaped(t *testing.T) {
+	want := [][]string{
+		{"tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}",
+			"-s", `s##1\;`, "-x", "200", "-y", "50", "-n", `a##{x}\;`, "-c", `/home/u/c##p\;`,
+			"-e", `K=#v\;`, "--", "sh", "-c", `echo hi\;`, `#{x}`},
+		{"tmux", "set", "-p", "-t", "%2", "remain-on-exit", "on"},
+		{"tmux", "set", "-t", "$0", "@cairn_s", "demo"},
+		{"tmux", "set", "-w", "-t", "@1", "@cairn_w", "demo/main"},
+		{"tmux", "set", "-w", "-t", "@1", "automatic-rename", "off"},
+		{"tmux", "set", "-p", "-t", "%2", "@cairn_p", "demo/main/1"},
+	}
+	f := fake(map[string]string{strings.Join(want[0], " "): "$0 @1 %2"})
+	okCalls(f, want[1:])
+	_, _, _, err := Client{R: f}.NewSession(context.Background(), "s#1;", 0, 0, WindowSpec{
+		Key: "demo/main", Name: "a#{x};",
+		PaneSpec: PaneSpec{Key: "demo/main/1", Cwd: "/home/u/c#p;", Env: map[string]string{"K": "#v;"},
+			Argv: []string{"sh", "-c", "echo hi;", "#{x}"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(f.Calls, want) {
+		t.Fatalf("calls\n got %q\nwant %q", f.Calls, want)
+	}
+}
+
+func TestKeyAndArgvValidation(t *testing.T) {
+	ctx := context.Background()
+	f := &execx.FakeRunner{}
+	c := Client{R: f}
+	for _, key := range []string{"", "demo", "demo/a/b", "/a", "demo/"} {
+		if _, _, _, err := c.NewSession(ctx, "demo", 0, 0, WindowSpec{Key: key, Name: "a"}); err == nil {
+			t.Errorf("NewSession key %q accepted", key)
+		}
+		if _, _, err := c.NewWindow(ctx, "$0", WindowSpec{Key: key, Name: "a"}); err == nil {
+			t.Errorf("NewWindow key %q accepted", key)
+		}
+	}
+	bad := PaneSpec{Key: "demo/a/1", Argv: []string{"echo", ""}}
+	if _, _, _, err := c.NewSession(ctx, "demo", 0, 0, WindowSpec{Key: "demo/a", Name: "a", PaneSpec: bad}); err == nil {
+		t.Error("empty argv element accepted by NewSession")
+	}
+	if _, _, err := c.NewWindow(ctx, "$0", WindowSpec{Key: "demo/a", Name: "a", PaneSpec: bad}); err == nil {
+		t.Error("empty argv element accepted by NewWindow")
+	}
+	if _, err := c.SplitPane(ctx, "%1", "h", 50, bad); err == nil {
+		t.Error("empty argv element accepted by SplitPane")
+	}
+	if err := c.RespawnPane(ctx, "%1", []string{""}); err == nil {
+		t.Error("empty argv element accepted by RespawnPane")
+	}
+	if _, err := c.SplitPane(ctx, "%1", "h", 50, PaneSpec{Key: "demo/a"}); err == nil {
+		t.Error("pane key with one slash accepted")
+	}
+	if len(f.Calls) != 0 {
+		t.Fatalf("tmux called: %q", f.Calls)
+	}
+}
+
+func TestSessionIDByKey(t *testing.T) {
+	f := snapFake(
+		execx.Response{Out: []byte("$0\tdemo-old\t\t0\n$4\tdemo\tdemo\t0\n")},
+		execx.Response{}, execx.Response{},
+	)
+	c := Client{R: f, Socket: "s"}
+	id, ok, err := c.SessionIDByKey(context.Background(), "demo")
+	if err != nil || !ok || id != "$4" {
+		t.Fatalf("%q %v %v", id, ok, err)
+	}
+	if _, ok, err := c.SessionIDByKey(context.Background(), "web"); err != nil || ok {
+		t.Fatalf("web: %v %v", ok, err)
 	}
 }
 
@@ -164,7 +260,10 @@ func TestSimpleOps(t *testing.T) {
 		{func(c Client) error { return c.KillWindow(ctx, "@1") }, []string{"kill-window", "-t", "@1"}},
 		{func(c Client) error { return c.KillPane(ctx, "%1") }, []string{"kill-pane", "-t", "%1"}},
 		{func(c Client) error { return c.KillSession(ctx, "$1") }, []string{"kill-session", "-t", "$1"}},
-		{func(c Client) error { return c.SwitchClient(ctx, "demo") }, []string{"switch-client", "-t", "demo"}},
+		{func(c Client) error { return c.SetOption(ctx, "pane", "%1", "@x", "v;") }, []string{"set", "-p", "-t", "%1", "@x", `v\;`}},
+		{func(c Client) error { return c.RespawnPane(ctx, "%1", []string{"echo", "a;"}) }, []string{"respawn-pane", "-k", "-t", "%1", "--", "echo", `a\;`}},
+		{func(c Client) error { return c.SwitchClient(ctx, "demo") }, []string{"switch-client", "-t", "=demo"}},
+		{func(c Client) error { return c.SwitchClient(ctx, "$4") }, []string{"switch-client", "-t", "$4"}},
 	}
 	for _, tc := range cases {
 		want := append([]string{"tmux", "-L", "s"}, tc.want...)
@@ -224,10 +323,10 @@ func TestEnvStripped(t *testing.T) {
 }
 
 func TestAttachCommand(t *testing.T) {
-	if got := AttachCommand("s", "demo"); !reflect.DeepEqual(got, []string{"tmux", "-L", "s", "attach-session", "-t", "demo"}) {
+	if got := AttachCommand("s", "demo"); !reflect.DeepEqual(got, []string{"tmux", "-L", "s", "attach-session", "-t", "=demo"}) {
 		t.Fatalf("%q", got)
 	}
-	if got := AttachArgs("", "demo"); !reflect.DeepEqual(got, []string{"tmux", "attach-session", "-t", "demo"}) {
+	if got := AttachArgs("", "demo"); !reflect.DeepEqual(got, []string{"tmux", "attach-session", "-t", "=demo"}) {
 		t.Fatalf("%q", got)
 	}
 }

@@ -75,14 +75,14 @@ func (c Client) run(ctx context.Context, args ...string) error {
 	return err
 }
 
-// AttachCommand returns the argv that attaches a terminal to session; the CLI
-// execs it (it is not run through a Runner).
+// AttachCommand returns the argv that attaches a terminal to session (an id
+// "$n" or an exact name); the CLI execs it (it is not run through a Runner).
 func AttachCommand(socket, session string) []string {
 	argv := []string{"tmux"}
 	if socket != "" {
 		argv = append(argv, "-L", socket)
 	}
-	return append(argv, "attach-session", "-t", session)
+	return append(argv, "attach-session", "-t", sessionTarget(session))
 }
 
 // AttachArgs is AttachCommand.

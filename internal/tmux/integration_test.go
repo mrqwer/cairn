@@ -233,7 +233,10 @@ func TestIntegrationDeadPaneAndRespawn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, pid, err := c.NewWindow(ctx, sid, WindowSpec{Key: "demo/job", Name: "job", PaneSpec: PaneSpec{Key: "demo/job/1", Cwd: dir, Argv: []string{"sh", "-c", "exit 3"}}})
+	// The delay keeps the program alive until remain-on-exit is set (see
+	// remainOnExit: a program exiting immediately can race the option).
+	_, pid, err := c.NewWindow(ctx, sid, WindowSpec{Key: "demo/job", Name: "job",
+		PaneSpec: PaneSpec{Key: "demo/job/1", Cwd: dir, Argv: []string{"sh", "-c", "sleep 0.5; exit 3"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,4 +300,121 @@ func TestIntegrationNoServerSnapshotIsEmpty(t *testing.T) {
 	if err != nil || len(s.Sessions) != 0 {
 		t.Fatalf("%+v %v", s, err)
 	}
+}
+
+// display prints a format for target.
+func display(t *testing.T, c Client, target, format string) string {
+	t.Helper()
+	out, err := c.output(ctxT(t), "display-message", "-p", "-t", target, format)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSuffix(out, "\n")
+}
+
+func TestIntegrationUserValuesReachTmuxIntact(t *testing.T) {
+	c := testServer(t, true)
+	ctx := ctxT(t)
+	dir := filepath.Join(t.TempDir(), "c#proj;")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sleep := []string{"sleep", "60"}
+	sid, _, _, err := c.NewSession(ctx, "s#1;", 0, 0, WindowSpec{Key: "demo/main", Name: "main", PaneSpec: PaneSpec{Key: "demo/main/1", Cwd: dir, Argv: sleep}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := display(t, c, sid, "#{session_name}"); got != "s#1;" {
+		t.Errorf("session name %q", got)
+	}
+	for i, name := range []string{"a;", "a#{session_name}", "-dash", "x#(echo hi)", ";", "p##q"} {
+		key := fmt.Sprintf("demo/w%d", i)
+		wid, pid, err := c.NewWindow(ctx, sid, WindowSpec{Key: key, Name: name, PaneSpec: PaneSpec{Key: key + "/1", Cwd: dir, Argv: sleep}})
+		if err != nil {
+			t.Fatalf("window %q: %v", name, err)
+		}
+		if got := display(t, c, wid, "#{window_name}"); got != name {
+			t.Errorf("window name %q arrived as %q", name, got)
+		}
+		if got := display(t, c, pid, "#{pane_current_path}"); got != dir {
+			t.Errorf("cwd %q arrived as %q", dir, got)
+		}
+	}
+	for _, v := range []string{"x;", `x\;`, "#{session_name}"} {
+		if err := c.SetOption(ctx, "session", sid, "@v", v); err != nil {
+			t.Fatal(err)
+		}
+		if got := display(t, c, sid, "#{@v}"); got != v {
+			t.Errorf("option value %q arrived as %q", v, got)
+		}
+	}
+
+	out1, out2 := filepath.Join(dir, "out1"), filepath.Join(dir, "out2")
+	args := []string{"hi;", `x\;`, ";", "#{session_name}"}
+	argv := append([]string{"sh", "-c", `printf '%s|' "$K" "$@" > "$0"`, out1}, args...)
+	if _, _, err := c.NewWindow(ctx, sid, WindowSpec{Key: "demo/argv", Name: "argv", PaneSpec: PaneSpec{
+		Key: "demo/argv/1", Cwd: dir, Argv: argv, Env: map[string]string{"K": "v#{x};"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.NewWindow(ctx, sid, WindowSpec{Key: "demo/shell", Name: "shell", PaneSpec: PaneSpec{
+		Key: "demo/shell/1", Cwd: dir, Argv: []string{`printf '%s' 'hi;' > out2;`}}}); err != nil {
+		t.Fatal(err)
+	}
+	for file, want := range map[string]string{
+		out1: "v#{x};|" + strings.Join(args, "|") + "|",
+		out2: "hi;",
+	} {
+		var got []byte
+		waitFor(t, file, func() bool {
+			b, err := os.ReadFile(file)
+			got = b
+			return err == nil && len(b) > 0
+		})
+		if string(got) != want {
+			t.Errorf("%s: got %q want %q", filepath.Base(file), got, want)
+		}
+	}
+}
+
+func TestIntegrationSessionIDByKey(t *testing.T) {
+	c := testServer(t, true)
+	ctx := ctxT(t)
+	sid, _, _, err := c.NewSession(ctx, "demo", 0, 0, WindowSpec{Key: "demo/main", Name: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, ok, err := c.SessionIDByKey(ctx, "demo")
+	if err != nil || !ok || id != sid {
+		t.Fatalf("%q %v %v want %q", id, ok, err, sid)
+	}
+}
+
+func TestIntegrationPaneIdle(t *testing.T) {
+	c := testServer(t, true)
+	ctx := ctxT(t)
+	dir := t.TempDir()
+	sid, _, sleepPane, err := c.NewSession(ctx, "demo", 0, 0, WindowSpec{Key: "demo/main", Name: "main",
+		PaneSpec: PaneSpec{Key: "demo/main/1", Cwd: dir, Argv: []string{"sleep", "60"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, shPane, err := c.NewWindow(ctx, sid, WindowSpec{Key: "demo/sh", Name: "sh",
+		PaneSpec: PaneSpec{Key: "demo/sh/1", Cwd: dir, Argv: []string{"sh", "-i"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pidOf := func(id string) int {
+		p, ok := findPane(snap(t, c), id)
+		if !ok {
+			t.Fatalf("pane %s missing", id)
+		}
+		return p.PID
+	}
+	if idle, err := c.PaneIdle(pidOf(sleepPane)); err != nil || idle {
+		t.Fatalf("exec'd sleep pane idle=%v err=%v", idle, err)
+	}
+	waitFor(t, "idle shell", func() bool {
+		idle, err := c.PaneIdle(pidOf(shPane))
+		return err == nil && idle
+	})
 }
