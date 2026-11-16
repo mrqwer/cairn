@@ -42,3 +42,18 @@ func TestOSRunner(t *testing.T) {
 		t.Fatalf("%q %v", out, err)
 	}
 }
+
+func TestOSRunnerEnv(t *testing.T) {
+	out, err := execx.OSRunner{Env: []string{"CAIRN_X=1"}}.Run(context.Background(), "env")
+	if err != nil || string(out) != "CAIRN_X=1\n" {
+		t.Fatalf("%q %v", out, err)
+	}
+}
+
+func TestOSRunnerNilEnvInherits(t *testing.T) {
+	t.Setenv("CAIRN_INHERIT", "yes")
+	out, err := execx.OSRunner{}.Run(context.Background(), "env")
+	if err != nil || !strings.Contains(string(out), "CAIRN_INHERIT=yes\n") {
+		t.Fatalf("%q %v", out, err)
+	}
+}

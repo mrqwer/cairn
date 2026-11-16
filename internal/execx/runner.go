@@ -13,11 +13,18 @@ type Runner interface {
 	Run(ctx context.Context, name string, args ...string) ([]byte, error)
 }
 
-// OSRunner runs real commands.
-type OSRunner struct{}
+// OSRunner runs real commands. Env, when non-nil, is the complete
+// environment of the child ("KEY=value" pairs); nil inherits the caller's.
+type OSRunner struct {
+	Env []string
+}
 
-func (OSRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+func (r OSRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	if r.Env != nil {
+		cmd.Env = r.Env
+	}
+	return cmd.CombinedOutput()
 }
 
 // Response is a canned result for FakeRunner.
