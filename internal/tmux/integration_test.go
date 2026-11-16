@@ -390,15 +390,18 @@ func TestIntegrationUserValuesReachTmuxIntact(t *testing.T) {
 		}
 	}
 
+	// The commands keep sleeping: a pane whose program exits at once can take
+	// itself away before cairn marks it (a documented race), which is not what
+	// this test checks.
 	out1, out2 := filepath.Join(dir, "out1"), filepath.Join(dir, "out2")
 	args := []string{"hi;", `x\;`, ";", "#{session_name}"}
-	argv := append([]string{"sh", "-c", `printf '%s|' "$K" "$@" > "$0"`, out1}, args...)
+	argv := append([]string{"sh", "-c", `printf '%s|' "$K" "$@" > "$0"; sleep 60`, out1}, args...)
 	if _, _, err := c.NewWindow(ctx, sid, WindowSpec{Key: "demo/argv", Name: "argv", PaneSpec: PaneSpec{
 		Key: "demo/argv/1", Cwd: dir, Argv: argv, Env: map[string]string{"K": "v#{x};"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := c.NewWindow(ctx, sid, WindowSpec{Key: "demo/shell", Name: "shell", PaneSpec: PaneSpec{
-		Key: "demo/shell/1", Cwd: dir, Argv: []string{`printf '%s' 'hi;' > out2;`}}}); err != nil {
+		Key: "demo/shell/1", Cwd: dir, Argv: []string{`printf '%s' 'hi;' > out2; sleep 60`}}}); err != nil {
 		t.Fatal(err)
 	}
 	for file, want := range map[string]string{
