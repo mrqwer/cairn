@@ -35,6 +35,13 @@ func newAdoptCmd() *cobra.Command {
 			"markers again (the config stays).",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !dryRunOnly(release, dryRun) {
+				unlock, err := lockApply(cmd)
+				if err != nil {
+					return err
+				}
+				defer unlock()
+			}
 			if release != "" {
 				if len(args) > 0 || id != "" || root != "" || dryRun || force {
 					return errors.New("--release takes only the project id: cairn adopt --release <project>")
@@ -298,3 +305,7 @@ func warnNewSession(w io.Writer, id, session, live string) {
 
 // removeProjectFile removes a project file (a seam for tests).
 var removeProjectFile = func(path string) error { return wsRoot.Remove(path) }
+
+// dryRunOnly reports whether an adopt invocation changes nothing (and so
+// needs no lock).
+func dryRunOnly(release string, dryRun bool) bool { return release == "" && dryRun }

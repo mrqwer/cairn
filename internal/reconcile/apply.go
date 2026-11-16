@@ -26,11 +26,19 @@ type Driver interface {
 	PaneIdle(pid int) (bool, error)
 }
 
-// Result is the outcome of one op.
+// Result is the outcome of one op. Note is set when the op was skipped
+// because the state it would create appeared meanwhile (another process
+// applied first); that is not a failure.
 type Result struct {
-	Op  Op
-	Err error
+	Op   Op
+	Err  error
+	Note string
 }
+
+// skipped is returned by an applier step that found its work already done.
+type skipped string
+
+func (s skipped) Error() string { return string(s) }
 
 // ErrNotRun marks the ops of a project that were not run because an earlier
 // op of the same project failed.
@@ -56,15 +64,15 @@ func Apply(ctx context.Context, d Driver, ps []workspace.Project, ops []Op) []Re
 	results := make([]Result, 0, len(ops))
 	for _, op := range ops {
 		if err := ctx.Err(); err != nil {
-			results = append(results, Result{op, err})
+			results = append(results, Result{Op: op, Err: err})
 			continue
 		}
 		if failed[op.Project] {
-			results = append(results, Result{op, ErrNotRun})
+			results = append(results, Result{Op: op, Err: ErrNotRun})
 			continue
 		}
 		if op.IsNote() {
-			results = append(results, Result{op, nil})
+			results = append(results, Result{Op: op})
 			continue
 		}
 		err := func() error {
@@ -82,10 +90,15 @@ func Apply(ctx context.Context, d Driver, ps []workspace.Project, ops []Op) []Re
 			}
 			return a.do(ctx, op)
 		}()
+		var sk skipped
+		if errors.As(err, &sk) {
+			results = append(results, Result{Op: op, Note: string(sk)})
+			continue
+		}
 		if err != nil {
 			failed[op.Project] = true
 		}
-		results = append(results, Result{op, err})
+		results = append(results, Result{Op: op, Err: err})
 	}
 	return results
 }
@@ -265,7 +278,17 @@ func (a *applier) createWindow(ctx context.Context, w DesiredWindow) error {
 	}
 	ok := false
 	for _, s := range snap.Sessions {
-		ok = ok || (a.session != "" && s.ID == a.session && s.Key == a.dp.ID)
+		if a.session == "" || s.ID != a.session || s.Key != a.dp.ID {
+			continue
+		}
+		ok = true
+		for _, tw := range s.Windows {
+			if tw.Key == w.FullKey() {
+				// Another cairn built it between plan and now.
+				a.windows[w.Key] = tw.ID
+				return skipped(fmt.Sprintf("window %s already exists (%s); not created twice", w.FullKey(), tw.ID))
+			}
+		}
 	}
 	if !ok {
 		return fmt.Errorf("session of %s (%s) is gone or no longer marked; window %s not created", a.dp.ID, a.session, w.Key)
@@ -327,6 +350,11 @@ func (a *applier) createPane(ctx context.Context, op Op) error {
 	loc, err := a.fresh(ctx, w.Key, "", a.windows[w.Key])
 	if err != nil {
 		return err
+	}
+	for _, p := range loc.w.Panes {
+		if p.Key == dp.Key {
+			return skipped(fmt.Sprintf("pane %s already exists (%s); not created twice", dp.Key, p.ID))
+		}
 	}
 	dir, size := dp.Split, dp.Size
 	if dp.From == 0 {

@@ -827,3 +827,52 @@ func TestApplyTreatsMissingCwdNoteAsNote(t *testing.T) {
 		t.Fatalf("res %+v calls %q", res, f.calls)
 	}
 }
+
+// Another cairn built the window or pane between plan and apply: the op is
+// skipped with a note, nothing is created twice.
+func TestApplySkipsWindowAndPaneThatAppearedAfterPlan(t *testing.T) {
+	demo := devProject("demo")
+	f := applied(t, demo)
+	s := f.session("demo")
+	all := s.windows
+	s.windows = all[:1]
+	ops := f.plan(t, []workspace.Project{demo}, Options{})
+	if !slices.ContainsFunc(ops, func(o Op) bool { return o.Kind == KindCreateWindow }) {
+		t.Fatalf("setup: %s", kinds(ops))
+	}
+	s.windows = all
+	f.calls = nil
+	res := Apply(context.Background(), f, []workspace.Project{demo}, ops)
+	for _, r := range res {
+		if r.Err != nil {
+			t.Fatalf("%s: %v", r.Op.Kind, r.Err)
+		}
+		if r.Op.Kind == KindCreateWindow && !strings.Contains(r.Note, "already exists") {
+			t.Fatalf("no note: %+v", r)
+		}
+	}
+	if hasCall(f, "NewWindow") {
+		t.Fatalf("window created twice: %q", f.calls)
+	}
+
+	w := all[0]
+	panes := w.panes
+	w.panes = panes[:len(panes)-1]
+	ops = f.plan(t, []workspace.Project{demo}, Options{})
+	if !slices.ContainsFunc(ops, func(o Op) bool { return o.Kind == KindCreatePane }) {
+		t.Fatalf("setup: %s", kinds(ops))
+	}
+	w.panes = panes
+	f.calls = nil
+	for _, r := range Apply(context.Background(), f, []workspace.Project{demo}, ops) {
+		if r.Err != nil {
+			t.Fatalf("%s: %v", r.Op.Kind, r.Err)
+		}
+		if r.Op.Kind == KindCreatePane && !strings.Contains(r.Note, "already exists") {
+			t.Fatalf("no note: %+v", r)
+		}
+	}
+	if hasCall(f, "SplitPane") {
+		t.Fatalf("pane created twice: %q", f.calls)
+	}
+}

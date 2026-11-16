@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -137,12 +138,38 @@ func renderPlan(w io.Writer, ops []reconcile.Op) {
 	}
 }
 
-// renderResults prints the outcome of each op that ran (not notes) and
-// reports whether any failed.
-func renderResults(w io.Writer, results []reconcile.Result) bool {
+// notRun reports an op that never started because the command was
+// interrupted.
+func notRun(r reconcile.Result) bool {
+	return r.Err == context.Canceled
+}
+
+// interruptedLine is the one line printed instead of a failure per op that
+// did not run after Ctrl-C.
+func interruptedLine(w io.Writer, n int) {
+	_, _ = fmt.Fprintf(w, "interrupted: %s not run\n", ui.Plural(n, "operation", "operations"))
+}
+
+// renderResults prints the outcome of each op that ran (not notes). Ops that
+// did not run because of an interrupt are summed up in one line. It returns
+// nil, an ExitError with code 1 when an op failed, or code 130 when
+// interrupted.
+func renderResults(w io.Writer, results []reconcile.Result) error {
 	st, styled := styleFor(w)
-	failed := false
+	failed, skippedN := false, 0
 	for _, r := range results {
+		if r.Note != "" {
+			mark := "!"
+			if styled {
+				mark = st.Yellow("!")
+			}
+			_, _ = fmt.Fprintf(w, " %s %s: %s\n", mark, r.Op.Project, r.Note)
+			continue
+		}
+		if notRun(r) {
+			skippedN++
+			continue
+		}
 		if r.Op.IsNote() {
 			continue
 		}
@@ -160,7 +187,14 @@ func renderResults(w io.Writer, results []reconcile.Result) bool {
 		}
 		_, _ = fmt.Fprintf(w, " %s %s\n", mark, text)
 	}
-	return failed
+	if skippedN > 0 {
+		interruptedLine(w, skippedN)
+		return &ExitError{Code: exitInterrupted}
+	}
+	if failed {
+		return &ExitError{Code: 1}
+	}
+	return nil
 }
 
 // JSON output. In --json mode a command writes exactly one JSON document to
@@ -272,6 +306,11 @@ func newWsApplyCmd() *cobra.Command {
 		Short: "Make tmux match the project configs",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			unlock, err := lockApply(cmd)
+			if err != nil {
+				return err
+			}
+			defer func() { unlock() }()
 			r, err := prepare(cmd)
 			if err != nil {
 				return err
@@ -303,6 +342,9 @@ func newWsApplyCmd() *cobra.Command {
 					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "destructive changes need confirmation: re-run with --yes")
 					return &ExitError{Code: 1}
 				}
+				// Not held while waiting for the user: Apply re-verifies
+				// everything, and a login "cairn up" must not wait on a prompt.
+				unlock()
 				ok, err := ask(ctxOf(cmd), cmd.InOrStdin(), out, "Apply?")
 				if err != nil {
 					return err
@@ -311,12 +353,12 @@ func newWsApplyCmd() *cobra.Command {
 					_, _ = fmt.Fprintln(out, "nothing changed")
 					return nil
 				}
+				if unlock, err = lockApply(cmd); err != nil {
+					return err
+				}
 			}
 			_, _ = fmt.Fprintln(out)
-			if renderResults(out, reconcile.Apply(ctxOf(cmd), r.drv, r.ws.projects, ops)) {
-				return &ExitError{Code: 1}
-			}
-			return nil
+			return renderResults(out, reconcile.Apply(ctxOf(cmd), r.drv, r.ws.projects, ops))
 		},
 	}
 	cmd.Flags().BoolVar(&prune, "prune", false, "remove managed windows and panes that are no longer configured (idle shells only; asks first)")
@@ -340,6 +382,11 @@ func newWsUpCmd() *cobra.Command {
 		Short: "Start every active project (non-interactive, never removes anything)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			unlock, err := lockApply(cmd)
+			if err != nil {
+				return err
+			}
+			defer unlock()
 			r, err := prepare(cmd)
 			if err != nil {
 				return err
@@ -354,7 +401,7 @@ func newWsUpCmd() *cobra.Command {
 			for _, res := range results {
 				byProject[res.Op.Project] = append(byProject[res.Op.Project], res)
 			}
-			var n, created, updated, unchanged, skipped, failed int
+			var n, created, updated, unchanged, skipped, failed, interruptedN int
 			var problems []string
 			for _, p := range r.ws.projects {
 				if p.Status != workspace.StatusActive {
@@ -364,6 +411,10 @@ func newWsUpCmd() *cobra.Command {
 				var isCreated, isUpdated, isSkipped, isFailed bool
 				for _, res := range byProject[p.ID] {
 					switch {
+					case notRun(res):
+						interruptedN++
+					case res.Note != "":
+						problems = append(problems, fmt.Sprintf("! %s: %s", p.ID, res.Note))
 					case res.Err != nil:
 						isFailed = true
 						problems = append(problems, fmt.Sprintf("✗ %s: %s: %v", p.ID, opText(res.Op), res.Err))
@@ -410,6 +461,10 @@ func newWsUpCmd() *cobra.Command {
 				_, _ = fmt.Fprintln(out, "  "+pr)
 			}
 			printLoadErrors(out, r.ws.loadErrs)
+			if interruptedN > 0 {
+				interruptedLine(out, interruptedN)
+				return &ExitError{Code: exitInterrupted}
+			}
 			if failed > 0 {
 				return &ExitError{Code: 1}
 			}
@@ -428,6 +483,11 @@ func newWsOpenCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
+			unlock, err := lockApply(cmd)
+			if err != nil {
+				return err
+			}
+			defer unlock()
 			ws, err := loadWorkspace()
 			if err != nil {
 				return err
@@ -463,8 +523,8 @@ func newWsOpenCmd() *cobra.Command {
 				}
 			}
 			if actionable(ops) {
-				if renderResults(cmd.OutOrStdout(), reconcile.Apply(ctx, drv, ws.projects, ops)) {
-					return &ExitError{Code: 1}
+				if err := renderResults(cmd.OutOrStdout(), reconcile.Apply(ctx, drv, ws.projects, ops)); err != nil {
+					return err
 				}
 			}
 			sid, ok, err := drv.SessionIDByKey(ctx, id)
