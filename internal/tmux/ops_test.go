@@ -33,12 +33,14 @@ func TestNewSessionArgs(t *testing.T) {
 	want := [][]string{
 		{"tmux", "-u", "-L", "s", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}",
 			"-s", "demo", "-x", "200", "-y", "50", "-n", "editor", "-c", "/home/u/demo",
-			"-e", "A=1", "-e", "B=2", "--", "sh", "-c", `echo "a b" $HOME`},
+			"-e", "A=1", "-e", "B=2"},
 		{"tmux", "-u", "-L", "s", "set", "-p", "-t", "%9", "remain-on-exit", "on"},
 		{"tmux", "-u", "-L", "s", "set", "-t", "$3", "@cairn_s", "demo"},
 		{"tmux", "-u", "-L", "s", "set", "-w", "-t", "@7", "@cairn_w", "demo/editor"},
 		{"tmux", "-u", "-L", "s", "set", "-w", "-t", "@7", "automatic-rename", "off"},
 		{"tmux", "-u", "-L", "s", "set", "-p", "-t", "%9", "@cairn_p", "demo/editor/1"},
+		{"tmux", "-u", "-L", "s", "respawn-pane", "-k", "-t", "%9", "-c", "/home/u/demo",
+			"-e", "A=1", "-e", "B=2", "--", "sh", "-c", `echo "a b" $HOME`},
 	}
 	f := fake(map[string]string{strings.Join(want[0], " "): "$3 @7 %9\n"})
 	okCalls(f, want[1:])
@@ -109,12 +111,14 @@ func TestUserValuesEscaped(t *testing.T) {
 	want := [][]string{
 		{"tmux", "-u", "new-session", "-d", "-P", "-F", "#{session_id} #{window_id} #{pane_id}",
 			"-s", `s##1\;`, "-x", "200", "-y", "50", "-n", `a##{x}\;`, "-c", `/home/u/c##p\;`,
-			"-e", `K=#v\;`, "--", "sh", "-c", `echo hi\;`, `#{x}`},
+			"-e", `K=#v\;`},
 		{"tmux", "-u", "set", "-p", "-t", "%2", "remain-on-exit", "on"},
 		{"tmux", "-u", "set", "-t", "$0", "@cairn_s", "demo"},
 		{"tmux", "-u", "set", "-w", "-t", "@1", "@cairn_w", "demo/main"},
 		{"tmux", "-u", "set", "-w", "-t", "@1", "automatic-rename", "off"},
 		{"tmux", "-u", "set", "-p", "-t", "%2", "@cairn_p", "demo/main/1"},
+		{"tmux", "-u", "respawn-pane", "-k", "-t", "%2", "-c", `/home/u/c##p\;`,
+			"-e", `K=#v\;`, "--", "sh", "-c", `echo hi\;`, `#{x}`},
 	}
 	f := fake(map[string]string{strings.Join(want[0], " "): "$0 @1 %2"})
 	okCalls(f, want[1:])
@@ -182,11 +186,12 @@ func TestSessionIDByKey(t *testing.T) {
 func TestNewWindowArgs(t *testing.T) {
 	want := [][]string{
 		{"tmux", "-u", "-L", "s", "new-window", "-d", "-P", "-F", "#{window_id} #{pane_id}", "-t", "$3:", "-n", "logs",
-			"-c", "/home/u/demo", "--", "tail", "-f", "log.txt"},
+			"-c", "/home/u/demo"},
 		{"tmux", "-u", "-L", "s", "set", "-p", "-t", "%4", "remain-on-exit", "on"},
 		{"tmux", "-u", "-L", "s", "set", "-w", "-t", "@2", "@cairn_w", "demo/logs"},
 		{"tmux", "-u", "-L", "s", "set", "-w", "-t", "@2", "automatic-rename", "off"},
 		{"tmux", "-u", "-L", "s", "set", "-p", "-t", "%4", "@cairn_p", "demo/logs/1"},
+		{"tmux", "-u", "-L", "s", "respawn-pane", "-k", "-t", "%4", "-c", "/home/u/demo", "--", "tail", "-f", "log.txt"},
 	}
 	f := fake(map[string]string{strings.Join(want[0], " "): "@2 %4\n"})
 	okCalls(f, want[1:])
@@ -205,9 +210,10 @@ func TestNewWindowArgs(t *testing.T) {
 func TestSingleElementRunIsShellString(t *testing.T) {
 	want := [][]string{
 		{"tmux", "-u", "-L", "s", "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", "%9", "-v", "-l", "30%",
-			"-c", "/home/u/demo", "--", "npm run dev && echo 'done'"},
+			"-c", "/home/u/demo"},
 		{"tmux", "-u", "-L", "s", "set", "-p", "-t", "%10", "remain-on-exit", "on"},
 		{"tmux", "-u", "-L", "s", "set", "-p", "-t", "%10", "@cairn_p", "demo/editor/2"},
+		{"tmux", "-u", "-L", "s", "respawn-pane", "-k", "-t", "%10", "-c", "/home/u/demo", "--", "npm run dev && echo 'done'"},
 	}
 	f := fake(map[string]string{strings.Join(want[0], " "): "%10\n"})
 	okCalls(f, want[1:])

@@ -390,18 +390,15 @@ func TestIntegrationUserValuesReachTmuxIntact(t *testing.T) {
 		}
 	}
 
-	// The commands keep sleeping: a pane whose program exits at once can take
-	// itself away before cairn marks it (a documented race), which is not what
-	// this test checks.
 	out1, out2 := filepath.Join(dir, "out1"), filepath.Join(dir, "out2")
 	args := []string{"hi;", `x\;`, ";", "#{session_name}"}
-	argv := append([]string{"sh", "-c", `printf '%s|' "$K" "$@" > "$0"; sleep 60`, out1}, args...)
+	argv := append([]string{"sh", "-c", `printf '%s|' "$K" "$@" > "$0"`, out1}, args...)
 	if _, _, err := c.NewWindow(ctx, sid, WindowSpec{Key: "demo/argv", Name: "argv", PaneSpec: PaneSpec{
 		Key: "demo/argv/1", Cwd: dir, Argv: argv, Env: map[string]string{"K": "v#{x};"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := c.NewWindow(ctx, sid, WindowSpec{Key: "demo/shell", Name: "shell", PaneSpec: PaneSpec{
-		Key: "demo/shell/1", Cwd: dir, Argv: []string{`printf '%s' 'hi;' > out2; sleep 60`}}}); err != nil {
+		Key: "demo/shell/1", Cwd: dir, Argv: []string{`printf '%s' 'hi;' > out2;`}}}); err != nil {
 		t.Fatal(err)
 	}
 	for file, want := range map[string]string{
@@ -461,4 +458,92 @@ func TestIntegrationPaneIdle(t *testing.T) {
 		idle, err := c.PaneIdle(pidOf(shPane))
 		return err == nil && idle
 	})
+}
+
+// A program that exits at once must not take its pane away before the pane is
+// marked: the dead pane stays, marked, with its exit status.
+func TestIntegrationInstantExitKeepsMarkedDeadPane(t *testing.T) {
+	c := testServer(t, true)
+	ctx := ctxT(t)
+	dir := t.TempDir()
+	cases := []struct {
+		argv   []string
+		status int
+	}{
+		{[]string{"true"}, 0},
+		{[]string{"sh", "-c", "exit 3"}, 3},
+	}
+	spec := func(key string, argv []string) PaneSpec {
+		return PaneSpec{Key: key, Cwd: dir, Argv: argv}
+	}
+	sid, _, firstPane, err := c.NewSession(ctx, "fast", 0, 0, WindowSpec{Key: "fast/s", Name: "s", PaneSpec: spec("fast/s/1", cases[0].argv)})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	_, winPane, err := c.NewWindow(ctx, sid, WindowSpec{Key: "fast/w", Name: "w", PaneSpec: spec("fast/w/1", cases[1].argv)})
+	if err != nil {
+		t.Fatalf("NewWindow: %v", err)
+	}
+	splitPane, err := c.SplitPane(ctx, winPane, "h", 50, spec("fast/w/2", cases[0].argv))
+	if err != nil {
+		t.Fatalf("SplitPane: %v", err)
+	}
+	want := map[string]struct {
+		key    string
+		status int
+	}{firstPane: {"fast/s/1", 0}, winPane: {"fast/w/1", 3}, splitPane: {"fast/w/2", 0}}
+	waitFor(t, "all panes dead", func() bool {
+		snap, err := c.Snapshot(ctx)
+		if err != nil {
+			return false
+		}
+		n := 0
+		for _, s := range snap.Sessions {
+			for _, w := range s.Windows {
+				for _, p := range w.Panes {
+					if _, ok := want[p.ID]; ok && p.Dead {
+						n++
+					}
+				}
+			}
+		}
+		return n == len(want)
+	})
+	snap, err := c.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, s := range snap.Sessions {
+		for _, w := range s.Windows {
+			for _, p := range w.Panes {
+				if wp, ok := want[p.ID]; ok {
+					seen++
+					if !p.Dead || p.Key != wp.key || p.DeadStatus != wp.status {
+						t.Errorf("pane %s: dead=%v key=%q status=%d, want dead key=%q status=%d", p.ID, p.Dead, p.Key, p.DeadStatus, wp.key, wp.status)
+					}
+				}
+			}
+		}
+	}
+	if seen != len(want) {
+		t.Errorf("found %d of %d panes", seen, len(want))
+	}
+}
+
+// The race is narrow; many instant-exit windows in a row make it certain.
+func TestIntegrationInstantExitManyWindows(t *testing.T) {
+	c := testServer(t, true)
+	ctx := ctxT(t)
+	dir := t.TempDir()
+	sid, _, _, err := c.NewSession(ctx, "fast", 0, 0, WindowSpec{Key: "fast/s", Name: "s", PaneSpec: PaneSpec{Key: "fast/s/1", Cwd: dir, Argv: []string{"true"}}})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	for i := 0; i < 60; i++ {
+		key := fmt.Sprintf("fast/w%d", i)
+		if _, _, err := c.NewWindow(ctx, sid, WindowSpec{Key: key, Name: key[5:], PaneSpec: PaneSpec{Key: key + "/1", Cwd: dir, Argv: []string{"sh", "-c", "exit 3"}}}); err != nil {
+			t.Fatalf("window %d: %v", i, err)
+		}
+	}
 }

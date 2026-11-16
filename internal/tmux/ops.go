@@ -76,7 +76,9 @@ func checkWindow(win WindowSpec) error {
 	return checkPane(win.PaneSpec)
 }
 
-// paneArgs returns "-c cwd -e K=V... [-- argv...]" for p, escaped for tmux.
+// paneArgs returns "-c cwd -e K=V..." for p, escaped for tmux. The command
+// is not part of it: panes are created running the default shell and started
+// with startCommand once their options and markers are set (see there).
 func paneArgs(p PaneSpec) []string {
 	var a []string
 	if p.Cwd != "" {
@@ -90,13 +92,25 @@ func paneArgs(p PaneSpec) []string {
 	for _, k := range keys {
 		a = append(a, "-e", escSemi(k+"="+p.Env[k]))
 	}
-	if len(p.Argv) > 0 {
-		a = append(a, "--")
-		for _, v := range p.Argv {
-			a = append(a, escSemi(v))
-		}
-	}
 	return a
+}
+
+// startCommand runs p's command in the pane id. The pane is created without
+// the command because a program that exits at once would take its pane (and
+// window) away before remain-on-exit and the markers are set, which made
+// apply fail with "no such pane". Created as the default shell, the pane
+// survives until it is configured; respawn-pane -k then replaces the shell
+// with the command, and the dead pane stays (remain-on-exit) when it exits.
+func (c Client) startCommand(ctx context.Context, id string, p PaneSpec) error {
+	if len(p.Argv) == 0 {
+		return nil
+	}
+	args := append([]string{"respawn-pane", "-k", "-t", id}, paneArgs(p)...)
+	args = append(args, "--")
+	for _, v := range p.Argv {
+		args = append(args, escSemi(v))
+	}
+	return c.run(ctx, args...)
 }
 
 // ids splits -P -F output into exactly n ids.
@@ -109,10 +123,7 @@ func ids(out string, n int) ([]string, error) {
 }
 
 // remainOnExit keeps the pane after its program exits; it runs right after
-// the pane is created, before anything else. It is a separate tmux call, so a
-// program that exits immediately can still take its pane (and window) with it
-// before the option is set; the reconciler then sees the pane missing and
-// recreates it on the next apply.
+// the pane is created, before the command is started (see startCommand).
 func (c Client) remainOnExit(ctx context.Context, id string, p PaneSpec) error {
 	if len(p.Argv) == 0 && !p.RemainOnExit {
 		return nil
@@ -175,6 +186,9 @@ func (c Client) NewSession(ctx context.Context, name string, w, h int, win Windo
 		err = c.paneMarker(setupCtx, paneID, win.PaneSpec)
 	}
 	if err == nil {
+		err = c.startCommand(setupCtx, paneID, win.PaneSpec)
+	}
+	if err == nil {
 		err = ctx.Err()
 	}
 	if err != nil {
@@ -207,7 +221,10 @@ func (c Client) NewWindow(ctx context.Context, sessionID string, win WindowSpec)
 	if err := c.setupWindow(ctx, windowID, win); err != nil {
 		return windowID, paneID, err
 	}
-	return windowID, paneID, c.paneMarker(ctx, paneID, win.PaneSpec)
+	if err := c.paneMarker(ctx, paneID, win.PaneSpec); err != nil {
+		return windowID, paneID, err
+	}
+	return windowID, paneID, c.startCommand(ctx, paneID, win.PaneSpec)
 }
 
 // SplitPane splits targetPane ("h" left/right, "v" top/bottom), giving the new
@@ -231,7 +248,10 @@ func (c Client) SplitPane(ctx context.Context, targetPane string, dir string, pe
 	if err := c.remainOnExit(ctx, id[0], p); err != nil {
 		return id[0], err
 	}
-	return id[0], c.paneMarker(ctx, id[0], p)
+	if err := c.paneMarker(ctx, id[0], p); err != nil {
+		return id[0], err
+	}
+	return id[0], c.startCommand(ctx, id[0], p)
 }
 
 // SelectLayout applies a classic layout string to windowID.
