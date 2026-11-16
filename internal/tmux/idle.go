@@ -91,3 +91,7 @@ func readMore(statPath, path string) (data string, gone bool, err error) {
 	}
 	return string(b), false, nil
 }
+
+// IsShell reports whether comm (a process or pane_current_command name) is a
+// known interactive shell.
+func IsShell(comm string) bool { return isShell(comm) }

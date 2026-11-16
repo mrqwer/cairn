@@ -97,3 +97,6 @@ func walk(n *Node, x, y, w, h int, out *[]Rect) {
 	walk(n.A, a.x, a.y, a.w, a.h, out)
 	walk(n.B, b.x, b.y, b.w, b.h, out)
 }
+
+// Size is a window size in cells.
+type Size struct{ W, H int }
