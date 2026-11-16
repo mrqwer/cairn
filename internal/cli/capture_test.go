@@ -91,7 +91,7 @@ func TestCaptureWriteRecordsHistoryAndRefusesExisting(t *testing.T) {
 		t.Fatalf("file:\n%s", data)
 	}
 	// The live session keeps the name the managed one will get.
-	if !strings.Contains(out, `a live tmux session named "web" exists and is not managed by cairn; cairn will not touch it. Rename it (tmux rename-session -t web <new>) before running cairn apply, or adopt it (cairn adopt web). Closing it would kill its running programs.`) {
+	if !strings.Contains(out, `a live tmux session named "web" exists and is not managed by cairn; cairn will not touch it. Rename it (tmux rename-session -t =web <new>) before running cairn apply, or adopt it (cairn adopt web). Closing it would kill its running programs.`) {
 		t.Fatalf("no clash note:\n%s", out)
 	}
 	if probs := checkProjectData("web-copy", data, "/home/u"); len(probs) != 0 {
@@ -195,7 +195,6 @@ func TestCaptureRealTmuxRoundTrip(t *testing.T) {
 		t.Skip("tmux not in PATH")
 	}
 	_, _ = wsTestEnv(t)
-	newDriver = realDriver
 	t.Setenv("SHELL", "/bin/sh")
 	// A stand-in "nvim" (a copy of cat, waiting on the terminal) so no real
 	// editor or user configuration is started.
@@ -214,6 +213,7 @@ func TestCaptureRealTmuxRoundTrip(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	socket := fmt.Sprintf("cairn-test-capture-%d-%d", os.Getpid(), cliSocketSeq.Add(1))
+	useRealTmux(t, socket)
 	tm := func(args ...string) string {
 		t.Helper()
 		out, err := exec.Command("tmux", append([]string{"-L", socket}, args...)...).CombinedOutput()

@@ -29,12 +29,17 @@ the next login. Remove with `cairn tmux service uninstall`. Check with `cairn tm
 ## Change the layout
 
 Edit with `cairn project edit <id>`. Then `cairn plan` to preview and `cairn apply` to apply.
-`apply` only adds and fixes managed windows and panes. Hand-made ones are reported, not touched.
+`apply` only adds and fixes managed windows and panes. Hand-made windows are reported, not touched.
+Hand-made panes inside a managed window are never killed or restarted; they only stop the layout from
+being applied (a skip-layout note). One exception: when a managed pane has to be re-created and the
+window has no managed pane left, `apply` splits a hand-made pane to make room (it shrinks, nothing is killed).
+Only one `cairn up`, `apply`, `open` or `adopt` runs at a time; another one waits a few seconds for the lock
+(`<state>/workspace/apply.lock`) and then fails.
 
 ## Undo
 
 Every config change is recorded: list with `cairn history`, inspect with `cairn history show <id>`.
-`cairn undo` reverts the latest change (or `cairn undo <id>`). It changes config only; run `cairn apply`
+`cairn undo` reverts the latest change that is not itself an undo or a restore (or `cairn undo <id>`), so after `cairn history restore <id>` a bare `cairn undo` goes to the change before the restore. It changes config only; run `cairn apply`
 afterwards. If a file changed after the event, undo refuses and writes nothing.
 
 ## Try it beside your own tmux

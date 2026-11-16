@@ -117,6 +117,14 @@ func adoptSession(cmd *cobra.Command, name, id, root string, dryRun, force bool)
 		return err
 	}
 	p, notes := res.Project, res.Notes
+	// Two sessions carrying one project's markers would leave apply and
+	// --prune acting on whichever comes first.
+	for _, other := range adopt.Sessions(snap, p.ID) {
+		if other.ID != s.ID {
+			return fmt.Errorf("project id %q is already carried by the markers of tmux session %q; release it first (cairn adopt --release %s) or pick another --id",
+				p.ID, other.Name, p.ID)
+		}
+	}
 	if len(snap.Skipped) > 0 {
 		note := skippedNote(snap.Skipped)
 		warn := "warning: " + note

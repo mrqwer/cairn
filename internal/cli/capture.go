@@ -197,7 +197,7 @@ func captureSession(cmd *cobra.Command, name, id, root string, write, force bool
 		if other.Name == sessName {
 			notes = append(notes, fmt.Sprintf("a live tmux session named %q exists and is not managed by cairn; cairn will not touch it. "+
 				"Rename it (tmux rename-session -t %s <new>) before running cairn apply, or adopt it (cairn adopt %s). "+
-				"Closing it would kill its running programs.", sessName, shellWord(sessName), shellWord(sessName)))
+				"Closing it would kill its running programs.", sessName, shellWord("="+sessName), shellWord(sessName)))
 			break
 		}
 	}

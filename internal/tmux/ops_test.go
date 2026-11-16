@@ -274,8 +274,6 @@ func TestSimpleOps(t *testing.T) {
 		{func(c Client) error { return c.KillSession(ctx, "$1") }, []string{"kill-session", "-t", "$1"}},
 		{func(c Client) error { return c.SetOption(ctx, "pane", "%1", "@x", "v;") }, []string{"set", "-p", "-t", "%1", "@x", `v\;`}},
 		{func(c Client) error { return c.RespawnPane(ctx, "%1", []string{"echo", "a;"}) }, []string{"respawn-pane", "-t", "%1", "--", "echo", `a\;`}},
-		{func(c Client) error { return c.SwitchClient(ctx, "demo") }, []string{"switch-client", "-t", "=demo"}},
-		{func(c Client) error { return c.SwitchClient(ctx, "$4") }, []string{"switch-client", "-t", "$4"}},
 	}
 	for _, tc := range cases {
 		want := append([]string{"tmux", "-u", "-L", "s"}, tc.want...)
@@ -341,7 +339,7 @@ func TestAttachCommand(t *testing.T) {
 	if got := AttachCommand("s", "demo"); !reflect.DeepEqual(got, []string{"tmux", "-L", "s", "attach-session", "-t", "=demo"}) {
 		t.Fatalf("%q", got)
 	}
-	if got := AttachArgs("", "demo"); !reflect.DeepEqual(got, []string{"tmux", "attach-session", "-t", "=demo"}) {
+	if got := AttachCommand("", "demo"); !reflect.DeepEqual(got, []string{"tmux", "attach-session", "-t", "=demo"}) {
 		t.Fatalf("%q", got)
 	}
 }

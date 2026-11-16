@@ -309,3 +309,21 @@ func runSplit(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	err = cmd.Execute()
 	return o.String(), e.String(), err
 }
+
+// useRealTmux switches the commands to a real tmux driver on the private
+// socket (also exported as CAIRN_TMUX_SOCKET) and fails the test loudly if a
+// command ever resolves an empty or non-test socket, i.e. would reach the
+// default tmux server.
+func useRealTmux(t *testing.T, socket string) {
+	t.Helper()
+	if !strings.HasPrefix(socket, "cairn-test-") {
+		t.Fatalf("real tmux tests need a cairn-test-* socket, got %q", socket)
+	}
+	t.Setenv("CAIRN_TMUX_SOCKET", socket)
+	newDriver = func(s string) (wsDriver, error) {
+		if s != socket {
+			t.Fatalf("real tmux test would use socket %q instead of %q (the default server?)", s, socket)
+		}
+		return realDriver(s)
+	}
+}

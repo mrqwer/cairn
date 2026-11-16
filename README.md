@@ -10,7 +10,7 @@ It is built to be used by anyone: it adopts *your* tmux, Neovim and AI-tool conf
 of imposing a fixed setup. The author's own setup is just one profile in `profiles/`.
 
 **Status:** the shared foundation, the optional Linux-laptop module (`cairn host`: sleep,
-hibernation, NVIDIA) and the workspace engine (M1; end-to-end verification pending) are
+hibernation, NVIDIA) and the workspace engine (M1, with end-to-end verification on an isolated tmux server) are
 implemented. AI agent sessions are the next milestone; the rest is in design.
 Every module gets a reviewed design document in `docs/specs/` before any code is written.
 
@@ -27,7 +27,10 @@ cairn open api                         # switch to it
 cairn doctor workspace                 # read-only health check
 ```
 
-Try it without touching your tmux: add `--socket try` to every command.
+Try it without touching your tmux: add `--socket try` to every command. The project config stays
+afterwards, so remove the trial project (`cairn project archive api`, then `cairn project rm api`)
+and run `tmux -L try kill-server`; otherwise a later bare `cairn up` or cairn-up.service builds it
+on your default server.
 
 ## Why
 

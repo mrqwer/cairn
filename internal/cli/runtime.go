@@ -554,7 +554,7 @@ func newWsOpenCmd() *cobra.Command {
 				}
 				return drv.SwitchClientHere(ctx, sid, os.Getenv("TMUX"), os.Getenv("TMUX_PANE"))
 			}
-			return execProcess(tmux.AttachArgs(socket, sid))
+			return execProcess(tmux.AttachCommand(socket, sid))
 		},
 	}
 }

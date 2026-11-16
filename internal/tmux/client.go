@@ -87,6 +87,3 @@ func AttachCommand(socket, session string) []string {
 	}
 	return append(argv, "attach-session", "-t", sessionTarget(session))
 }
-
-// AttachArgs is AttachCommand.
-func AttachArgs(socket, session string) []string { return AttachCommand(socket, session) }

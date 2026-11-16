@@ -418,12 +418,6 @@ func (c Client) KillSession(ctx context.Context, id string) error {
 	return c.run(ctx, "kill-session", "-t", id)
 }
 
-// SwitchClient switches the current client to a session, given its id
-// ("$n", preferred; see SessionIDByKey) or its exact name.
-func (c Client) SwitchClient(ctx context.Context, sessionName string) error {
-	return c.run(ctx, "switch-client", "-t", sessionTarget(sessionName))
-}
-
 // sessionTarget targets a session id as is and a name by exact match ("=name"),
 // never by tmux's prefix or pattern matching.
 func sessionTarget(s string) string {

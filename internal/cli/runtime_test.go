@@ -323,9 +323,9 @@ func TestRealTmuxRoundTrip(t *testing.T) {
 		t.Skip("tmux not in PATH")
 	}
 	_, _ = wsTestEnv(t)
-	newDriver = realDriver
 	t.Setenv("SHELL", "/bin/sh")
 	socket := fmt.Sprintf("cairn-test-cli-%d-%d", os.Getpid(), cliSocketSeq.Add(1))
+	useRealTmux(t, socket)
 	tm := func(args ...string) (string, error) {
 		c := exec.Command("tmux", append([]string{"-L", socket}, args...)...)
 		out, err := c.CombinedOutput()

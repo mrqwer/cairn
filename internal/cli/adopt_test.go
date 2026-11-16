@@ -164,6 +164,8 @@ func TestAdoptRefusals(t *testing.T) {
 		{[]string{"adopt"}, "session name"},
 		{[]string{"adopt", "api"}, "already managed"},
 		{[]string{"adopt", "nope"}, "no tmux session"},
+		{[]string{"adopt", "web", "--id", "api"}, "already carried by the markers"},
+		{[]string{"adopt", "web", "--id", "api", "--dry-run"}, "already carried by the markers"},
 		{[]string{"adopt", "web", "--id", "Bad Id"}, "invalid project id"},
 		{[]string{"adopt", "web", "--release", "web"}, "--release"},
 		{[]string{"adopt", "--release", "Bad Id"}, "invalid project id"},
@@ -351,7 +353,6 @@ func TestAdoptRealTmux(t *testing.T) {
 		t.Skip("tmux not in PATH")
 	}
 	_, _ = wsTestEnv(t)
-	newDriver = realDriver
 	t.Setenv("SHELL", "/bin/sh")
 	// A stand-in "nvim" (a copy of cat) so no real editor is started.
 	bin := t.TempDir()
@@ -369,6 +370,7 @@ func TestAdoptRealTmux(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	socket := fmt.Sprintf("cairn-test-adopt-%d-%d", os.Getpid(), cliSocketSeq.Add(1))
+	useRealTmux(t, socket)
 	tm := func(args ...string) string {
 		t.Helper()
 		out, err := exec.Command("tmux", append([]string{"-L", socket}, args...)...).CombinedOutput()
