@@ -1,0 +1,15 @@
+id = "demo"
+name = "Demo"
+root = "/home/u/demo"
+
+[[windows]]
+key = "code"
+name = "code"
+
+[[windows.panes]]
+role = "editor"
+run = ["nvim"]
+
+[[windows.panes]]
+split = "h"
+size = 35
