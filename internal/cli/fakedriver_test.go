@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -16,11 +17,12 @@ var _ wsDriver = tmux.Client{}
 // windows and panes with ids and markers; splits insert after the target.
 // Every call is recorded.
 type fakeDriver struct {
-	socket   string
-	calls    []string
-	sessions []*fSession
-	seq      int
-	idle     bool // PaneIdle answer for every pane
+	socket     string
+	socketPath string // SocketPath answer
+	calls      []string
+	sessions   []*fSession
+	seq        int
+	idle       bool // PaneIdle answer for every pane
 }
 
 type fSession struct {
@@ -180,8 +182,13 @@ func (f *fakeDriver) SessionIDByKey(_ context.Context, key string) (string, bool
 	return "", false, nil
 }
 
-func (f *fakeDriver) SwitchClient(_ context.Context, session string) error {
-	f.rec("SwitchClient %s", session)
+func (f *fakeDriver) SocketPath(context.Context) (string, error) {
+	f.rec("SocketPath")
+	return f.socketPath, nil
+}
+
+func (f *fakeDriver) SwitchClientHere(_ context.Context, session, tmuxEnv, tmuxPane string) error {
+	f.rec("SwitchClientHere %s TMUX=%s TMUX_PANE=%s", session, tmuxEnv, tmuxPane)
 	return nil
 }
 
@@ -206,8 +213,8 @@ func wsTestEnv(t *testing.T) (string, *fakeDriver) {
 	t.Setenv("TMUX_PANE", "")
 	t.Setenv("CAIRN_TMUX_SOCKET", "")
 	fd := &fakeDriver{}
-	oldDriver, oldExec, oldEditor := newDriver, execProcess, runEditor
-	t.Cleanup(func() { newDriver, execProcess, runEditor = oldDriver, oldExec, oldEditor })
+	oldDriver, oldExec, oldEditor, oldInteractive := newDriver, execProcess, runEditor, interactive
+	t.Cleanup(func() { newDriver, execProcess, runEditor, interactive = oldDriver, oldExec, oldEditor, oldInteractive })
 	newDriver = func(socket string) (wsDriver, error) {
 		fd.socket = socket
 		return fd, nil
@@ -221,4 +228,17 @@ func wsTestEnv(t *testing.T) (string, *fakeDriver) {
 		return nil
 	}
 	return dir, fd
+}
+
+// runSplit runs cairn with stdout and stderr captured separately.
+func runSplit(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	cmd := NewRootCmd()
+	var o, e bytes.Buffer
+	cmd.SetOut(&o)
+	cmd.SetErr(&e)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetArgs(args)
+	err = cmd.Execute()
+	return o.String(), e.String(), err
 }

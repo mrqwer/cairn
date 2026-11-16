@@ -203,16 +203,41 @@ func (s Store) Get(id string) (Event, error) {
 	return e, err
 }
 
+// undoTarget returns the id an undo event reverted ("undo <id>: ..." as
+// recorded by Undo); ok is false for any other event.
+func undoTarget(kind, summary string) (string, bool) {
+	if kind != KindUndo {
+		return "", false
+	}
+	rest, ok := strings.CutPrefix(summary, KindUndo+" ")
+	if !ok {
+		return "", false
+	}
+	id, _, ok := strings.Cut(rest, ": ")
+	return id, ok && id != ""
+}
+
+// UndoneIDs returns the ids of the events in evs that an undo event in evs
+// reverted.
+func UndoneIDs(evs []Event) map[string]bool {
+	out := map[string]bool{}
+	for _, e := range evs {
+		if id, ok := undoTarget(e.Kind, e.Summary); ok {
+			out[id] = true
+		}
+	}
+	return out
+}
+
 // find returns event id and whether an undo event for it is recorded.
 func (s Store) find(id string) (Event, bool, error) {
 	var found []byte
 	undone := false
-	prefix := KindUndo + " " + id + ": "
 	err := s.scanPath(func(h header, line []byte) {
 		if h.ID == id && found == nil {
 			found = line
 		}
-		if h.Kind == KindUndo && strings.HasPrefix(h.Summary, prefix) {
+		if t, ok := undoTarget(h.Kind, h.Summary); ok && t == id {
 			undone = true
 		}
 	})

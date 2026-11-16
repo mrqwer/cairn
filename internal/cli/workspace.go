@@ -35,7 +35,8 @@ type wsDriver interface {
 	KillPane(ctx context.Context, id string) error
 	PaneIdle(pid int) (bool, error)
 	SessionIDByKey(ctx context.Context, key string) (string, bool, error)
-	SwitchClient(ctx context.Context, session string) error
+	SocketPath(ctx context.Context) (string, error)
+	SwitchClientHere(ctx context.Context, sessionID, tmuxEnv, tmuxPane string) error
 }
 
 var errNoTmux = errors.New("tmux not found in PATH")
@@ -63,6 +64,15 @@ var (
 		c := exec.Command(argv[0], argv[1:]...)
 		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 		return c.Run()
+	}
+	// interactive reports whether answers can be read from in (a terminal).
+	interactive = func(in io.Reader) bool {
+		f, ok := in.(*os.File)
+		if !ok {
+			return false
+		}
+		fi, err := f.Stat()
+		return err == nil && fi.Mode()&os.ModeCharDevice != 0
 	}
 )
 
@@ -163,5 +173,9 @@ func ask(in io.Reader, out io.Writer, question string) bool {
 	return ans == "y" || ans == "yes"
 }
 
-// inTmux reports whether cairn runs inside a tmux client.
-func inTmux() bool { return os.Getenv("TMUX") != "" }
+// tmuxClientSocket is the socket path of the tmux client cairn runs in
+// (TMUX is "<socket path>,<pid>,<session>"), or "" outside tmux.
+func tmuxClientSocket() string {
+	path, _, _ := strings.Cut(os.Getenv("TMUX"), ",")
+	return path
+}

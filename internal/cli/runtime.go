@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -44,21 +46,20 @@ func (r *wsRun) plan(only string, prune bool) []reconcile.Op {
 	return reconcile.Plan(r.ws.projects, r.snap, reconcile.Options{Prune: prune, Only: only, PaneIdle: r.drv.PaneIdle})
 }
 
-// checkOnly validates a <project> argument; ok is false (with a message
-// printed) when the project exists but is not active.
-func (r *wsRun) checkOnly(cmd *cobra.Command, only string) (bool, error) {
+// checkOnly validates a <project> argument. A project that exists but is
+// not active gives a note (and nothing to plan); a missing one an error.
+func (r *wsRun) checkOnly(only string) (note string, err error) {
 	if only == "" {
-		return true, nil
+		return "", nil
 	}
 	p, err := r.ws.requireProject(only)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	if p.Status != workspace.StatusActive {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "project %s is %s; nothing to do (resume it: cairn project resume %s)\n", only, p.Status, only)
-		return false, nil
+		return fmt.Sprintf("project %s is %s", only, p.Status), nil
 	}
-	return true, nil
+	return "", nil
 }
 
 func nonDestructive(ops []reconcile.Op) []reconcile.Op {
@@ -162,10 +163,24 @@ func renderResults(w io.Writer, results []reconcile.Result) bool {
 	return failed
 }
 
+// JSON output. In --json mode a command writes exactly one JSON document to
+// stdout; every array is present ([] when empty). Field names are stable:
+//
+//	plan --json:   {"ops": [op], "load_errors": [load_error], "notes": [string]}
+//	  op:          {"project", "kind", "target", "window", "pane", "detail",
+//	                "destructive": bool, "note": bool}
+//	  load_error:  {"file", "error"} — a project file that could not be loaded
+//	  notes:       e.g. "project demo is archived" (nothing planned for it)
+//	status --json: {"projects": [row], "load_errors": [load_error]}
+//	  row:         {"id", "session", "running": bool, "windows",
+//	                "missing_windows", "missing_panes", "dead_panes", "extra",
+//	                "problem": "" or why the project is skipped}
+
 // planJSON is the output of plan --json.
 type planJSON struct {
 	Ops        []opJSON        `json:"ops"`
 	LoadErrors []loadErrorJSON `json:"load_errors"`
+	Notes      []string        `json:"notes"`
 }
 
 type opJSON struct {
@@ -217,13 +232,19 @@ func newWsPlanCmd() *cobra.Command {
 				return err
 			}
 			only := optionalArg(args)
-			ok, err := r.checkOnly(cmd, only)
-			if err != nil || !ok {
+			note, err := r.checkOnly(only)
+			if err != nil {
 				return err
 			}
-			ops := r.plan(only, prune)
+			var ops []reconcile.Op
+			if note == "" {
+				ops = r.plan(only, prune)
+			}
 			if asJSON {
-				pj := planJSON{Ops: []opJSON{}, LoadErrors: loadErrorsJSON(r.ws)}
+				pj := planJSON{Ops: []opJSON{}, LoadErrors: loadErrorsJSON(r.ws), Notes: []string{}}
+				if note != "" {
+					pj.Notes = append(pj.Notes, note)
+				}
 				for _, op := range ops {
 					pj.Ops = append(pj.Ops, opJSON{Project: op.Project, Kind: op.Kind, Target: op.Target,
 						Window: op.WindowKey, Pane: op.PaneKey, Detail: op.Detail, Destructive: op.Destructive, Note: op.IsNote()})
@@ -231,6 +252,10 @@ func newWsPlanCmd() *cobra.Command {
 				return writeJSON(cmd.OutOrStdout(), pj)
 			}
 			printLoadErrors(cmd.ErrOrStderr(), r.ws.loadErrs)
+			if note != "" {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s; nothing to do (resume it: cairn project resume %s)\n", note, only)
+				return nil
+			}
 			renderPlan(cmd.OutOrStdout(), ops)
 			return nil
 		},
@@ -252,11 +277,15 @@ func newWsApplyCmd() *cobra.Command {
 				return err
 			}
 			only := optionalArg(args)
-			ok, err := r.checkOnly(cmd, only)
-			if err != nil || !ok {
+			out := cmd.OutOrStdout()
+			note, err := r.checkOnly(only)
+			if err != nil {
 				return err
 			}
-			out := cmd.OutOrStdout()
+			if note != "" {
+				_, _ = fmt.Fprintf(out, "%s; nothing to do (resume it: cairn project resume %s)\n", note, only)
+				return nil
+			}
 			printLoadErrors(cmd.ErrOrStderr(), r.ws.loadErrs)
 			ops := r.plan(only, prune)
 			renderPlan(out, ops)
@@ -269,9 +298,15 @@ func newWsApplyCmd() *cobra.Command {
 			}
 			// Apply re-verifies every object before touching it (E13), so
 			// the gap between plan and confirmation is safe.
-			if destructive && !yes && !ask(cmd.InOrStdin(), out, "Apply?") {
-				_, _ = fmt.Fprintln(out, "nothing changed")
-				return nil
+			if destructive && !yes {
+				if !interactive(cmd.InOrStdin()) {
+					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "destructive changes need confirmation: re-run with --yes")
+					return &ExitError{Code: 1}
+				}
+				if !ask(cmd.InOrStdin(), out, "Apply?") {
+					_, _ = fmt.Fprintln(out, "nothing changed")
+					return nil
+				}
 			}
 			_, _ = fmt.Fprintln(out)
 			if renderResults(out, reconcile.Apply(ctxOf(cmd), r.drv, r.ws.projects, ops)) {
@@ -436,18 +471,34 @@ func newWsOpenCmd() *cobra.Command {
 				_, _ = fmt.Fprintf(errOut, "the session of %s was not found after apply; see: cairn plan %s\n", id, id)
 				return &ExitError{Code: 1}
 			}
-			// Inside tmux: switch the current client, never nest (Review
-			// Focus 5). The target is the session id, never its name.
-			if inTmux() {
-				if err := drv.SwitchClient(ctx, sid); err != nil {
-					return fmt.Errorf("%w (if your client is attached to another tmux server, detach and run: %s)",
-						err, strings.Join(tmux.AttachArgs(socket, p.Session), " "))
+			// Inside tmux: never nest (Review Focus 5). Switch the invoking
+			// client, identified by its own TMUX/TMUX_PANE, to the session id
+			// — only when it is a client of the target server; a client of
+			// another server is never touched.
+			if here := tmuxClientSocket(); here != "" {
+				target, err := drv.SocketPath(ctx)
+				if err != nil {
+					return err
 				}
-				return nil
+				if filepath.Clean(here) != filepath.Clean(target) {
+					attach := "tmux "
+					if socket != "" {
+						attach += "-L " + socket + " "
+					}
+					_, _ = fmt.Fprintf(errOut, "you are inside another tmux server (%s); run: %sattach -t =%s\n", here, attach, p.Session)
+					return &ExitError{Code: 1}
+				}
+				return drv.SwitchClientHere(ctx, sid, os.Getenv("TMUX"), os.Getenv("TMUX_PANE"))
 			}
 			return execProcess(tmux.AttachArgs(socket, sid))
 		},
 	}
+}
+
+// statusJSON is the output of status --json.
+type statusJSON struct {
+	Projects   []statusRow     `json:"projects"`
+	LoadErrors []loadErrorJSON `json:"load_errors"`
 }
 
 // statusRow is one project in status --json.
@@ -507,7 +558,7 @@ func newWsStatusCmd() *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			if asJSON {
-				return writeJSON(out, map[string][]statusRow{"projects": rows})
+				return writeJSON(out, statusJSON{Projects: rows, LoadErrors: loadErrorsJSON(r.ws)})
 			}
 			printLoadErrors(cmd.ErrOrStderr(), r.ws.loadErrs)
 			if len(rows) == 0 {

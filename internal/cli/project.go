@@ -79,9 +79,6 @@ func newProjectAddCmd() *cobra.Command {
 				return fmt.Errorf("invalid project: %s", strings.Join(msgs, "; "))
 			}
 			path := projectFile(dirs, id)
-			if wsRoot.Exists(path) {
-				return fmt.Errorf("project %s already exists (%s); edit it with: cairn project edit %s", id, path, id)
-			}
 			data, err := workspace.Marshal(p)
 			if err != nil {
 				return err
@@ -89,7 +86,11 @@ func newProjectAddCmd() *cobra.Command {
 			if err := wsRoot.MkdirAll(projectsDir(dirs), 0o755); err != nil {
 				return err
 			}
-			if err := wsRoot.WriteAtomic(path, data, 0o644); err != nil {
+			// Exclusive: a concurrent add of the same id cannot overwrite.
+			if err := wsRoot.CreateExclusive(path, data, 0o644); err != nil {
+				if errors.Is(err, fs.ErrExist) {
+					return fmt.Errorf("project %s already exists (%s); edit it with: cairn project edit %s", id, path, id)
+				}
 				return err
 			}
 			if _, err := historyStore(dirs).Append("project.add", "add project "+id,
@@ -179,7 +180,9 @@ func newProjectLsCmd() *cobra.Command {
 }
 
 // readProjectFile returns the dirs, the path and the content of project id.
-func readProjectFile(id string) (xdg.Dirs, string, []byte, error) {
+// With forWrite, a project file that is a symlink is refused: cairn would
+// replace the link with a regular file.
+func readProjectFile(id string, forWrite bool) (xdg.Dirs, string, []byte, error) {
 	if err := checkID(id); err != nil {
 		return xdg.Dirs{}, "", nil, err
 	}
@@ -188,6 +191,9 @@ func readProjectFile(id string) (xdg.Dirs, string, []byte, error) {
 		return dirs, "", nil, err
 	}
 	path := projectFile(dirs, id)
+	if fi, err := wsRoot.Lstat(path); forWrite && err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		return dirs, path, nil, fmt.Errorf("%s is a symlink; edit the target directly", path)
+	}
 	data, err := wsRoot.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return dirs, path, nil, fmt.Errorf("project %q is not in the config (%s); create it with: cairn project add %s", id, path, id)
@@ -231,7 +237,7 @@ func newProjectEditCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
-			dirs, path, before, err := readProjectFile(id)
+			dirs, path, before, err := readProjectFile(id, true)
 			if err != nil {
 				return err
 			}
@@ -329,7 +335,7 @@ func newProjectStatusCmd(use, status, short string) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
-			dirs, path, data, err := readProjectFile(id)
+			dirs, path, data, err := readProjectFile(id, true)
 			if err != nil {
 				return err
 			}
@@ -375,7 +381,7 @@ func newProjectRmCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
-			dirs, path, data, err := readProjectFile(id)
+			dirs, path, data, err := readProjectFile(id, false)
 			if err != nil {
 				return err
 			}
@@ -391,6 +397,9 @@ func newProjectRmCmd() *cobra.Command {
 				return fmt.Errorf("project %s is %s; only archived projects can be removed: cairn project archive %s", id, st, id)
 			}
 			out := cmd.OutOrStdout()
+			if !yes && !interactive(cmd.InOrStdin()) {
+				return fmt.Errorf("removing %s needs confirmation: re-run with --yes", path)
+			}
 			if !yes && !ask(cmd.InOrStdin(), out, "Remove "+path+"?") {
 				_, _ = fmt.Fprintln(out, "nothing removed")
 				return nil

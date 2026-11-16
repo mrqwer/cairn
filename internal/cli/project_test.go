@@ -275,3 +275,45 @@ func TestHistoryShowAndLimit(t *testing.T) {
 		t.Fatalf("show:\n%s", out)
 	}
 }
+
+func TestProjectCommandsRefuseSymlinkedFile(t *testing.T) {
+	dir, _ := wsTestEnv(t)
+	addProject(t, "demo", dir)
+	path := projectPath(t, "demo")
+	target := filepath.Join(dir, "elsewhere.toml")
+	if err := os.Rename(path, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(target)
+	for _, args := range [][]string{{"project", "edit", "demo"}, {"project", "archive", "demo"}, {"project", "resume", "demo"}} {
+		out, err := runHost(t, "", args...)
+		if err == nil || !strings.Contains(err.Error(), path+" is a symlink; edit the target directly") {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("symlink replaced: %v", err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != string(before) {
+		t.Fatal("target changed")
+	}
+}
+
+func TestUndoAddRemovesFileAndRestoreBringsItBack(t *testing.T) {
+	dir, _ := wsTestEnv(t)
+	addProject(t, "demo", dir)
+	path := projectPath(t, "demo")
+	data, _ := os.ReadFile(path)
+	addID := histEvents(t)[0].ID
+	mustRun(t, "", "undo")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("undo of add left the file: %v", err)
+	}
+	mustRun(t, "", "history", "restore", addID)
+	if got, _ := os.ReadFile(path); string(got) != string(data) {
+		t.Fatalf("restore of add:\n%s", got)
+	}
+}

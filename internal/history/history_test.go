@@ -554,3 +554,27 @@ func TestAllowedRootEdgeCases(t *testing.T) {
 		t.Fatal("root itself must be refused")
 	}
 }
+
+func TestUndoneIDs(t *testing.T) {
+	s, r := newStore(t)
+	write(t, r, cfgPath, "a")
+	e1, _ := s.Append("project.edit", "one", []history.FileChange{change("", "a")})
+	write(t, r, cfgPath, "b")
+	e2, _ := s.Append("project.edit", "two", []history.FileChange{change("a", "b")})
+	if _, err := s.Undo(e2.ID); err != nil {
+		t.Fatal(err)
+	}
+	evs, err := s.List(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := history.UndoneIDs(evs)
+	if !got[e2.ID] || got[e1.ID] || len(got) != 1 {
+		t.Fatalf("UndoneIDs = %v", got)
+	}
+	// A summary that only looks similar does not count.
+	fake := []history.Event{{ID: "000009", Kind: "project.edit", Summary: "undo " + e1.ID + ": x"}}
+	if len(history.UndoneIDs(fake)) != 0 {
+		t.Fatal("non-undo event counted")
+	}
+}

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -18,22 +17,6 @@ func openHistory() (history.Store, error) {
 		return history.Store{}, err
 	}
 	return historyStore(dirs), nil
-}
-
-// undoneIDs returns the ids of events an undo event was recorded for.
-func undoneIDs(evs []history.Event) map[string]bool {
-	out := map[string]bool{}
-	for _, e := range evs {
-		if e.Kind != history.KindUndo {
-			continue
-		}
-		if rest, ok := strings.CutPrefix(e.Summary, history.KindUndo+" "); ok {
-			if id, _, ok := strings.Cut(rest, ":"); ok {
-				out[id] = true
-			}
-		}
-	}
-	return out
 }
 
 func newHistoryCmd() *cobra.Command {
@@ -51,7 +34,7 @@ func newHistoryCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			undone := undoneIDs(all)
+			undone := history.UndoneIDs(all)
 			out := cmd.OutOrStdout()
 			st, styled := styleFor(out)
 			if len(all) == 0 {
@@ -134,7 +117,7 @@ func newUndoCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				undone := undoneIDs(all)
+				undone := history.UndoneIDs(all)
 				for _, e := range all {
 					if e.Kind != history.KindUndo && e.Kind != history.KindRestore && !undone[e.ID] {
 						id = e.ID

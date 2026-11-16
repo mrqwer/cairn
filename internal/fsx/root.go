@@ -23,6 +23,9 @@ func (r Root) ReadFile(p string) ([]byte, error) { return os.ReadFile(r.Path(p))
 
 func (r Root) Stat(p string) (fs.FileInfo, error) { return os.Stat(r.Path(p)) }
 
+// Lstat is Stat without following a final symlink.
+func (r Root) Lstat(p string) (fs.FileInfo, error) { return os.Lstat(r.Path(p)) }
+
 func (r Root) MkdirAll(p string, perm fs.FileMode) error { return os.MkdirAll(r.Path(p), perm) }
 
 // Exists reports whether p exists.
@@ -72,6 +75,52 @@ func (r Root) WriteAtomic(p string, data []byte, perm fs.FileMode) error {
 	}
 	if err := os.Rename(name, full); err != nil {
 		_ = os.Remove(name)
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	return d.Sync()
+}
+
+// CreateExclusive creates p with data only when nothing exists at p: the
+// content is written and fsynced to a temp file in the same directory, then
+// hard-linked to p (which fails atomically when p exists), the temp file is
+// removed and the directory fsynced. An existing p gives an error matching
+// fs.ErrExist and is left untouched.
+func (r Root) CreateExclusive(p string, data []byte, perm fs.FileMode) error {
+	full := r.Path(p)
+	dir := filepath.Dir(full)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(full)+".tmp*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer func() { _ = os.Remove(name) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Link(name, full); err != nil {
+		return err
+	}
+	if err := os.Remove(name); err != nil {
 		return err
 	}
 	d, err := os.Open(dir)

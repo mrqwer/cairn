@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -156,10 +157,18 @@ func TestUpIsNeverDestructive(t *testing.T) {
 		t.Fatalf("extra window not reported:\n%s", out)
 	}
 
+	out, err = runHost(t, "y\n", "apply", "--prune")
+	if exitCode(err) != 1 || !strings.Contains(out, "destructive changes need confirmation: re-run with --yes") ||
+		strings.Contains(out, "Apply?") || fd.called("Kill") {
+		t.Fatalf("apply --prune without a terminal: %v %v\n%s", err, fd.calls, out)
+	}
+
+	interactive = func(io.Reader) bool { return true }
 	out, err = runHost(t, "n\n", "apply", "--prune")
-	if err != nil || !strings.Contains(out, "Apply? [y/N]") || !strings.Contains(out, "-") || fd.called("Kill") {
+	if err != nil || !strings.Contains(out, "Apply? [y/N]") || !strings.Contains(out, "nothing changed") || fd.called("Kill") {
 		t.Fatalf("apply --prune answered no: %v %v\n%s", err, fd.calls, out)
 	}
+	interactive = func(io.Reader) bool { return false }
 
 	out, err = runHost(t, "", "apply", "--prune", "--yes")
 	if err != nil || !fd.called("KillWindow @90") || strings.Contains(out, "Apply?") {
@@ -171,19 +180,35 @@ func TestUpIsNeverDestructive(t *testing.T) {
 // and never attaches (no nesting).
 func TestOpenInsideTmuxSwitchesClient(t *testing.T) {
 	dir, fd := wsTestEnv(t)
-	t.Setenv("TMUX", "/tmp/tmux-0/default,1,0")
+	t.Setenv("TMUX", "/tmp/tmux-0/lab,1,0")
 	t.Setenv("TMUX_PANE", "%0")
+	fd.socketPath = "/tmp/tmux-0/lab"
 	addProject(t, "demo", dir)
-	out := mustRun(t, "", "open", "demo")
+	out := mustRun(t, "", "--socket", "lab", "open", "demo")
 	sid := fd.session(t, "demo").id
-	if !fd.called("SwitchClient "+sid) || fd.called("exec") {
+	want := "SwitchClientHere " + sid + " TMUX=/tmp/tmux-0/lab,1,0 TMUX_PANE=%0"
+	if !fd.called(want) || fd.called("exec") {
 		t.Fatalf("calls: %v\n%s", fd.calls, out)
 	}
 	// Already running: no new objects, still a switch.
 	fd.calls = nil
-	mustRun(t, "", "open", "demo")
-	if fd.called("New") || !fd.called("SwitchClient "+sid) || fd.called("exec") {
+	mustRun(t, "", "--socket", "lab", "open", "demo")
+	if fd.called("New") || !fd.called(want) || fd.called("exec") {
 		t.Fatalf("second open: %v", fd.calls)
+	}
+}
+
+// Inside a client of another tmux server, open touches no client at all.
+func TestOpenInsideOtherServerRefuses(t *testing.T) {
+	dir, fd := wsTestEnv(t)
+	t.Setenv("TMUX", "/tmp/tmux-0/default,1,0")
+	t.Setenv("TMUX_PANE", "%0")
+	fd.socketPath = "/tmp/tmux-0/lab"
+	addProject(t, "demo", dir)
+	out, err := runHost(t, "", "--socket", "lab", "open", "demo")
+	if exitCode(err) != 1 || fd.called("SwitchClient") || fd.called("exec") ||
+		!strings.Contains(out, "you are inside another tmux server (/tmp/tmux-0/default); run: tmux -L lab attach -t =demo") {
+		t.Fatalf("open: %v %v\n%s", err, fd.calls, out)
 	}
 }
 
@@ -350,5 +375,46 @@ func TestRealTmuxRoundTrip(t *testing.T) {
 	js := mustRun(t, "", "--socket", socket, "status", "--json")
 	if !strings.Contains(js, `"running": true`) {
 		t.Fatalf("status: %s", js)
+	}
+}
+
+// --json writes exactly one JSON document to stdout, also for an inactive
+// project and with a broken project file.
+func TestJSONOutputIsOneDocument(t *testing.T) {
+	dir, _ := wsTestEnv(t)
+	addProject(t, "demo", dir)
+	mustRun(t, "", "project", "archive", "demo")
+	bad := filepath.Join(testDirs(t).Config, "projects", "broken.toml")
+	if err := os.WriteFile(bad, []byte("id = ["), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	decode := func(args ...string) map[string]json.RawMessage {
+		t.Helper()
+		stdout, _, err := runSplit(t, args...)
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		dec := json.NewDecoder(strings.NewReader(stdout))
+		var m map[string]json.RawMessage
+		if err := dec.Decode(&m); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, stdout)
+		}
+		if dec.More() {
+			t.Fatalf("%v: more than one document:\n%s", args, stdout)
+		}
+		return m
+	}
+	m := decode("plan", "demo", "--json")
+	if string(m["ops"]) != "[]" || !strings.Contains(string(m["notes"]), "project demo is archived") ||
+		!strings.Contains(string(m["load_errors"]), "broken.toml") {
+		t.Fatalf("plan demo --json: %v", m)
+	}
+	m = decode("plan", "--json")
+	if string(m["notes"]) != "[]" || string(m["ops"]) != "[]" {
+		t.Fatalf("plan --json: %s %s", m["notes"], m["ops"])
+	}
+	m = decode("status", "--json")
+	if string(m["projects"]) != "[]" || !strings.Contains(string(m["load_errors"]), "broken.toml") {
+		t.Fatalf("status --json: %v", m)
 	}
 }
