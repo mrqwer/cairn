@@ -23,6 +23,9 @@ type fakeDriver struct {
 	sessions   []*fSession
 	seq        int
 	idle       bool // PaneIdle answer for every pane
+	// live, when set, is returned by Snapshot instead of the modelled
+	// sessions (capture tests need pane geometry and paths).
+	live *tmux.Snapshot
 }
 
 type fSession struct {
@@ -74,6 +77,9 @@ func (f *fakeDriver) newPane(p tmux.PaneSpec) *fPane {
 
 func (f *fakeDriver) Snapshot(context.Context) (tmux.Snapshot, error) {
 	f.rec("Snapshot")
+	if f.live != nil {
+		return *f.live, nil
+	}
 	var snap tmux.Snapshot
 	for _, s := range f.sessions {
 		ts := tmux.Session{ID: s.id, Name: s.name, Key: s.key}
