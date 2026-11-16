@@ -1,6 +1,7 @@
 package workspace_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/mrqwer/cairn/internal/workspace"
@@ -54,5 +55,81 @@ func TestValidateErrors(t *testing.T) {
 	p.ApplyDefaults("/home/u")
 	if errs := p.Validate(); len(errs) != 0 {
 		t.Fatalf("valid project: %v", errs)
+	}
+}
+
+func TestValidateRejectsControlChars(t *testing.T) {
+	cases := []struct {
+		name string
+		mod  func(*workspace.Project)
+		key  string
+	}{
+		{"id", func(p *workspace.Project) { p.ID = "a\tb" }, "id"},
+		{"name", func(p *workspace.Project) { p.Name = "a\nb" }, "name"},
+		{"session", func(p *workspace.Project) { p.Session = "a\x7fb" }, "session"},
+		{"window key", func(p *workspace.Project) { p.Windows[0].Key = "a\nb" }, "windows[0].key"},
+		{"window name", func(p *workspace.Project) { p.Windows[0].Name = "a\x01b" }, "windows[0].name"},
+		{"pane cwd", func(p *workspace.Project) { p.Windows[0].Panes[0].Cwd = "/x\ny" }, "windows[0].panes[0].cwd"},
+		{"pane run", func(p *workspace.Project) { p.Windows[0].Panes[0].Run = []string{"a\x1bb"} }, "windows[0].panes[0].run[0]"},
+		{"pane title", func(p *workspace.Project) { p.Windows[0].Panes[1].Title = "a\tb" }, "windows[0].panes[1].title"},
+		{"pane role", func(p *workspace.Project) { p.Windows[0].Panes[0].Role = "a\nb" }, "windows[0].panes[0].role"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := valid()
+			p.ApplyDefaults("/home/u")
+			c.mod(&p)
+			for _, e := range p.Validate() {
+				if e.Key == c.key && strings.Contains(e.Msg, "control character") {
+					return
+				}
+			}
+			t.Fatalf("want control-character error on %q, got %v", c.key, p.Validate())
+		})
+	}
+}
+
+func TestValidateRejectsTildeCwd(t *testing.T) {
+	for _, cwd := range []string{"~", "~/code", "~user/x"} {
+		p := valid()
+		p.Windows[0].Panes[0].Cwd = cwd
+		p.ApplyDefaults("/home/u")
+		found := false
+		for _, e := range p.Validate() {
+			if e.Key == "windows[0].panes[0].cwd" && strings.Contains(e.Msg, "absolute") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("cwd %q: want a hint error, got %v", cwd, p.Validate())
+		}
+	}
+	p := valid()
+	p.Windows[0].Panes[0].Cwd = "sub"
+	p.ApplyDefaults("/home/u")
+	if errs := p.Validate(); len(errs) != 0 || p.Windows[0].Panes[0].Cwd != "/home/u/demo/sub" {
+		t.Fatalf("relative cwd must stay relative to root: %v %q", errs, p.Windows[0].Panes[0].Cwd)
+	}
+}
+
+func TestSlugAlwaysValid(t *testing.T) {
+	for _, in := range []string{"_x", "__a_", "!!!", "", "  ", "Ünï", "a", "-_-"} {
+		got := workspace.Slug(in)
+		if got == "" || got[0] == '_' || got[0] == '-' {
+			t.Errorf("Slug(%q) = %q", in, got)
+		}
+		p := workspace.Project{ID: got, Root: "/r", Windows: []workspace.Window{{Key: "k"}}}
+		p.ApplyDefaults("/h")
+		for _, e := range p.Validate() {
+			if e.Key == "id" {
+				t.Errorf("Slug(%q) = %q fails slugRe: %v", in, got, e)
+			}
+		}
+	}
+	if got := workspace.Slug("_Hello World_"); got != "hello-world" {
+		t.Errorf("got %q", got)
+	}
+	if k, ok := workspace.TrySlug("!!!"); ok || k != "" {
+		t.Errorf("TrySlug = %q %v", k, ok)
 	}
 }

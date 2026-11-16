@@ -66,7 +66,9 @@ func Session(s tmux.Session, opts Options) (Result, error) {
 	var mapping []PaneRef
 	p := workspace.Project{ID: opts.ID, Name: s.Name}
 	if p.ID == "" {
-		if p.ID = workspace.Slug(s.Name); p.ID == "" {
+		if id, ok := workspace.TrySlug(s.Name); ok {
+			p.ID = id
+		} else {
 			return Result{}, fmt.Errorf("cannot derive a project id from session name %q; pass one with --id", s.Name)
 		}
 	}
@@ -132,7 +134,7 @@ func validate(p workspace.Project) []string {
 
 // windowKey is the slug of name, or "window-<pos>" when nothing is left.
 func windowKey(name string, pos int) string {
-	if k := workspace.Slug(name); k != "" {
+	if k, ok := workspace.TrySlug(name); ok {
 		return k
 	}
 	return fmt.Sprintf("window-%d", pos)

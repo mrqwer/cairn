@@ -64,15 +64,24 @@ var (
 	nonSlugRe = regexp.MustCompile(`[^a-z0-9_-]+`)
 )
 
-// Slug lowercases s, replaces runs of characters outside [a-z0-9_-] with
-// "-", trims "-" and truncates to 63 characters.
-func Slug(s string) string {
-	s = nonSlugRe.ReplaceAllString(strings.ToLower(s), "-")
-	s = strings.Trim(s, "-")
+// TrySlug lowercases s, replaces runs of characters outside [a-z0-9_-] with
+// "-", trims "-" and "_" from both ends and truncates to 63 characters. ok is
+// false (and the result empty) when nothing usable is left.
+func TrySlug(s string) (string, bool) {
+	s = strings.Trim(nonSlugRe.ReplaceAllString(strings.ToLower(s), "-"), "-_")
 	if len(s) > 63 {
-		s = strings.TrimRight(s[:63], "-")
+		s = strings.TrimRight(s[:63], "-_")
 	}
-	return s
+	return s, s != ""
+}
+
+// Slug is TrySlug that falls back to "project" so the result always matches
+// the id pattern.
+func Slug(s string) string {
+	if k, ok := TrySlug(s); ok {
+		return k
+	}
+	return "project"
 }
 
 // DefaultRestart is the restart policy implied by a pane role.
@@ -101,7 +110,7 @@ func (p *Project) ApplyDefaults(home string) {
 	for wi := range p.Windows {
 		w := &p.Windows[wi]
 		if w.Key == "" {
-			w.Key = Slug(w.Name)
+			w.Key, _ = TrySlug(w.Name)
 		}
 		if w.Name == "" {
 			w.Name = w.Key
@@ -120,6 +129,8 @@ func (p *Project) ApplyDefaults(home string) {
 			switch {
 			case pn.Cwd == "":
 				pn.Cwd = p.Root
+			case strings.HasPrefix(pn.Cwd, "~"):
+				// Left as written so Validate can reject it with a hint.
 			case !filepath.IsAbs(pn.Cwd) && p.Root != "":
 				pn.Cwd = filepath.Join(p.Root, pn.Cwd)
 			}

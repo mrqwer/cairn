@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,7 +40,6 @@ func Load(root fsx.Root, dirs xdg.Dirs) ([]Project, []LoadError, error) {
 	var (
 		projects []Project
 		lerrs    []LoadError
-		seen     = map[string]string{}
 	)
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".toml") {
@@ -60,11 +60,6 @@ func Load(root fsx.Root, dirs xdg.Dirs) ([]Project, []LoadError, error) {
 			lerrs = append(lerrs, LoadError{file, fmt.Errorf("id %q must equal the file name %q", p.ID, want)})
 			continue
 		}
-		if prev, dup := seen[p.ID]; dup {
-			lerrs = append(lerrs, LoadError{file, fmt.Errorf("duplicate id %q (also in %s)", p.ID, prev)})
-			continue
-		}
-		seen[p.ID] = file
 		projects = append(projects, p)
 	}
 	sort.Slice(projects, func(i, j int) bool { return projects[i].ID < projects[j].ID })
@@ -74,14 +69,6 @@ func Load(root fsx.Root, dirs xdg.Dirs) ([]Project, []LoadError, error) {
 func parse(file string, data []byte, home string) (Project, error) {
 	p, err := Decode(data)
 	if err != nil {
-		var sm *toml.StrictMissingError
-		if errors.As(err, &sm) {
-			var keys []string
-			for _, de := range sm.Errors {
-				keys = append(keys, strings.Join(de.Key(), "."))
-			}
-			return Project{}, fmt.Errorf("unknown key %s", strings.Join(keys, ", "))
-		}
 		return Project{}, err
 	}
 	p.ApplyDefaults(home)
@@ -100,9 +87,35 @@ func Decode(data []byte) (Project, error) {
 	var p Project
 	dec := toml.NewDecoder(bytes.NewReader(data)).DisallowUnknownFields()
 	if err := dec.Decode(&p); err != nil {
-		return Project{}, err
+		return Project{}, friendlyDecodeError(err)
 	}
 	return p, nil
+}
+
+var typeErrRe = regexp.MustCompile(`cannot decode TOML (\S+) into .* of type (\S+)$`)
+
+// friendlyDecodeError rewrites go-toml errors to name TOML keys instead of
+// Go struct fields.
+func friendlyDecodeError(err error) error {
+	var sm *toml.StrictMissingError
+	if errors.As(err, &sm) {
+		var keys []string
+		for _, de := range sm.Errors {
+			keys = append(keys, strings.Join(de.Key(), "."))
+		}
+		return fmt.Errorf("unknown key %s", strings.Join(keys, ", "))
+	}
+	var de *toml.DecodeError
+	if errors.As(err, &de) {
+		key := strings.Join(de.Key(), ".")
+		if m := typeErrRe.FindStringSubmatch(de.Error()); m != nil && key != "" {
+			return fmt.Errorf("%s: a TOML %s cannot be used here, expected %s", key, m[1], m[2])
+		}
+		if key != "" {
+			return fmt.Errorf("%s: %s", key, strings.TrimPrefix(de.Error(), "toml: "))
+		}
+	}
+	return err
 }
 
 // Marshal renders p as TOML with a fixed field order, omitting defaults.

@@ -17,6 +17,14 @@ func (p Project) Validate() []FieldError {
 	add := func(key, format string, a ...any) {
 		errs = append(errs, FieldError{key, fmt.Sprintf(format, a...)})
 	}
+	ctl := func(key, val string) {
+		if hasControl(val) {
+			add(key, "%q must not contain control characters", val)
+		}
+	}
+	ctl("id", p.ID)
+	ctl("name", p.Name)
+	ctl("session", p.Session)
 	if !slugRe.MatchString(p.ID) {
 		add("id", "%q must match [a-z0-9][a-z0-9_-]{0,62}", p.ID)
 	}
@@ -46,14 +54,28 @@ func (p Project) Validate() []FieldError {
 			add(wk+".key", "duplicate window key %q", w.Key)
 		}
 		seen[w.Key] = true
+		ctl(wk+".key", w.Key)
+		ctl(wk+".name", w.Name)
 		if len(w.Panes) == 0 {
 			add(wk+".panes", "at least one pane is required")
 		}
 		for i, pn := range w.Panes {
 			validatePane(wk, i, pn, add)
+			pk := fmt.Sprintf("%s.panes[%d]", wk, i)
+			ctl(pk+".role", pn.Role)
+			ctl(pk+".cwd", pn.Cwd)
+			ctl(pk+".title", pn.Title)
+			for j, r := range pn.Run {
+				ctl(fmt.Sprintf("%s.run[%d]", pk, j), r)
+			}
 		}
 	}
 	return errs
+}
+
+// hasControl reports whether s holds a byte below 0x20 or 0x7f.
+func hasControl(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0
 }
 
 func isSpace(r rune) bool {
@@ -71,6 +93,9 @@ func validatePane(wk string, i int, pn Pane, add func(string, string, ...any)) {
 	case RestartNever, RestartOnFailure, RestartAlways:
 	default:
 		add(pk+".restart", "%q must be never, on-failure or always", pn.Restart)
+	}
+	if strings.HasPrefix(pn.Cwd, "~") {
+		add(pk+".cwd", "%q: \"~\" is not expanded in a pane cwd; use an absolute path or a path relative to the project root", pn.Cwd)
 	}
 	for j, r := range pn.Run {
 		if r == "" {

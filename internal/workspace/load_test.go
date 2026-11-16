@@ -179,3 +179,17 @@ func TestTemplates(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeErrorsNameTOMLKeys(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"id = \"a\"\n[[windows]]\n[[windows.panes]]\nsize = \"x\"\n", "windows.panes.size"},
+		{"id = 3\n", "id"},
+		{"bogus = 1\n", "bogus"},
+	}
+	for _, c := range cases {
+		_, err := workspace.Decode([]byte(c.in))
+		if err == nil || !strings.Contains(err.Error(), c.want) || strings.Contains(err.Error(), "workspace.") || strings.Contains(err.Error(), "struct field") {
+			t.Errorf("Decode(%q) error %v, want key %q and no Go names", c.in, err, c.want)
+		}
+	}
+}
