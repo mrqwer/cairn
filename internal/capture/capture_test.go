@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -206,7 +207,7 @@ func TestRoles(t *testing.T) {
 	idle := func(pid int) bool { return pid == 10 }
 	p, notes := mustCapture(t, session("demo", liveWindow(t, "code", cfg, ps)), Options{IsIdle: idle})
 	got := p.Windows[0].Panes
-	wantRoles := []string{"shell", "editor", "command", "command", "editor", "shell"}
+	wantRoles := []string{"shell", "editor", "command", "shell", "editor", "shell"}
 	for i, r := range wantRoles {
 		if got[i].Role != r {
 			t.Fatalf("pane %d role %q, want %q (%+v)", i+1, got[i].Role, r, got)
@@ -222,7 +223,7 @@ func TestRoles(t *testing.T) {
 	}
 	want := []string{
 		`window code pane 3: running "npm" — add run = [...] to restart it automatically`,
-		`window code pane 4: running "bash" — add run = [...] to restart it automatically`,
+		`window code pane 4: shell was busy when captured; recorded as a plain shell`,
 		`window code pane 6: the pane is dead; captured as a shell`,
 	}
 	if !reflect.DeepEqual(notes, want) {
@@ -485,4 +486,76 @@ func TestResultIsUndefaulted(t *testing.T) {
 	if p.Status != "" || p.Session != "" || p.Windows[0].Panes[0].Restart != "" || p.Windows[0].Panes[1].Cwd != "" {
 		t.Fatalf("defaults leaked: %+v", p)
 	}
+}
+
+func TestZoomedWindowNote(t *testing.T) {
+	// The zoomed pane is reported at full size, overlapping the others.
+	w := tmux.Window{ID: "@1", Name: "code", W: 200, H: 50, Panes: []tmux.Pane{
+		{Index: 0, Left: 0, Top: 0, W: 200, H: 50, Cwd: "/home/u/demo", Cmd: "zsh"},
+		{Index: 1, Left: 101, Top: 0, W: 99, H: 50, Cwd: "/home/u/demo/b", Cmd: "zsh"},
+	}}
+	p, notes := mustCapture(t, session("demo", w), Options{})
+	want := "window code: looks zoomed (a pane covers the window) — unzoom it (prefix+z) and capture again; panes recorded side by side"
+	if !reflect.DeepEqual(notes, []string{want}) {
+		t.Fatalf("notes: %q", notes)
+	}
+	if pn := p.Windows[0].Panes; len(pn) != 2 || pn[1].Split != "h" || pn[1].Cwd != "b" {
+		t.Fatalf("panes: %+v", pn)
+	}
+}
+
+func TestTiledLayoutReconstructs(t *testing.T) {
+	// tmux "tiled" with four panes in 200x50: exact cuts with one border cell.
+	rs := [][4]int{{0, 0, 100, 25}, {101, 0, 99, 25}, {0, 26, 100, 24}, {101, 26, 99, 24}}
+	w := tmux.Window{ID: "@1", Name: "grid", W: 200, H: 50}
+	for i, r := range rs {
+		w.Panes = append(w.Panes, tmux.Pane{Index: i, Left: r[0], Top: r[1], W: r[2], H: r[3],
+			Cwd: fmt.Sprintf("/home/u/demo/p%d", i), Cmd: "zsh"})
+	}
+	p, notes := mustCapture(t, session("demo", w), Options{Root: "/home/u/demo"})
+	if len(notes) != 0 {
+		t.Fatalf("notes: %v", notes)
+	}
+	assertPlacement(t, p.Windows[0], w)
+}
+
+// assertPlacement rebuilds the captured window's geometry and checks that
+// every rect carries the cwd of the live pane at that place.
+func assertPlacement(t *testing.T, cw workspace.Window, lw tmux.Window) {
+	t.Helper()
+	tree, err := layout.Build(cw.Panes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range layout.Geometry(tree, lw.W, lw.H) {
+		cwd := cw.Panes[r.Pane-1].Cwd
+		found := false
+		for _, lp := range lw.Panes {
+			if lp.Left-r.X <= 1 && r.X-lp.Left <= 1 && lp.Top-r.Y <= 1 && r.Y-lp.Top <= 1 {
+				found = true
+				if "/home/u/demo/"+cwd != lp.Cwd {
+					t.Fatalf("pane %d at %d,%d has cwd %q, live pane there has %q", r.Pane, r.X, r.Y, cwd, lp.Cwd)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("no live pane at %v", r)
+		}
+	}
+}
+
+// The mapping follows the rects, not pane_index: with indexes reversed
+// against the geometric order each pane still keeps its own directory.
+func TestReversedIndexesMapByRects(t *testing.T) {
+	rs := [][4]int{{0, 0, 120, 50}, {121, 0, 79, 20}, {121, 21, 79, 29}}
+	w := tmux.Window{ID: "@1", Name: "code", W: 200, H: 50}
+	for i, r := range rs {
+		w.Panes = append(w.Panes, tmux.Pane{Index: len(rs) - 1 - i, Left: r[0], Top: r[1], W: r[2], H: r[3],
+			Cwd: fmt.Sprintf("/home/u/demo/p%d", i), Cmd: "zsh"})
+	}
+	p, notes := mustCapture(t, session("demo", w), Options{Root: "/home/u/demo"})
+	if len(notes) != 0 {
+		t.Fatalf("notes: %v", notes)
+	}
+	assertPlacement(t, p.Windows[0], w)
 }

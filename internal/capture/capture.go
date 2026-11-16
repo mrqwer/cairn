@@ -140,7 +140,11 @@ func captureWindow(w tmux.Window, key, root string, isIdle func(int) bool) (work
 	// src[i] is the index into panes of config pane i+1.
 	seq, src, err := sequence(panes, w.W, w.H)
 	if err != nil {
-		notes = append(notes, fmt.Sprintf("window %s (%q): the layout cannot be rebuilt (%v); its panes are listed side by side, adjust split/size by hand", key, w.Name, err))
+		if overlapping(panes) {
+			notes = append(notes, fmt.Sprintf("window %s: looks zoomed (a pane covers the window) — unzoom it (prefix+z) and capture again; panes recorded side by side", key))
+		} else {
+			notes = append(notes, fmt.Sprintf("window %s (%q): the layout cannot be rebuilt (%v); its panes are listed side by side, adjust split/size by hand", key, w.Name, err))
+		}
 		seq = make([]workspace.Pane, len(panes))
 		src = make([]int, len(panes))
 		for i := range panes {
@@ -162,6 +166,19 @@ func captureWindow(w tmux.Window, key, root string, isIdle func(int) bool) (work
 		win.Panes = append(win.Panes, pn)
 	}
 	return win, notes
+}
+
+// overlapping reports whether two pane rects share a cell, as when a zoomed
+// pane is reported at full window size over the others.
+func overlapping(panes []tmux.Pane) bool {
+	for i, a := range panes {
+		for _, b := range panes[i+1:] {
+			if a.Left < b.Left+b.W && b.Left < a.Left+a.W && a.Top < b.Top+b.H && b.Top < a.Top+a.H {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func fromRects(panes []tmux.Pane, w, h int) (*layout.Node, error) {
@@ -195,8 +212,13 @@ func role(p tmux.Pane, isIdle func(int) bool) (string, []string, string) {
 	}
 	cmd := filepath.Base(p.Cmd)
 	switch {
-	case tmux.IsShell(cmd) && (isIdle == nil || isIdle(p.PID)):
-		return workspace.RoleShell, nil, ""
+	case tmux.IsShell(cmd):
+		// A busy shell is still a shell: a command pane without run would
+		// mean nothing to apply.
+		if isIdle == nil || isIdle(p.PID) {
+			return workspace.RoleShell, nil, ""
+		}
+		return workspace.RoleShell, nil, "shell was busy when captured; recorded as a plain shell"
 	case editors[cmd]:
 		return workspace.RoleEditor, []string{cmd}, ""
 	}

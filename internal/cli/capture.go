@@ -23,7 +23,7 @@ import (
 // idle check); it never changes anything on the server.
 func newCaptureCmd() *cobra.Command {
 	var id, root string
-	var write, list bool
+	var write, list, force bool
 	cmd := &cobra.Command{
 		Use:   "capture <tmux-session>",
 		Short: "Turn a live, unmanaged tmux session into a project config",
@@ -33,7 +33,7 @@ func newCaptureCmd() *cobra.Command {
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if list {
-				if len(args) > 0 || write || id != "" || root != "" {
+				if len(args) > 0 || write || force || id != "" || root != "" {
 					return errors.New("--list takes no session name and no --write, --id or --root")
 				}
 				return captureList(cmd)
@@ -46,12 +46,16 @@ func newCaptureCmd() *cobra.Command {
 					return err
 				}
 			}
-			return captureSession(cmd, args[0], id, root, write)
+			if force && !write {
+				return errors.New("--force only applies with --write")
+			}
+			return captureSession(cmd, args[0], id, root, write, force)
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "project id (default: the session name as a slug)")
 	cmd.Flags().StringVar(&root, "root", "", "project root (default: the directory most panes are in)")
 	cmd.Flags().BoolVar(&write, "write", false, "save the project config instead of only printing it")
+	cmd.Flags().BoolVar(&force, "force", false, "with --write: save even though tmux listed lines cairn could not parse")
 	cmd.Flags().BoolVar(&list, "list", false, "list the live sessions cairn does not manage")
 	cmd.Flags().BoolVar(&list, "all-unmanaged", false, "same as --list")
 	_ = cmd.Flags().MarkHidden("all-unmanaged")
@@ -128,7 +132,18 @@ func resolveRoot(root, home string) (string, error) {
 	return filepath.Abs(root)
 }
 
-func captureSession(cmd *cobra.Command, name, id, root string, write bool) error {
+// skippedNote describes the snapshot lines tmux listed that could not be
+// parsed (the first three, shortened).
+func skippedNote(skipped []string) string {
+	shown := make([]string, 0, 3)
+	for _, l := range skipped[:min(3, len(skipped))] {
+		shown = append(shown, fmt.Sprintf("%q", ui.Truncate(oneLine(l), 40)))
+	}
+	return fmt.Sprintf("%s could not be parsed (%s) — the capture may be incomplete",
+		ui.Plural(len(skipped), "tmux line", "tmux lines"), strings.Join(shown, ", "))
+}
+
+func captureSession(cmd *cobra.Command, name, id, root string, write, force bool) error {
 	dirs, err := xdg.Resolve(os.Getenv)
 	if err != nil {
 		return err
@@ -152,6 +167,19 @@ func captureSession(cmd *cobra.Command, name, id, root string, write bool) error
 	if err != nil {
 		return err
 	}
+	if len(snap.Skipped) > 0 {
+		note := skippedNote(snap.Skipped)
+		warn := "warning: " + note
+		if st, styled := styleFor(cmd.ErrOrStderr()); styled {
+			warn = st.Red(warn)
+		}
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), warn)
+		if write && !force {
+			return fmt.Errorf("refusing to write: tmux listed lines cairn could not parse, so windows or panes may be missing from the capture; "+
+				"check the proposal (cairn capture %s) and re-run with --write --force to save it anyway", shellWord(name))
+		}
+		notes = append([]string{note}, notes...)
+	}
 	// capture.Session validated the id; it is safe in a path now.
 	path := projectFile(dirs, p.ID)
 	if wsRoot.Exists(path) {
@@ -166,7 +194,9 @@ func captureSession(cmd *cobra.Command, name, id, root string, write bool) error
 	}
 	for _, other := range snap.Sessions {
 		if other.Name == sessName {
-			notes = append(notes, fmt.Sprintf("the live session %q has the same name as the session cairn will create; rename or close it before cairn apply (until then apply skips %s)", sessName, p.ID))
+			notes = append(notes, fmt.Sprintf("a live tmux session named %q exists and is not managed by cairn; cairn will not touch it. "+
+				"Rename it (tmux rename-session -t %s <new>) before running cairn apply, or adopt it (cairn adopt %s, coming next). "+
+				"Closing it would kill its running programs.", sessName, shellWord(sessName), shellWord(sessName)))
 			break
 		}
 	}

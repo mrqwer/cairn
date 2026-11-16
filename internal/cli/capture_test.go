@@ -88,7 +88,7 @@ func TestCaptureWriteRecordsHistoryAndRefusesExisting(t *testing.T) {
 		t.Fatalf("file:\n%s", data)
 	}
 	// The live session keeps the name the managed one will get.
-	if !strings.Contains(out, `session "web" has the same name`) {
+	if !strings.Contains(out, `a live tmux session named "web" exists and is not managed by cairn; cairn will not touch it. Rename it (tmux rename-session -t web <new>) before running cairn apply, or adopt it (cairn adopt web, coming next). Closing it would kill its running programs.`) {
 		t.Fatalf("no clash note:\n%s", out)
 	}
 	if probs := checkProjectData("web-copy", data, "/home/u"); len(probs) != 0 {
@@ -281,7 +281,7 @@ func TestCaptureRealTmuxRoundTrip(t *testing.T) {
 	}
 
 	out := mustRun(t, "", "--socket", socket, "capture", "b", "--id", "b-copy", "--write")
-	for _, want := range []string{`session = "b"`, `window work pane 2: running "sleep"`, `session "b" has the same name`, "Run: cairn plan b-copy"} {
+	for _, want := range []string{`session = "b"`, `window work pane 2: running "sleep"`, `a live tmux session named "b" exists and is not managed by cairn`, "Run: cairn plan b-copy"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("capture output lacks %q:\n%s", want, out)
 		}
@@ -352,5 +352,40 @@ func TestCaptureRealTmuxRoundTrip(t *testing.T) {
 	}
 	if out := mustRun(t, "", "--socket", socket, "plan"); !strings.Contains(out, "nothing to do") {
 		t.Fatalf("plan after apply:\n%s", out)
+	}
+}
+
+func TestCaptureSkippedLinesNeedForce(t *testing.T) {
+	_, fd := wsTestEnv(t)
+	fd.live = liveSnapshot()
+	fd.live.Skipped = []string{"@9\t%9\t0\tbroken line one", "line two", "line three", "line four"}
+	stdout, stderr, err := runSplit(t, "capture", "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const note = "4 tmux lines could not be parsed"
+	if !strings.Contains(stdout, "# note: "+note) || !strings.Contains(stdout, "the capture may be incomplete") ||
+		!strings.Contains(stderr, note) || strings.Contains(stdout, "line four") {
+		t.Fatalf("stdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	_, _, err = runSplit(t, "capture", "web", "--write")
+	if err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("write without --force: %v", err)
+	}
+	if _, err := os.Stat(projectPath(t, "web")); !os.IsNotExist(err) {
+		t.Fatalf("written without --force: %v", err)
+	}
+	stdout, _, err = runSplit(t, "capture", "web", "--write", "--force")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, note) {
+		t.Fatalf("stdout:\n%s", stdout)
+	}
+	if _, err := os.Stat(projectPath(t, "web")); err != nil {
+		t.Fatalf("not written with --force: %v", err)
+	}
+	if m := fd.mutations(); len(m) != 0 {
+		t.Fatalf("capture touched tmux: %v", m)
 	}
 }
