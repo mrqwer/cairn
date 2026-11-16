@@ -1,0 +1,12 @@
+# Managed by cairn host (workspace). Do not edit; run "cairn host ..."
+[Unit]
+Description=Restore cairn workspaces
+After=cairn-tmux.service
+Requires=cairn-tmux.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cairn up
+
+[Install]
+WantedBy=default.target
