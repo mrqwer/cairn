@@ -648,3 +648,65 @@ func TestCheckPaneRejectsEmptyKeyParts(t *testing.T) {
 		}
 	}
 }
+
+// Ctrl-C right after new-window / split-window returned: the marker steps
+// still run and the object ends up marked, not orphaned.
+func TestCancelBetweenCreationAndMarkingStillMarks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := &failRespawn{after: func(args []string) {
+		if slices.Contains(args, "new-window") {
+			cancel()
+		}
+	}}
+	wid, pid, err := Client{R: r}.NewWindow(ctx, "$3", WindowSpec{Key: "demo/logs", Name: "logs",
+		PaneSpec: PaneSpec{Key: "demo/logs/1", Argv: []string{"tail"}}})
+	if err != nil || wid != "@2" || pid != "%4" {
+		t.Fatalf("%q %q %v", wid, pid, err)
+	}
+	for _, want := range []string{"@cairn_w demo/logs", "@cairn_p demo/logs/1", "respawn-pane -k -t %4"} {
+		if !r.did(want) {
+			t.Errorf("missing %q in %q", want, r.calls)
+		}
+	}
+	if r.did("kill-") {
+		t.Errorf("a marked window must not be killed: %q", r.calls)
+	}
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	r2 := &failRespawn{after: func(args []string) {
+		if slices.Contains(args, "split-window") {
+			cancel2()
+		}
+	}}
+	id, err := Client{R: r2}.SplitPane(ctx2, "%9", "h", 50, PaneSpec{Key: "demo/w/2", Argv: []string{"tail"}})
+	if err != nil || id != "%10" {
+		t.Fatalf("%q %v", id, err)
+	}
+	if !r2.did("@cairn_p demo/w/2") || !r2.did("respawn-pane -k -t %10") || r2.did("kill-") {
+		t.Fatalf("calls %q", r2.calls)
+	}
+}
+
+func TestMarkerFailureRemovesNewWindowAndPane(t *testing.T) {
+	r := &failRespawn{failAt: "@cairn_p"}
+	wid, pid, err := Client{R: r}.NewWindow(context.Background(), "$3", WindowSpec{Key: "demo/logs", Name: "logs",
+		PaneSpec: PaneSpec{Key: "demo/logs/1", Argv: []string{"tail"}}})
+	if !errors.Is(err, errBoom) || wid != "" || pid != "" || !r.did("kill-window -t @2") {
+		t.Fatalf("%q %q %v %q", wid, pid, err, r.calls)
+	}
+	r = &failRespawn{failAt: "@cairn_w"}
+	if _, _, err := (Client{R: r}).NewWindow(context.Background(), "$3", WindowSpec{Key: "demo/logs", Name: "logs"}); !errors.Is(err, errBoom) || !r.did("kill-window -t @2") {
+		t.Fatalf("window marker: %v %q", err, r.calls)
+	}
+	r = &failRespawn{failAt: "@cairn_p"}
+	id, err := Client{R: r}.SplitPane(context.Background(), "%9", "h", 50, PaneSpec{Key: "demo/w/2"})
+	if !errors.Is(err, errBoom) || id != "" || !r.did("kill-pane -t %10") {
+		t.Fatalf("%q %v %q", id, err, r.calls)
+	}
+	r = &failRespawn{failAt: "remain-on-exit"}
+	if _, err := (Client{R: r}).SplitPane(context.Background(), "%9", "h", 50, PaneSpec{Key: "demo/w/2", RemainOnExit: true}); !errors.Is(err, errBoom) || !r.did("kill-pane -t %10") {
+		t.Fatalf("remain-on-exit: %v %q", err, r.calls)
+	}
+}

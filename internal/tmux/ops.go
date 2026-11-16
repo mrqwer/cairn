@@ -275,21 +275,24 @@ func (c Client) NewWindow(ctx context.Context, sessionID string, win WindowSpec)
 		return "", "", err
 	}
 	windowID, paneID = id[0], id[1]
-	if err := c.remainOnExit(ctx, paneID, win.PaneSpec); err != nil {
-		return windowID, paneID, err
-	}
-	if err := c.setupWindow(ctx, windowID, win); err != nil {
-		return windowID, paneID, err
-	}
-	if err := c.paneMarker(ctx, paneID, win.PaneSpec); err != nil {
-		return windowID, paneID, err
-	}
-	// A marked pane that never got its command would look in sync forever, so
-	// the start is cancellation-proof and its failure removes the new window
-	// (its id came from this call's -P).
+	// The window id came from this call's -P, so it is provably ours. The
+	// setup runs detached from cancellation (Ctrl-C must not leave an
+	// unmarked window behind) and any failure removes the window again.
 	setupCtx, cancel := startContext(ctx)
 	defer cancel()
-	if err := c.startCommand(setupCtx, paneID, win.PaneSpec); err != nil {
+	err = c.remainOnExit(setupCtx, paneID, win.PaneSpec)
+	if err == nil {
+		err = c.setupWindow(setupCtx, windowID, win)
+	}
+	if err == nil {
+		err = c.paneMarker(setupCtx, paneID, win.PaneSpec)
+	}
+	if err == nil {
+		// A marked pane that never got its command would look in sync
+		// forever, hence the removal on failure.
+		err = c.startCommand(setupCtx, paneID, win.PaneSpec)
+	}
+	if err != nil {
 		_ = c.KillWindow(setupCtx, windowID)
 		return "", "", err
 	}
@@ -320,16 +323,19 @@ func (c Client) SplitPane(ctx context.Context, targetPane string, dir string, pe
 	if err != nil {
 		return "", err
 	}
-	if err := c.remainOnExit(ctx, id[0], p); err != nil {
-		return id[0], err
-	}
-	if err := c.paneMarker(ctx, id[0], p); err != nil {
-		return id[0], err
-	}
+	// The pane id came from this call's -P; setup is cancellation-proof and a
+	// failure removes the pane again (see NewWindow).
 	setupCtx, cancel := startContext(ctx)
 	defer cancel()
-	if err := c.startCommand(setupCtx, id[0], p); err != nil {
-		_ = c.KillPane(setupCtx, id[0]) // the pane id came from this call's -P
+	err = c.remainOnExit(setupCtx, id[0], p)
+	if err == nil {
+		err = c.paneMarker(setupCtx, id[0], p)
+	}
+	if err == nil {
+		err = c.startCommand(setupCtx, id[0], p)
+	}
+	if err != nil {
+		_ = c.KillPane(setupCtx, id[0])
 		return "", err
 	}
 	return id[0], nil

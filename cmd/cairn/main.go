@@ -34,7 +34,7 @@ func run() int {
 			if !cli.MayBeMidApply() {
 				return
 			}
-			fmt.Fprintln(os.Stderr, "cairn: interrupted; finishing the current step and undoing partial changes (press Ctrl-C again to quit at once)")
+			fmt.Fprintln(os.Stderr, "cairn: interrupted; finishing the current step, the remaining steps are not run (press Ctrl-C again to quit at once)")
 		}
 	}()
 	cmd := cli.NewRootCmd()
