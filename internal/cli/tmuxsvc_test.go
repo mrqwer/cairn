@@ -166,3 +166,88 @@ func TestTmuxServiceRoundTripPlan(t *testing.T) {
 		t.Errorf("leftover files: %v", left)
 	}
 }
+
+func TestTmuxServiceStatusOutput(t *testing.T) {
+	dir, r := svcEnv(t)
+	r.Responses["systemctl --user is-enabled cairn-tmux.service"] = execx.Response{Out: []byte("enabled\n")}
+	r.Responses["systemctl --user is-active cairn-tmux.service"] = execx.Response{Out: []byte("active\n")}
+	r.Responses["systemctl --user is-enabled cairn-up.service"] = execx.Response{Out: []byte("not-found\n"), Err: errors.New("exit status 1")}
+	r.Responses["systemctl --user is-active cairn-up.service"] = execx.Response{Out: []byte("failed\n"), Err: errors.New("exit status 3")}
+	unitDir := filepath.Join(dir, "config/systemd/user")
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unitDir, "cairn-tmux.service"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runHost(t, "", "tmux", "service", "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 ||
+		!strings.Contains(lines[0], "cairn-tmux.service") || !strings.Contains(lines[0], "present") ||
+		!strings.Contains(lines[0], "enabled: enabled") || !strings.Contains(lines[0], "active: active") ||
+		!strings.Contains(lines[1], "missing") || !strings.Contains(lines[1], "enabled: not-found") || !strings.Contains(lines[1], "active: failed") {
+		t.Errorf("status output:\n%s", out)
+	}
+}
+
+func TestTmuxServiceUnsafeSocket(t *testing.T) {
+	_, r := svcEnv(t)
+	for _, sock := range []string{"a b", "a%b", "..", "a/b"} {
+		if _, err := runHost(t, "", "tmux", "service", "install", "--yes", "--socket", sock); err == nil {
+			t.Errorf("socket %q accepted", sock)
+		}
+	}
+	if len(r.Calls) != 0 {
+		t.Errorf("commands run: %v", r.Calls)
+	}
+}
+
+func TestTmuxServiceUninstallDeclined(t *testing.T) {
+	dir, _ := svcEnv(t)
+	if out, err := runHost(t, "", "tmux", "service", "install", "--yes"); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	out, err := runHost(t, "n\n", "tmux", "service", "uninstall")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	for _, f := range []string{"cairn-tmux.service", "cairn-up.service"} {
+		if _, err := os.Stat(filepath.Join(dir, "config/systemd/user", f)); err != nil {
+			t.Errorf("%s removed despite decline: %v", f, err)
+		}
+	}
+}
+
+func TestTmuxServiceSocketChange(t *testing.T) {
+	dir, _ := svcEnv(t)
+	up := filepath.Join(dir, "config/systemd/user/cairn-up.service")
+	if out, err := runHost(t, "", "tmux", "service", "install", "--yes", "--socket", "a"); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	// Same socket again: fine with --yes.
+	if out, err := runHost(t, "", "tmux", "service", "install", "--yes", "--socket", "a"); err != nil {
+		t.Fatalf("same socket: %v\n%s", err, out)
+	}
+	// Different socket: --yes alone is refused, files unchanged.
+	out, err := runHost(t, "", "tmux", "service", "install", "--yes", "--socket", "b")
+	if err == nil || !strings.Contains(out, "replaces units for socket a") {
+		t.Fatalf("err=%v out=%s", err, out)
+	}
+	if b, _ := os.ReadFile(up); !strings.Contains(string(b), "--socket a") {
+		t.Errorf("unit changed despite refusal: %s", b)
+	}
+	// Interactive confirmation is accepted.
+	if out, err := runHost(t, "y\n", "tmux", "service", "install", "--socket", "b"); err != nil {
+		t.Fatalf("interactive: %v\n%s", err, out)
+	}
+	// And --force with --yes.
+	if out, err := runHost(t, "", "tmux", "service", "install", "--yes", "--force", "--socket", "a"); err != nil {
+		t.Fatalf("force: %v\n%s", err, out)
+	}
+	if b, _ := os.ReadFile(up); !strings.Contains(string(b), "--socket a") {
+		t.Errorf("force did not replace: %s", b)
+	}
+}

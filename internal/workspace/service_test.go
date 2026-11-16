@@ -86,8 +86,13 @@ func TestServiceActionsShape(t *testing.T) {
 	if len(enables) != 2 || enables[0] != "cairn-tmux.service" || enables[1] != "cairn-up.service" || reload < 0 {
 		t.Errorf("enables %v reload %d", enables, reload)
 	}
-	if strings.Contains(string(fileContent(t, acts, "cairn-tmux.service")), "-L") {
-		t.Error("default socket must not pass -L")
+	def := string(fileContent(t, acts, "cairn-tmux.service"))
+	if strings.Contains(def, "-L") || strings.Contains(def, "ExecStop") {
+		t.Error("default socket must not pass -L nor kill the default server")
+	}
+	sock := string(fileContent(t, ServiceActions(testSelf, "work", testUnitDir), "cairn-tmux.service"))
+	if !strings.Contains(sock, "ExecStop=/usr/bin/env tmux -L work kill-server") {
+		t.Error("explicit socket keeps kill-server")
 	}
 }
 
@@ -97,7 +102,7 @@ func TestServiceRejectsUnsafeInput(t *testing.T) {
 			t.Errorf("self %q accepted", self)
 		}
 	}
-	for _, sock := range []string{"a b", "a%b", "a/b", "$x", "a;b"} {
+	for _, sock := range []string{"a b", "a%b", "a/b", "$x", "a;b", ".", "..", "-x", ".hidden"} {
 		if CheckServiceInput(testSelf, sock) == nil || ServiceActions(testSelf, sock, testUnitDir) != nil {
 			t.Errorf("socket %q accepted", sock)
 		}
@@ -137,5 +142,22 @@ func TestQueryUnits(t *testing.T) {
 	}
 	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("got %+v want %+v", got, want)
+	}
+}
+
+func TestServiceSocketErrorWording(t *testing.T) {
+	err := CheckServiceInput(testSelf, "a b")
+	if err == nil || strings.Contains(err.Error(), "binary path") || !strings.Contains(err.Error(), "socket name") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestRecordedSocket(t *testing.T) {
+	for _, sock := range []string{"", "work"} {
+		acts := ServiceActions(testSelf, sock, testUnitDir)
+		got := RecordedSocket(fileContent(t, acts, "cairn-tmux.service"))
+		if got != sock {
+			t.Errorf("RecordedSocket(%q unit) = %q", sock, got)
+		}
 	}
 }

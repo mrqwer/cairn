@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/mrqwer/cairn/internal/execx"
@@ -22,6 +23,8 @@ const (
 	baseSession   = "cairn-base"
 )
 
+var socketName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
+
 // CheckServiceInput validates the values embedded in the unit files: the
 // cairn binary (absolute, host-module safety rule) and the optional tmux
 // socket name.
@@ -32,13 +35,8 @@ func CheckServiceInput(self, socket string) error {
 	if err := plan.CheckSelfPath(self); err != nil {
 		return err
 	}
-	if socket != "" {
-		if strings.Contains(socket, "/") {
-			return fmt.Errorf("socket name %q must not contain /", socket)
-		}
-		if err := plan.CheckSelfPath(socket); err != nil {
-			return fmt.Errorf("socket name: %w", err)
-		}
+	if socket != "" && !socketName.MatchString(socket) {
+		return fmt.Errorf("socket name %q is invalid: use letters, digits, . _ - and do not start with . or -", socket)
 	}
 	return nil
 }
@@ -57,6 +55,13 @@ func ServiceActions(self, socket, userUnitDir string) []plan.Action {
 		tmux += " -L " + socket
 		up += " --socket " + socket
 	}
+	// Without a socket the unit shares the owner's default tmux server, which
+	// may predate it and hold hand-made sessions: never kill-server there.
+	// KillMode=control-group already ends a server the unit started itself.
+	stop := ""
+	if socket != "" {
+		stop = "ExecStop=" + tmux + " kill-server\n"
+	}
 	hdr := fsx.Header(ServicePolicy)
 	tmuxUnit := hdr + `[Unit]
 Description=tmux server for cairn workspaces
@@ -65,8 +70,7 @@ Description=tmux server for cairn workspaces
 Type=forking
 ExecStart=` + tmux + ` -f /dev/null new-session -d -s ` + baseSession + `
 ExecStartPost=` + tmux + ` set -g exit-empty off
-ExecStop=` + tmux + ` kill-server
-KillMode=control-group
+` + stop + `KillMode=control-group
 
 [Install]
 WantedBy=default.target
@@ -143,4 +147,17 @@ func QueryUnits(ctx context.Context, r execx.Runner, root fsx.Root, userUnitDir 
 		out = append(out, st)
 	}
 	return out
+}
+
+// RecordedSocket returns the tmux socket name a generated cairn-tmux.service
+// was written for ("" for the default server).
+func RecordedSocket(unit []byte) string {
+	for _, line := range strings.Split(string(unit), "\n") {
+		if rest, ok := strings.CutPrefix(line, "ExecStart=/usr/bin/env tmux "); ok {
+			if f := strings.Fields(rest); len(f) > 1 && f[0] == "-L" {
+				return f[1]
+			}
+		}
+	}
+	return ""
 }

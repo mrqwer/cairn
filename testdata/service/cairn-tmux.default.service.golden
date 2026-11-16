@@ -6,7 +6,6 @@ Description=tmux server for cairn workspaces
 Type=forking
 ExecStart=/usr/bin/env tmux -f /dev/null new-session -d -s cairn-base
 ExecStartPost=/usr/bin/env tmux set -g exit-empty off
-ExecStop=/usr/bin/env tmux kill-server
 KillMode=control-group
 
 [Install]

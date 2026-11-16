@@ -77,12 +77,39 @@ func (s *svcState) applyPlan(cmd *cobra.Command, p plan.Plan, title string, yes,
 	return plan.Apply(ctxOf(cmd), p, s.env, plan.Options{UserOnly: true, Force: force})
 }
 
+// recordedSocket is the socket of the installed, cairn-managed unit.
+func (s *svcState) recordedSocket() (string, bool) {
+	path := filepath.Join(s.unitDir, workspace.TmuxUnit)
+	if _, ok := s.inv.Get(path); !ok {
+		return "", false
+	}
+	b, err := wsRoot.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	return workspace.RecordedSocket(b), true
+}
+
+func socketLabel(s string) string {
+	if s == "" {
+		return "(default)"
+	}
+	return s
+}
+
 func newSvcInstallCmd() *cobra.Command {
 	var yes, force bool
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install and enable cairn-tmux.service and cairn-up.service (nothing is started)",
-		Args:  cobra.NoArgs,
+		Long: `Install and enable cairn-tmux.service and cairn-up.service for --socket
+(or $CAIRN_TMUX_SOCKET). Nothing is started now; they run at your next login.
+
+There is one set of units per user: installing for a different socket
+replaces the existing ones and needs --force or an interactive confirmation.
+Only units for an explicit socket stop their server with kill-server; the
+default-socket unit never kills your default tmux server.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			self, err := selfPath()
 			if err != nil {
@@ -97,6 +124,12 @@ func newSvcInstallCmd() *cobra.Command {
 				return err
 			}
 			p := plan.Resolve(workspace.ServiceActions(self, socket, s.unitDir), wsRoot, s.inv)
+			if old, ok := s.recordedSocket(); ok && old != socket {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "replaces units for socket %s (the new units run %s)\n", socketLabel(old), socketLabel(socket))
+				if yes && !force {
+					return fmt.Errorf("existing units were installed for socket %s; re-run with --force or without --yes to replace them", socketLabel(old))
+				}
+			}
 			if err := s.applyPlan(cmd, p, "tmux user service", yes, force); err != nil {
 				return err
 			}
