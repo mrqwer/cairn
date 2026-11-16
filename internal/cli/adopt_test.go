@@ -311,7 +311,7 @@ func (m *modelRunner) Run(_ context.Context, name string, args ...string) ([]byt
 		for _, s := range m.snap.Sessions {
 			for _, w := range s.Windows {
 				for _, p := range w.Panes {
-					fmt.Fprintf(&b, "%s\t%s\t%d\t%s\t\t%d\t%d\t%d\t%d\t0\t\t%s\t%s\n", w.ID, p.ID, p.Index, p.Key, p.Left, p.Top, p.W, p.H, p.Cwd, p.Cmd)
+					fmt.Fprintf(&b, "%s\t%s\t%d\t%s\t\t%d\t%d\t%d\t%d\t0\t\t\t%s\t%s\n", w.ID, p.ID, p.Index, p.Key, p.Left, p.Top, p.W, p.H, p.Cwd, p.Cmd)
 				}
 			}
 		}
