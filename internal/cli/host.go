@@ -84,19 +84,8 @@ func ctxOf(cmd *cobra.Command) context.Context {
 	return context.Background()
 }
 
-// unsafeSelfChars may not appear in the cairn binary path: it is embedded in
-// unit files (where % is a specifier and whitespace splits arguments) and in
-// shell and pacman hook lines.
-const unsafeSelfChars = " \t\n\r\v\f%\"'\\$`;"
-
 // checkSelfPath rejects binary paths that cannot be embedded safely.
-func checkSelfPath(p string) error {
-	if i := strings.IndexAny(p, unsafeSelfChars); i >= 0 {
-		return fmt.Errorf("cairn binary path %q contains %q, which cannot be used in unit files and hooks; "+
-			"install cairn to a path without whitespace, %%, quotes, backslash, $, backtick or ;", p, p[i])
-	}
-	return nil
-}
+func checkSelfPath(p string) error { return plan.CheckSelfPath(p) }
 
 func selfPath() (string, error) {
 	exe, err := exePath()
