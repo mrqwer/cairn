@@ -163,10 +163,11 @@ func captureSession(cmd *cobra.Command, name, id, root string, write, force bool
 		ok, err := drv.PaneIdle(pid)
 		return err == nil && ok
 	}
-	p, notes, err := capture.Session(s, capture.Options{ID: id, Root: root, IsIdle: isIdle})
+	res, err := capture.Session(s, capture.Options{ID: id, Root: root, IsIdle: isIdle})
 	if err != nil {
 		return err
 	}
+	p, notes := res.Project, res.Notes
 	if len(snap.Skipped) > 0 {
 		note := skippedNote(snap.Skipped)
 		warn := "warning: " + note
@@ -195,7 +196,7 @@ func captureSession(cmd *cobra.Command, name, id, root string, write, force bool
 	for _, other := range snap.Sessions {
 		if other.Name == sessName {
 			notes = append(notes, fmt.Sprintf("a live tmux session named %q exists and is not managed by cairn; cairn will not touch it. "+
-				"Rename it (tmux rename-session -t %s <new>) before running cairn apply, or adopt it (cairn adopt %s, coming next). "+
+				"Rename it (tmux rename-session -t %s <new>) before running cairn apply, or adopt it (cairn adopt %s). "+
 				"Closing it would kill its running programs.", sessName, shellWord(sessName), shellWord(sessName)))
 			break
 		}
@@ -209,7 +210,7 @@ func captureSession(cmd *cobra.Command, name, id, root string, write, force bool
 	}
 
 	out := cmd.OutOrStdout()
-	printProposal(out, s, p, data, notes)
+	printProposal(out, "capture", s, p, data, notes)
 	if !write {
 		_, _ = fmt.Fprintf(out, "\n# save it with: cairn capture %s --id %s --write\n", shellWord(s.Name), p.ID)
 		return nil
@@ -231,16 +232,16 @@ func captureSession(cmd *cobra.Command, name, id, root string, write, force bool
 	return nil
 }
 
-// printProposal writes a header, the TOML body (never styled) and the
+// printProposal writes a header (naming the command verb), the TOML body (never styled) and the
 // notes. Header and notes are TOML comments, so plain output can be saved
 // as a project file as it is.
-func printProposal(w io.Writer, s tmux.Session, p workspace.Project, data []byte, notes []string) {
+func printProposal(w io.Writer, verb string, s tmux.Session, p workspace.Project, data []byte, notes []string) {
 	st, styled := styleFor(w)
 	panes := 0
 	for _, win := range s.Windows {
 		panes += len(win.Panes)
 	}
-	head := fmt.Sprintf("# cairn capture: tmux session %q -> project %s (%s, %s)", s.Name, p.ID,
+	head := fmt.Sprintf("# cairn %s: tmux session %q -> project %s (%s, %s)", verb, s.Name, p.ID,
 		ui.Plural(len(s.Windows), "window", "windows"), ui.Plural(panes, "pane", "panes"))
 	if styled {
 		head = st.Bold(head)

@@ -54,11 +54,11 @@ func session(name string, ws ...tmux.Window) tmux.Session {
 
 func mustCapture(t *testing.T, s tmux.Session, opts Options) (workspace.Project, []string) {
 	t.Helper()
-	p, notes, err := Session(s, opts)
+	r, err := Session(s, opts)
 	if err != nil {
 		t.Fatalf("capture: %v", err)
 	}
-	return p, notes
+	return r.Project, r.Notes
 }
 
 // layoutOf strips everything but the split sequence of a window.
@@ -443,7 +443,7 @@ func TestProjectIdentity(t *testing.T) {
 	}
 
 	// A name that slugs to nothing needs --id.
-	if _, _, err := Session(session("日本語", w), Options{}); err == nil || !strings.Contains(err.Error(), "--id") {
+	if _, err := Session(session("日本語", w), Options{}); err == nil || !strings.Contains(err.Error(), "--id") {
 		t.Fatalf("empty slug: %v", err)
 	}
 	if p, _ := mustCapture(t, session("日本語", w), Options{ID: "jp"}); p.ID != "jp" || p.Session != "" {
@@ -455,16 +455,16 @@ func TestRefusals(t *testing.T) {
 	w := liveWindow(t, "main", []workspace.Pane{{}}, shells("/home/u/demo"))
 	managed := session("demo", w)
 	managed.Key = "demo"
-	if _, _, err := Session(managed, Options{}); err == nil || !strings.Contains(err.Error(), "already managed") {
+	if _, err := Session(managed, Options{}); err == nil || !strings.Contains(err.Error(), "already managed") {
 		t.Fatalf("managed: %v", err)
 	}
-	if _, _, err := Session(session("demo", w), Options{ID: "Bad Id"}); err == nil || !strings.Contains(err.Error(), "id") {
+	if _, err := Session(session("demo", w), Options{ID: "Bad Id"}); err == nil || !strings.Contains(err.Error(), "id") {
 		t.Fatalf("bad id: %v", err)
 	}
-	if _, _, err := Session(session("demo", w), Options{Root: "rel/dir"}); err == nil || !strings.Contains(err.Error(), "absolute") {
+	if _, err := Session(session("demo", w), Options{Root: "rel/dir"}); err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("relative root: %v", err)
 	}
-	if _, _, err := Session(session("demo"), Options{}); err == nil {
+	if _, err := Session(session("demo"), Options{}); err == nil {
 		t.Fatal("session without windows accepted")
 	}
 }
@@ -558,4 +558,61 @@ func TestReversedIndexesMapByRects(t *testing.T) {
 		t.Fatalf("notes: %v", notes)
 	}
 	assertPlacement(t, p.Windows[0], w)
+}
+
+// The mapping pairs each config pane with the tmux pane it was read from by
+// rects, also when traversal order (pane_index) differs from config order.
+func TestSessionMappingFollowsRectsNotIndex(t *testing.T) {
+	// Pane 3 is split from pane 1: traversal order is 1, 3, 2.
+	cfg := []workspace.Pane{{}, {Split: "v", From: 1, Size: 40}, {Split: "h", From: 1, Size: 30}}
+	w1 := liveWindow(t, "code", cfg, shells("/home/u/p/one", "/home/u/p/two", "/home/u/p/three"))
+	w2 := liveWindow(t, "run", []workspace.Pane{{}}, shells("/home/u/p"))
+	w2.ID = "@2"
+	for i := range w2.Panes {
+		w2.Panes[i].ID = "%z"
+	}
+	r, err := Session(session("demo", w1, w2), Options{Root: "/home/u/p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.SessionID != "$1" || len(r.Mapping) != 4 {
+		t.Fatalf("result: %+v", r)
+	}
+	live := map[string]tmux.Pane{}
+	for _, w := range []tmux.Window{w1, w2} {
+		for _, p := range w.Panes {
+			live[p.ID] = p
+		}
+	}
+	// Every config pane maps to the live pane with the same directory.
+	for _, ref := range r.Mapping {
+		var win workspace.Window
+		for _, w := range r.Project.Windows {
+			if w.Key == ref.WindowKey {
+				win = w
+			}
+		}
+		cfgPane := win.Panes[ref.Pane-1]
+		lp := live[ref.PaneID]
+		if got := relCwd(lp.Cwd, "/home/u/p"); got != cfgPane.Cwd {
+			t.Fatalf("ref %+v: live pane cwd %q, config pane cwd %q", ref, got, cfgPane.Cwd)
+		}
+	}
+	// Live panes are listed in traversal order with ids %a, %b, %c: config
+	// pane 1 (top left) is %a, pane 3 (top right) %b, pane 2 (bottom) %c.
+	// The captured sequence is top-down: the top row first.
+	byDir := map[string]string{}
+	for _, ref := range r.Mapping[:3] {
+		byDir[r.Project.Windows[0].Panes[ref.Pane-1].Cwd] = ref.PaneID
+		if ref.WindowID != "@1" || ref.Window != "code" || ref.WindowKey != "code" {
+			t.Fatalf("ref %+v", ref)
+		}
+	}
+	want := map[string]string{"one": "%a", "three": "%b", "two": "%c"}
+	if !reflect.DeepEqual(byDir, want) {
+		t.Fatalf("mapping by dir %v, want %v", byDir, want)
+	}
+	if last := r.Mapping[3]; last != (PaneRef{Window: "run", WindowID: "@2", WindowKey: "run", Pane: 1, PaneID: "%z"}) {
+		t.Fatalf("run ref %+v", last)
+	}
 }

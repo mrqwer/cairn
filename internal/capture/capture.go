@@ -29,22 +29,45 @@ var editors = map[string]bool{
 	"emacs": true, "nano": true, "code": true,
 }
 
-// Session converts s into a project config and notes for the user. The
-// project is undefaulted (decision E3: it is meant for workspace.Marshal); a
-// defaulted copy is validated and its errors are returned, so an invalid
-// project is never handed out.
-func Session(s tmux.Session, opts Options) (workspace.Project, []string, error) {
+// PaneRef ties one config pane to the live tmux pane it was captured from:
+// window WindowKey (config key) of tmux window WindowID (named Window), pane
+// position Pane (1-based, config order) is tmux pane PaneID. The pairing
+// comes from the pane rects (layout traversal), never from pane_index alone.
+type PaneRef struct {
+	Window    string
+	WindowID  string
+	WindowKey string
+	Pane      int
+	PaneID    string
+}
+
+// Result is a capture: the undefaulted project, notes for the user, the
+// session it was read from and the config-to-live mapping of every pane
+// (windows in config order, panes by position).
+type Result struct {
+	Project   workspace.Project
+	Notes     []string
+	SessionID string
+	Mapping   []PaneRef
+}
+
+// Session converts s into a project config, notes for the user and the
+// pane mapping. The project is undefaulted (decision E3: it is meant for
+// workspace.Marshal); a defaulted copy is validated and its errors are
+// returned, so an invalid project is never handed out.
+func Session(s tmux.Session, opts Options) (Result, error) {
 	if s.Key != "" {
-		return workspace.Project{}, nil, fmt.Errorf("session %q is already managed by cairn (project %s); nothing to capture", s.Name, s.Key)
+		return Result{}, fmt.Errorf("session %q is already managed by cairn (project %s); nothing to capture", s.Name, s.Key)
 	}
 	if len(s.Windows) == 0 {
-		return workspace.Project{}, nil, fmt.Errorf("session %q has no windows", s.Name)
+		return Result{}, fmt.Errorf("session %q has no windows", s.Name)
 	}
 	var notes []string
+	var mapping []PaneRef
 	p := workspace.Project{ID: opts.ID, Name: s.Name}
 	if p.ID == "" {
 		if p.ID = workspace.Slug(s.Name); p.ID == "" {
-			return p, nil, fmt.Errorf("cannot derive a project id from session name %q; pass one with --id", s.Name)
+			return Result{}, fmt.Errorf("cannot derive a project id from session name %q; pass one with --id", s.Name)
 		}
 	}
 	if p.ID != s.Name {
@@ -59,7 +82,7 @@ func Session(s tmux.Session, opts Options) (workspace.Project, []string, error) 
 	case opts.Root == "":
 		p.Root = defaultRoot(s)
 	case !filepath.IsAbs(opts.Root):
-		return p, nil, fmt.Errorf("root %q must be an absolute path", opts.Root)
+		return Result{}, fmt.Errorf("root %q must be an absolute path", opts.Root)
 	default:
 		p.Root = filepath.Clean(opts.Root)
 	}
@@ -67,15 +90,18 @@ func Session(s tmux.Session, opts Options) (workspace.Project, []string, error) 
 	keys := map[string]bool{}
 	for wi, w := range s.Windows {
 		key := uniqueKey(windowKey(w.Name, wi+1), keys)
-		win, wnotes := captureWindow(w, key, p.Root, opts.IsIdle)
+		win, ids, wnotes := captureWindow(w, key, p.Root, opts.IsIdle)
 		p.Windows = append(p.Windows, win)
 		notes = append(notes, wnotes...)
+		for i, id := range ids {
+			mapping = append(mapping, PaneRef{Window: w.Name, WindowID: w.ID, WindowKey: key, Pane: i + 1, PaneID: id})
+		}
 	}
 
 	if errs := validate(p); len(errs) > 0 {
-		return workspace.Project{}, nil, fmt.Errorf("captured project is invalid: %s", strings.Join(errs, "; "))
+		return Result{}, fmt.Errorf("captured project is invalid: %s", strings.Join(errs, "; "))
 	}
-	return p, notes, nil
+	return Result{Project: p, Notes: notes, SessionID: s.ID, Mapping: mapping}, nil
 }
 
 // validSession reports whether name passes the project session rules.
@@ -128,10 +154,11 @@ func uniqueKey(key string, used map[string]bool) string {
 	return cand
 }
 
-// captureWindow builds the config window. The split sequence comes from the
-// pane rects (layout.FromRects + layout.Sequence); src maps each config pane
-// to the tmux pane (in pane_index order) it was read from.
-func captureWindow(w tmux.Window, key, root string, isIdle func(int) bool) (workspace.Window, []string) {
+// captureWindow builds the config window, the tmux pane id of each config
+// pane (by position) and notes. The split sequence comes from the pane
+// rects (layout.FromRects + layout.Sequence); src maps each config pane to
+// the tmux pane (in pane_index order) it was read from.
+func captureWindow(w tmux.Window, key, root string, isIdle func(int) bool) (workspace.Window, []string, []string) {
 	panes := append([]tmux.Pane(nil), w.Panes...)
 	sort.Slice(panes, func(i, j int) bool { return panes[i].Index < panes[j].Index })
 	win := workspace.Window{Key: key, Name: w.Name}
@@ -155,8 +182,10 @@ func captureWindow(w tmux.Window, key, root string, isIdle func(int) bool) (work
 		}
 	}
 
+	ids := make([]string, 0, len(seq))
 	for i, pn := range seq {
 		tp := panes[src[i]]
+		ids = append(ids, tp.ID)
 		pn.Cwd = relCwd(tp.Cwd, root)
 		var note string
 		pn.Role, pn.Run, note = role(tp, isIdle)
@@ -165,7 +194,7 @@ func captureWindow(w tmux.Window, key, root string, isIdle func(int) bool) (work
 		}
 		win.Panes = append(win.Panes, pn)
 	}
-	return win, notes
+	return win, ids, notes
 }
 
 // overlapping reports whether two pane rects share a cell, as when a zoomed

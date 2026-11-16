@@ -254,6 +254,9 @@ func TestSimpleOps(t *testing.T) {
 		{func(c Client) error { return c.SetOption(ctx, "session", "$1", "@cairn_s", "demo") }, []string{"set", "-t", "$1", "@cairn_s", "demo"}},
 		{func(c Client) error { return c.SetOption(ctx, "window", "@1", "@cairn_w", "demo/a") }, []string{"set", "-w", "-t", "@1", "@cairn_w", "demo/a"}},
 		{func(c Client) error { return c.SetOption(ctx, "pane", "%1", "@cairn_p", "demo/a/1") }, []string{"set", "-p", "-t", "%1", "@cairn_p", "demo/a/1"}},
+		{func(c Client) error { return c.UnsetOption(ctx, "session", "$1", "@cairn_s") }, []string{"set", "-u", "-t", "$1", "@cairn_s"}},
+		{func(c Client) error { return c.UnsetOption(ctx, "window", "@1", "@cairn_w") }, []string{"set", "-u", "-w", "-t", "@1", "@cairn_w"}},
+		{func(c Client) error { return c.UnsetOption(ctx, "pane", "%1", "@cairn_p") }, []string{"set", "-u", "-p", "-t", "%1", "@cairn_p"}},
 		{func(c Client) error { return c.RespawnPane(ctx, "%1", nil) }, []string{"respawn-pane", "-t", "%1"}},
 		{func(c Client) error { return c.RespawnPane(ctx, "%1", []string{"go", "run", "."}) }, []string{"respawn-pane", "-t", "%1", "--", "go", "run", "."}},
 		{func(c Client) error { return c.SwapPanes(ctx, "%1", "%2") }, []string{"swap-pane", "-d", "-s", "%1", "-t", "%2"}},
@@ -277,6 +280,9 @@ func TestSimpleOps(t *testing.T) {
 	}
 	if err := (Client{R: &execx.FakeRunner{}}).SetOption(ctx, "global", "x", "a", "b"); err == nil {
 		t.Fatal("bad scope accepted")
+	}
+	if err := (Client{R: &execx.FakeRunner{}}).UnsetOption(ctx, "global", "x", "a"); err == nil {
+		t.Fatal("bad unset scope accepted")
 	}
 }
 

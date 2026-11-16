@@ -204,6 +204,40 @@ func TestIntegrationMarkersSurviveRename(t *testing.T) {
 	}
 }
 
+// UnsetOption removes exactly the marker set on one object: the others,
+// at every level, stay.
+func TestIntegrationUnsetOption(t *testing.T) {
+	c := testServer(t, true)
+	ctx := ctxT(t)
+	sid, wid, pid, err := c.NewSession(ctx, "demo", 0, 0, WindowSpec{Key: "demo/main", Name: "main", PaneSpec: PaneSpec{Key: "demo/main/1", Cwd: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.UnsetOption(ctx, "pane", pid, "@cairn_p"); err != nil {
+		t.Fatal(err)
+	}
+	se := snap(t, c).Sessions[0]
+	if se.Key != "demo" || se.Windows[0].Key != "demo/main" || se.Windows[0].Panes[0].Key != "" {
+		t.Fatalf("after pane unset %+v", se)
+	}
+	if err := c.UnsetOption(ctx, "window", wid, "@cairn_w"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.UnsetOption(ctx, "session", sid, "@cairn_s"); err != nil {
+		t.Fatal(err)
+	}
+	se = snap(t, c).Sessions[0]
+	if se.Key != "" || se.Windows[0].Key != "" || se.Windows[0].Panes[0].Key != "" {
+		t.Fatalf("after unset %+v", se)
+	}
+	if err := c.SetOption(ctx, "pane", pid, "@cairn_p", "demo/main/1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := snap(t, c).Sessions[0].Windows[0].Panes[0].Key; got != "demo/main/1" {
+		t.Fatalf("pane marker %q", got)
+	}
+}
+
 func TestIntegrationArgvReachesProgramUnchanged(t *testing.T) {
 	c := testServer(t, true)
 	ctx := ctxT(t)

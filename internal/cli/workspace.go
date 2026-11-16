@@ -29,6 +29,7 @@ type wsDriver interface {
 	SplitPane(ctx context.Context, targetPane, dir string, percent int, p tmux.PaneSpec) (paneID string, err error)
 	SelectLayout(ctx context.Context, windowID, layoutString string) error
 	SetOption(ctx context.Context, scope, target, name, value string) error
+	UnsetOption(ctx context.Context, scope, target, name string) error
 	RespawnPane(ctx context.Context, paneID string, argv []string) error
 	SwapPanes(ctx context.Context, paneA, paneB string) error
 	KillWindow(ctx context.Context, id string) error

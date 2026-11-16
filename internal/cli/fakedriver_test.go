@@ -23,9 +23,12 @@ type fakeDriver struct {
 	sessions   []*fSession
 	seq        int
 	idle       bool // PaneIdle answer for every pane
-	// live, when set, is returned by Snapshot instead of the modelled
-	// sessions (capture tests need pane geometry and paths).
+	// live, when set, is returned (as a deep copy) by Snapshot instead of
+	// the modelled sessions (capture tests need pane geometry and paths);
+	// SetOption and UnsetOption change its markers.
 	live *tmux.Snapshot
+	// failOption makes SetOption on this target fail.
+	failOption string
 }
 
 type fSession struct {
@@ -78,7 +81,17 @@ func (f *fakeDriver) newPane(p tmux.PaneSpec) *fPane {
 func (f *fakeDriver) Snapshot(context.Context) (tmux.Snapshot, error) {
 	f.rec("Snapshot")
 	if f.live != nil {
-		return *f.live, nil
+		out := tmux.Snapshot{Skipped: slices.Clone(f.live.Skipped)}
+		for _, se := range f.live.Sessions {
+			ws := make([]tmux.Window, 0, len(se.Windows))
+			for _, w := range se.Windows {
+				w.Panes = slices.Clone(w.Panes)
+				ws = append(ws, w)
+			}
+			se.Windows = ws
+			out.Sessions = append(out.Sessions, se)
+		}
+		return out, nil
 	}
 	var snap tmux.Snapshot
 	for _, s := range f.sessions {
@@ -142,6 +155,46 @@ func (f *fakeDriver) SelectLayout(_ context.Context, windowID, _ string) error {
 
 func (f *fakeDriver) SetOption(_ context.Context, scope, target, name, value string) error {
 	f.rec("SetOption %s %s %s %s", scope, target, name, value)
+	if target == f.failOption {
+		return fmt.Errorf("tmux set: no such %s %s", scope, target)
+	}
+	if k := f.liveKey(scope, target); k != nil {
+		*k = value
+	}
+	return nil
+}
+
+func (f *fakeDriver) UnsetOption(_ context.Context, scope, target, name string) error {
+	f.rec("UnsetOption %s %s %s", scope, target, name)
+	if k := f.liveKey(scope, target); k != nil {
+		*k = ""
+	}
+	return nil
+}
+
+// liveKey points at the marker of a live object (nil without live or when
+// the object does not exist).
+func (f *fakeDriver) liveKey(scope, target string) *string {
+	if f.live == nil {
+		return nil
+	}
+	for si := range f.live.Sessions {
+		s := &f.live.Sessions[si]
+		if scope == "session" && s.ID == target {
+			return &s.Key
+		}
+		for wi := range s.Windows {
+			w := &s.Windows[wi]
+			if scope == "window" && w.ID == target {
+				return &w.Key
+			}
+			for pi := range w.Panes {
+				if scope == "pane" && w.Panes[pi].ID == target {
+					return &w.Panes[pi].Key
+				}
+			}
+		}
+	}
 	return nil
 }
 

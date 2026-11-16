@@ -19,8 +19,11 @@ import (
 // running npm), a session "my_proj" (tmux's spelling of "my.proj") and a
 // managed session "api".
 func liveSnapshot() *tmux.Snapshot {
+	// Pane ids are unique on the server, like tmux's: %1 to %5 in order.
+	n := 0
 	pane := func(idx, left, w int, cwd, cmd string) tmux.Pane {
-		return tmux.Pane{ID: fmt.Sprintf("%%%d", idx+1), Index: idx, PID: 100 + idx, Left: left, W: w, H: 50, Cwd: cwd, Cmd: cmd}
+		n++
+		return tmux.Pane{ID: fmt.Sprintf("%%%d", n), Index: idx, PID: 100 + idx, Left: left, W: w, H: 50, Cwd: cwd, Cmd: cmd}
 	}
 	return &tmux.Snapshot{Sessions: []tmux.Session{
 		{ID: "$1", Name: "web", Windows: []tmux.Window{
@@ -88,7 +91,7 @@ func TestCaptureWriteRecordsHistoryAndRefusesExisting(t *testing.T) {
 		t.Fatalf("file:\n%s", data)
 	}
 	// The live session keeps the name the managed one will get.
-	if !strings.Contains(out, `a live tmux session named "web" exists and is not managed by cairn; cairn will not touch it. Rename it (tmux rename-session -t web <new>) before running cairn apply, or adopt it (cairn adopt web, coming next). Closing it would kill its running programs.`) {
+	if !strings.Contains(out, `a live tmux session named "web" exists and is not managed by cairn; cairn will not touch it. Rename it (tmux rename-session -t web <new>) before running cairn apply, or adopt it (cairn adopt web). Closing it would kill its running programs.`) {
 		t.Fatalf("no clash note:\n%s", out)
 	}
 	if probs := checkProjectData("web-copy", data, "/home/u"); len(probs) != 0 {

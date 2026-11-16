@@ -239,21 +239,38 @@ func (c Client) SelectLayout(ctx context.Context, windowID, layoutString string)
 	return c.run(ctx, "select-layout", "-t", windowID, layoutString)
 }
 
-// SetOption sets an option at scope "session", "window" or "pane".
-func (c Client) SetOption(ctx context.Context, scope, target, name, value string) error {
-	var flags []string
+// optionFlags are the set-option flags selecting scope, before "-t".
+func optionFlags(scope string) ([]string, error) {
 	switch scope {
 	case "session":
-		flags = []string{"-t"}
+		return nil, nil
 	case "window":
-		flags = []string{"-w", "-t"}
+		return []string{"-w"}, nil
 	case "pane":
-		flags = []string{"-p", "-t"}
-	default:
-		return fmt.Errorf("tmux: option scope %q must be session, window or pane", scope)
+		return []string{"-p"}, nil
 	}
-	args := append([]string{"set"}, flags...)
-	return c.run(ctx, append(args, target, name, escSemi(value))...)
+	return nil, fmt.Errorf("tmux: option scope %q must be session, window or pane", scope)
+}
+
+// SetOption sets an option at scope "session", "window" or "pane".
+func (c Client) SetOption(ctx context.Context, scope, target, name, value string) error {
+	flags, err := optionFlags(scope)
+	if err != nil {
+		return err
+	}
+	args := append(append([]string{"set"}, flags...), "-t", target, name, escSemi(value))
+	return c.run(ctx, args...)
+}
+
+// UnsetOption removes an option at scope "session", "window" or "pane"
+// from target only (set-option -u).
+func (c Client) UnsetOption(ctx context.Context, scope, target, name string) error {
+	flags, err := optionFlags(scope)
+	if err != nil {
+		return err
+	}
+	args := append(append([]string{"set", "-u"}, flags...), "-t", target, name)
+	return c.run(ctx, args...)
 }
 
 // RespawnPane restarts the dead pane paneID, with argv or its original
