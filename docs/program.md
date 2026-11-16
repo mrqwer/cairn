@@ -6,19 +6,20 @@ cairn is built as a sequence of small projects. Each one gets a design document 
 
 ## Projects and order
 
+The workspace is the product, so it comes first; `host` is an optional add-on.
+
 | # | Project | Dir | Depends on | Status |
 |---|---|---|---|---|
-| 1 | Machine hardening | `host/` | — | design |
-| 2 | Core engine + AI agents | `engine/`, `agents/` | 1 (shared foundation only) | design |
+| 1 | Workspace engine (M1) | `engine/` | foundation | next |
+| 2 | AI agent sessions (M2–M5) | `agents/` | 1 | design |
 | 3 | Knowledge & playbooks | `knowledge/` | 2 (task records) | idea |
-| 4 | Config hub | `confighub/` | 2 | idea |
-| 5 | Surfaces (TUI + web) | `ui/` | 2, 3, 4 | idea |
+| 4 | Config hub | `confighub/` | 1 | idea |
+| 5 | Surfaces (TUI + web) | `ui/` | 1, 2, 3, 4 | idea |
 | 6 | Editor (IDE-grade Neovim, remote work) | `nvim/` | 4 for config integration | idea |
-| 7 | Migration of existing setups | `profiles/` | 2–6 | idea |
-
-1 is independent and machine-specific, so it can run in parallel with the design of 2.
-2 is designed as one unit because agent sessions are the most important workload the
-engine manages. 3 builds on the task records of 2. 6 can be designed in parallel with 3–5.
+| 7 | Example profiles and migration guide | `profiles/` | 1–6 | idea |
+| — | Foundation (config, safe changes, doctor, events, terminal UI helpers) | `internal/` | — | done |
+| — | `host` sleep module (optional) | `host/` | foundation | done, verification pending |
+| — | `host` disk hygiene, backups, WIP snapshots (optional) | `host/` | foundation | design |
 
 ## Decisions so far
 
