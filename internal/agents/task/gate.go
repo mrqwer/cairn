@@ -27,21 +27,48 @@ var (
 	// (letters and digits of any script), a 7-hex commit, go test, pnpm,
 	// make <target>.
 	refRe  = regexp.MustCompile(`[\p{L}\p{N}_.-]+/[\p{L}\p{N}_./-]+|\b[0-9a-f]{7}\b|go test|pnpm|make \w+`)
-	todoRe = regexp.MustCompile(`\bTODO\b`)
+	todoRe = regexp.MustCompile(`(^|[^\p{L}\p{N}])TODO`)
 	digit  = regexp.MustCompile(`[0-9]`)
 )
 
-// refs returns the distinct concrete references of text, in order. A
-// 7-hex word needs a digit, so that "defaced" is not a commit.
+// normRef makes a reference comparable: a path-like one loses a sentence
+// period, a trailing "/" or "-" and a leading "./"; others are lower case.
+func normRef(m string) string {
+	if !strings.Contains(m, "/") {
+		return strings.ToLower(m)
+	}
+	m = strings.TrimRight(m, "./-")
+	for strings.HasPrefix(m, "./") {
+		m = m[2:]
+	}
+	return m
+}
+
+// withoutLinks drops the Links lines: the branch and commit range there are
+// generated, so they say nothing about the change.
+func withoutLinks(text string) string {
+	var keep []string
+	for _, l := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(l), "Links:") {
+			keep = append(keep, l)
+		}
+	}
+	return strings.Join(keep, "\n")
+}
+
+// refs returns the distinct concrete references of text, in order, after
+// normalising, ignoring the Links lines. A 7-hex word needs a digit, so
+// that "defaced" is not a commit.
 func refs(text string) []string {
 	var out []string
 	seen := map[string]bool{}
-	for _, m := range refRe.FindAllString(text, -1) {
+	for _, m := range refRe.FindAllString(withoutLinks(text), -1) {
 		if len(m) == 7 && !strings.ContainsAny(m, "/ ") && !digit.MatchString(m) {
 			continue
 		}
-		if k := strings.ToLower(m); !seen[k] {
-			seen[k] = true
+		m = normRef(m)
+		if m != "" && !seen[m] {
+			seen[m] = true
 			out = append(out, m)
 		}
 	}
@@ -62,12 +89,16 @@ func Gate(text string, extra ...string) []Check {
 			bad = append(bad, b)
 		}
 	}
+	var parts []string
+	if len(bad) > 0 {
+		parts = append(parts, "Filler phrases: "+strings.Join(bad, ", "))
+	}
 	if k := len(todoRe.FindAllString(text, -1)); k > 0 {
-		bad = append(bad, fmt.Sprintf("%d TODO to fill in", k))
+		parts = append(parts, fmt.Sprintf("TODO markers left: %d", k))
 	}
 	third := Check{OK: true, Text: "No filler phrases"}
-	if len(bad) > 0 {
-		third = Check{Text: "Filler phrases: " + strings.Join(bad, ", ")}
+	if len(parts) > 0 {
+		third = Check{Text: strings.Join(parts, "; ")}
 	}
 	return []Check{
 		{n <= MaxRecordWords, fmt.Sprintf("Length %d of %d words", n, MaxRecordWords)},

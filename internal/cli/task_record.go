@@ -41,14 +41,21 @@ func collectRecordInfo(g task.Git, t task.Task, cs []conv.Conversation) recordIn
 	return in
 }
 
-func draftFile(e *agentsEnv, t task.Task) string {
-	return filepath.Join(e.dirs.State, "agents", "drafts", t.ID+".md")
+// draftFile is the draft of t; the id is checked, it names a file.
+func draftFile(e *agentsEnv, t task.Task) (string, error) {
+	if !conv.ValidID(t.ID) {
+		return "", fmt.Errorf("task id %q is not valid", t.ID)
+	}
+	return filepath.Join(e.dirs.State, "agents", "drafts", t.ID+".md"), nil
 }
 
 // saveDraft writes text as the draft of t: atomically, readable by the
 // owner only. The drafts directory is private too.
 func saveDraft(e *agentsEnv, t task.Task, text string) error {
-	p := draftFile(e, t)
+	p, err := draftFile(e, t)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
@@ -62,13 +69,17 @@ func offerRecord(cmd *cobra.Command, e *agentsEnv, t task.Task, in recordInfo) {
 	out := cmd.OutOrStdout()
 	draft := task.Draft(t, in.changed, in.commits, in.names)
 	_, _ = fmt.Fprintf(out, "\ndraft record (nothing is saved to the knowledge notes yet):\n%s\n", indent(draft))
-	if _, err := os.Stat(draftFile(e, t)); err == nil {
-		_, _ = fmt.Fprintf(out, "a draft of this task already exists and was kept: %s\n", draftFile(e, t))
+	p, perr := draftFile(e, t)
+	if perr == nil {
+		_, perr = os.Stat(p)
+	}
+	if perr == nil {
+		_, _ = fmt.Fprintf(out, "a draft of this task already exists and was kept: %s\n", p)
 	} else if err := saveDraft(e, t, draft); err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: the draft was not saved (%v); write the record yourself and run: cairn task record %s --text-file FILE\n", err, t.Slug)
 		return
 	} else {
-		_, _ = fmt.Fprintf(out, "draft saved: %s\n", draftFile(e, t))
+		_, _ = fmt.Fprintf(out, "draft saved: %s\n", p)
 	}
 	_, _ = fmt.Fprintf(out, "fill the TODO lines, then: cairn task record %s --edit   (or --text-file FILE)\n", t.Slug)
 }
@@ -116,21 +127,11 @@ func newTaskRecordCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			unlock, err := lockTasks(ctxOf(cmd), e.dirs, taskLockWait)
+			// The tasks lock is taken only around reading the task and
+			// writing the record, never while an editor is open.
+			t, err := finishedTask(cmd, e, args[0])
 			if err != nil {
 				return err
-			}
-			defer unlock()
-			t, err := findTask(e, cmd.ErrOrStderr(), args[0])
-			if err != nil {
-				return err
-			}
-			switch t.Status {
-			case task.StatusDone:
-			case task.StatusAbandoned:
-				return fmt.Errorf("task %s was abandoned; an abandoned task has no record", t.Slug)
-			default:
-				return fmt.Errorf("task %s is not finished (%s); finish it with --merge or --pr first", t.Slug, t.Status)
 			}
 			var text string
 			if cmd.Flags().Changed("text-file") {
@@ -140,12 +141,46 @@ func newTaskRecordCmd() *cobra.Command {
 			} else if text, err = draftText(cmd, e, t, edit); err != nil {
 				return err
 			}
+			unlock, err := lockTasks(ctxOf(cmd), e.dirs, taskLockWait)
+			if err != nil {
+				return err
+			}
+			defer unlock()
+			// Whatever happened while the editor was open: check again.
+			if t, err = findFinished(e, cmd, args[0]); err != nil {
+				return err
+			}
 			return saveRecord(cmd, e, st, t, text)
 		},
 	}
 	cmd.Flags().BoolVar(&edit, "edit", false, "edit the draft in $VISUAL/$EDITOR first")
 	cmd.Flags().StringVar(&textFile, "text-file", "", "take the record text from this file (- is standard input)")
 	return cmd
+}
+
+// finishedTask finds the task under the tasks lock and requires it done.
+func finishedTask(cmd *cobra.Command, e *agentsEnv, ref string) (task.Task, error) {
+	unlock, err := lockTasks(ctxOf(cmd), e.dirs, taskLockWait)
+	if err != nil {
+		return task.Task{}, err
+	}
+	defer unlock()
+	return findFinished(e, cmd, ref)
+}
+
+// findFinished resolves ref and requires a done task (the lock is held).
+func findFinished(e *agentsEnv, cmd *cobra.Command, ref string) (task.Task, error) {
+	t, err := findTask(e, cmd.ErrOrStderr(), ref)
+	if err != nil {
+		return t, err
+	}
+	switch t.Status {
+	case task.StatusDone:
+		return t, nil
+	case task.StatusAbandoned:
+		return t, fmt.Errorf("task %s was abandoned; an abandoned task has no record", t.Slug)
+	}
+	return t, fmt.Errorf("task %s is not finished (%s); finish it with --merge or --pr first", t.Slug, t.Status)
 }
 
 func readTextFile(cmd *cobra.Command, name string) (string, error) {
@@ -165,7 +200,10 @@ func readTextFile(cmd *cobra.Command, name string) (string, error) {
 // copy: the draft is replaced (atomically) only by a finished edit, so a
 // failed or interrupted editor never leaves it half written.
 func draftText(cmd *cobra.Command, e *agentsEnv, t task.Task, edit bool) (string, error) {
-	p := draftFile(e, t)
+	p, err := draftFile(e, t)
+	if err != nil {
+		return "", err
+	}
 	b, err := wsRoot.ReadFile(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		r := t.Repos[0]
@@ -226,6 +264,8 @@ func saveRecord(cmd *cobra.Command, e *agentsEnv, st taskSettings, t task.Task, 
 	if err != nil {
 		return err
 	}
+	// The record is a note for other tools and people to read (0644); the
+	// draft is private work in progress (0600).
 	ed := fileEdit{path: p, after: data, afterExists: true, perm: 0o644}
 	if old, err := wsRoot.ReadFile(p); err == nil {
 		ed.before, ed.beforeExists = old, true

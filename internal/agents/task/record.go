@@ -115,10 +115,7 @@ func Anchors(text, branch string) []string {
 		if !strings.Contains(m, "/") || strings.HasSuffix(text[:ix[0]], "//") {
 			continue
 		}
-		m = strings.TrimRight(m, "./-")
-		for strings.HasPrefix(m, "./") {
-			m = m[2:]
-		}
+		m = normRef(m)
 		ok := m != "" && m != branch
 		for _, seg := range strings.Split(m, "/") {
 			if seg == "" || seg == "." || seg == ".." {

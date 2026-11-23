@@ -180,7 +180,9 @@ func historyStore(d xdg.Dirs) history.Store {
 	// Finish records are history events too: their directory is allowed
 	// as configured now (an unreadable configuration allows the default only).
 	if cfg, _, err := config.Load(wsRoot, d, os.Getenv); err == nil && cfg.Knowledge.Root != "" && len(cfg.Validate()) == 0 {
-		roots = append(roots, knowledgeDir(d, cfg.Knowledge.Root))
+		if kb := knowledgeDir(d, cfg.Knowledge.Root); checkKnowledgeRoot(d, kb) == nil {
+			roots = append(roots, kb)
+		}
 	}
 	return history.Store{Root: wsRoot, Path: filepath.Join(d.State, "history.jsonl"), AllowedRoots: roots}
 }

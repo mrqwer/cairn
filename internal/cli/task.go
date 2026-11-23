@@ -132,6 +132,9 @@ func loadTaskSettings(d xdg.Dirs) (taskSettings, error) {
 		root = filepath.Join(d.Home, root[2:])
 	}
 	kb := knowledgeDir(d, cfg.Knowledge.Root)
+	if err := checkKnowledgeRoot(d, kb); err != nil {
+		return taskSettings{}, fmt.Errorf("invalid configuration: knowledge.root: %w", err)
+	}
 	return taskSettings{isolation: cfg.Tasks.DefaultIsolation, prefix: cfg.Tasks.BranchPrefix, worktreeRoot: root,
 		diffViewer: cfg.Tasks.DiffViewer, prTool: cfg.Tasks.PRTool, prRemote: cfg.Tasks.PRRemote,
 		knowledgeRoot: kb, gateBanned: cfg.Tasks.GateBanned}, nil
@@ -1012,4 +1015,28 @@ func knowledgeDir(d xdg.Dirs, root string) string {
 		return filepath.Join(d.Home, root[2:])
 	}
 	return root
+}
+
+// checkKnowledgeRoot refuses a records directory that is, or contains, the
+// home, state or config directory, or lies in a secrets directory of the
+// home: history may restore files below it, so it must stay narrow.
+func checkKnowledgeRoot(d xdg.Dirs, kb string) error {
+	kb = filepath.Clean(kb)
+	within := func(p, root string) bool {
+		r, err := filepath.Rel(root, p)
+		return err == nil && r != ".." && !strings.HasPrefix(r, ".."+string(filepath.Separator))
+	}
+	for _, p := range []string{d.Home, d.State, d.Config} {
+		if p != "" && within(p, kb) {
+			return fmt.Errorf("%q is or contains %s; use a directory of its own", kb, p)
+		}
+	}
+	if d.Home != "" {
+		for _, sec := range []string{".ssh", ".gnupg", ".aws", ".kube"} {
+			if within(kb, filepath.Join(d.Home, sec)) {
+				return fmt.Errorf("%q is inside ~/%s", kb, sec)
+			}
+		}
+	}
+	return nil
 }

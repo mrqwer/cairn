@@ -30,6 +30,11 @@ func TestGate(t *testing.T) {
 		{"121 words", words(118) + refs, nil, false, 0},
 		{"one ref", "fixed internal/db/pool.go", nil, false, 1},
 		{"two refs", "fixed internal/db/pool.go with go test", nil, true, -1},
+		{"same ref with sentence period", "see internal/db/pool.go and internal/db/pool.go. ./internal/db/pool.go", nil, false, 1},
+		{"Links line alone is no content", "Goal: x\nLinks: branch task/fix-login, commits 3f2a9c1..b81d0e4", nil, false, 1},
+		{"Links line apart from content", "Changed: internal/db/pool.go\nLinks: branch task/fix-login, commit 3f2a9c1", nil, false, 1},
+		{"TODOs plural", "TODOs left internal/db/pool.go go test", nil, false, 2},
+		{"TODO_x", "TODO_x internal/db/pool.go go test", nil, false, 2},
 		{"same ref twice", "internal/db/pool.go and internal/db/pool.go", nil, false, 1},
 		{"robust", "a robust fix" + refs, nil, false, 2},
 		{"Best Practices", "Follows Best Practices" + refs, nil, false, 2},
@@ -67,6 +72,16 @@ func TestGatePrototypeSample(t *testing.T) {
 	}
 	if got := Gate(string(b)); !allOK(got) {
 		t.Fatalf("%+v", got)
+	}
+}
+
+func TestGateTodoMessageIsSeparate(t *testing.T) {
+	got := Gate("TODO and a robust fix internal/db/pool.go go test")[2].Text
+	if !strings.Contains(got, "TODO markers left: 1") || !strings.Contains(got, "Filler phrases: robust") {
+		t.Fatal(got)
+	}
+	if got := Gate("TODO internal/db/pool.go go test")[2].Text; strings.Contains(got, "Filler") {
+		t.Fatal(got)
 	}
 }
 

@@ -145,7 +145,7 @@ when the quality gate passes: at most 120 words, at least 2 distinct concrete re
 seamless, leverage, cutting-edge, state-of-the-art, best practices, plus `tasks.gate_banned`).
 Each check is printed as pass or fail. Run `task record` again to redo it; the write is in
 history, so `cairn undo` restores the previous record. A file at that path that is not the
-record of the same task is never overwritten.
+record of the same task is never overwritten. The draft is private (0600); the record is a note meant to be read by other tools and people (0644). `knowledge.root` may not be, or contain, your home, state or config directory, nor lie inside `~/.ssh`, `~/.gnupg`, `~/.aws` or `~/.kube`. `task record --edit` does not hold the task lock while the editor is open.
 
 ## Concurrency limit
 

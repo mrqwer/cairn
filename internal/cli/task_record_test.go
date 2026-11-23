@@ -1,6 +1,10 @@
 package cli
 
 import (
+	"context"
+	"time"
+
+	"github.com/mrqwer/cairn/internal/xdg"
 	"os"
 	"path/filepath"
 	"strings"
@@ -222,5 +226,41 @@ func TestRecordDoesNotOverwriteUsersNote(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(recordPath(dir)); string(b) != "my own note\n" {
 		t.Fatalf("changed: %q", b)
+	}
+}
+
+func TestRecordEditDoesNotHoldTheTasksLock(t *testing.T) {
+	dir, _, _ := taskTestEnv(t)
+	mergedTask(t, dir)
+	var lockErr error
+	runEditor = func(argv []string) error {
+		dirs, err := xdg.Resolve(os.Getenv)
+		if err != nil {
+			return err
+		}
+		unlock, err := lockTasks(context.Background(), dirs, 50*time.Millisecond)
+		lockErr = err
+		if err == nil {
+			unlock()
+		}
+		return os.WriteFile(argv[len(argv)-1], []byte(goodRecord), 0o600)
+	}
+	mustRun(t, "", "task", "record", "fix-login", "--edit")
+	if lockErr != nil {
+		t.Fatalf("lock held during the editor: %v", lockErr)
+	}
+	if !exists(recordPath(dir)) {
+		t.Fatal("not written")
+	}
+}
+
+func TestKnowledgeRootRefusedWhenBroad(t *testing.T) {
+	dir, _, _ := taskTestEnv(t)
+	home := os.Getenv("HOME")
+	for _, root := range []string{home, filepath.Dir(home), filepath.Join(dir, "state"), filepath.Join(dir, "state/cairn"), filepath.Join(home, ".ssh"), filepath.Join(home, ".ssh/x"), filepath.Join(dir, "config/cairn")} {
+		writeFile(t, filepath.Join(dir, "config/cairn/cairn.toml"), "[knowledge]\nroot = \""+root+"\"\n")
+		if out, err := runHost(t, "", "task", "record", "nope", "--text-file", "-"); err == nil || !strings.Contains(err.Error(), "knowledge.root") {
+			t.Errorf("%s accepted: %v\n%s", root, err, out)
+		}
 	}
 }
