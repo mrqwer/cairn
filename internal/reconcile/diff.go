@@ -13,11 +13,16 @@ import (
 // Op kinds. The skip-* and report-* kinds are notes: Apply does nothing for
 // them.
 const (
-	KindCreateSession   = "create-session"
-	KindCreateWindow    = "create-window"
-	KindCreatePane      = "create-pane"
-	KindSetLayout       = "set-layout"
-	KindRespawnPane     = "respawn-pane"
+	KindCreateSession = "create-session"
+	KindCreateWindow  = "create-window"
+	KindCreatePane    = "create-pane"
+	KindSetLayout     = "set-layout"
+	KindRespawnPane   = "respawn-pane"
+	// KindRekeyPanes moves the @cairn_p markers of a window's panes so that
+	// agent panes, matched by their @cairn_agent identity, carry the key of
+	// their conversation's position, and moves an unmatched pane off a
+	// configured key (to "<window>/orphan-<n>").
+	KindRekeyPanes      = "rekey-panes"
 	KindKillWindow      = "kill-window"
 	KindKillPane        = "kill-pane"
 	KindReportExtra     = "report-extra"
@@ -40,6 +45,8 @@ type Op struct {
 	Kind, Project, Target, Detail string
 	WindowKey, PaneKey            string
 	Destructive                   bool
+	// Agent is the conversation of an agent pane a report-extra is about.
+	Agent string
 }
 
 // IsNote reports whether the op only reports something.
@@ -212,22 +219,18 @@ func countPanes(d DesiredProject) int {
 // planWindow compares an existing managed window with its config.
 func planWindow(d DesiredProject, dw DesiredWindow, tw tmux.Window, opts Options) []Op {
 	var ops []Op
-	prefix := dw.FullKey() + "/"
-	byKey := map[string]tmux.Pane{}
+	byKey, extras, rekey := matchWindow(dw, tw)
 	foreign := false // a pane that will stay but is not in the config
-	changed := false
-	var extras []tmux.Pane
+	changed := rekey
+	prefix := dw.FullKey() + "/"
 	for _, tp := range tw.Panes {
 		if !strings.HasPrefix(tp.Key, prefix) {
 			foreign = true // the user's own pane (or another window's marker): left alone
-			continue
 		}
-		_, configured := dw.pane(tp.Key)
-		if _, seen := byKey[tp.Key]; configured && !seen {
-			byKey[tp.Key] = tp
-			continue
-		}
-		extras = append(extras, tp)
+	}
+	if rekey {
+		ops = append(ops, Op{Kind: KindRekeyPanes, Project: d.ID, Target: tw.ID, WindowKey: dw.Key,
+			Detail: fmt.Sprintf("window %s: move pane markers to match agent panes by conversation", dw.FullKey())})
 	}
 	for _, tp := range extras {
 		_, configured := dw.pane(tp.Key)
@@ -236,8 +239,11 @@ func planWindow(d DesiredProject, dw DesiredWindow, tw tmux.Window, opts Options
 		// created first.
 		if configured || !opts.Prune || len(byKey) == 0 || !prunable(tp, opts) {
 			foreign = true
-			ops = append(ops, Op{Kind: KindReportExtra, Project: d.ID, Target: tp.ID, WindowKey: dw.Key, PaneKey: tp.Key,
-				Detail: fmt.Sprintf("pane %s (%s) is not in the config", tp.Key, tp.ID)})
+			detail := fmt.Sprintf("pane %s (%s) is not in the config", tp.Key, tp.ID)
+			if tp.Agent != "" {
+				detail = fmt.Sprintf("pane %s (%s) of conversation %s is not in the config", tp.Key, tp.ID, tp.Agent)
+			}
+			ops = append(ops, Op{Kind: KindReportExtra, Project: d.ID, Target: tp.ID, WindowKey: dw.Key, PaneKey: tp.Key, Detail: detail, Agent: tp.Agent})
 			continue
 		}
 		changed = true
@@ -289,6 +295,45 @@ func planWindow(d DesiredProject, dw DesiredWindow, tw tmux.Window, opts Options
 		ops = append(ops, Op{Kind: KindSetLayout, Project: d.ID, Target: tw.ID, WindowKey: dw.Key, Detail: s})
 	}
 	return ops
+}
+
+// matchWindow pairs the managed panes of tw with the configured panes of
+// dw. An agent pane is matched only by its @cairn_agent identity, wherever
+// its key points; any other pane only by key, and never to an agent pane's
+// key. Unmatched managed panes are extras. rekey is true when a matched
+// pane's key differs from its configured one, or an extra sits on a
+// configured key: the markers must be moved before anything else.
+func matchWindow(dw DesiredWindow, tw tmux.Window) (byKey map[string]tmux.Pane, extras []tmux.Pane, rekey bool) {
+	prefix := dw.FullKey() + "/"
+	byKey = map[string]tmux.Pane{}
+	byAgent := map[string]DesiredPane{}
+	for _, dp := range dw.Panes {
+		if dp.Spec.Agent != "" {
+			byAgent[dp.Spec.Agent] = dp
+		}
+	}
+	for _, tp := range tw.Panes {
+		if !strings.HasPrefix(tp.Key, prefix) {
+			continue
+		}
+		var dp DesiredPane
+		var ok bool
+		if tp.Agent != "" {
+			dp, ok = byAgent[tp.Agent]
+		} else if dp, ok = dw.pane(tp.Key); ok && dp.Spec.Agent != "" {
+			ok = false
+		}
+		if _, seen := byKey[dp.Key]; ok && !seen {
+			byKey[dp.Key] = tp
+			rekey = rekey || tp.Key != dp.Key
+			continue
+		}
+		extras = append(extras, tp)
+		if _, configured := dw.pane(tp.Key); configured {
+			rekey = true
+		}
+	}
+	return byKey, extras, rekey
 }
 
 // prunable reports whether an extra managed pane (one not in the config, so

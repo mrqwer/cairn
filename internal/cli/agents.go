@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -159,7 +158,7 @@ func convTitle(c conv.Conversation) string {
 // notRunning takes the conversation lock so the record is not changed under
 // a running tool; release it when done.
 func (e *agentsEnv) notRunning(c conv.Conversation) (func(), error) {
-	rel, err := e.store.AcquireLock(c.Tool, agents.LockKey(c))
+	rel, err := agents.AcquireConvLocks(e.store, c)
 	var el conv.ErrLocked
 	if errors.As(err, &el) {
 		return nil, fmt.Errorf("%s is in use: its tool runs in a pane (%v); exit the tool first", convTitle(c), err)
@@ -229,26 +228,82 @@ func (e *agentsEnv) curatedEdit(id string, fn func(*conv.Curated)) (fileEdit, er
 }
 
 // projectEdit prepares a change of project id's file: decoded, changed by
-// fn, re-rendered and validated. Comments in the file are not kept (the
-// previous text stays in history).
-func projectEdit(dirs xdg.Dirs, id string, fn func(*workspace.Project)) (fileEdit, error) {
+// change, which returns the text edit (nil when it cannot do one). A text
+// edit that decodes to the changed project keeps the user's comments and
+// layout; otherwise the file is re-rendered and warn says so. The result is
+// validated.
+func projectEdit(dirs xdg.Dirs, id string, change func(raw *workspace.Project, before []byte) func(want workspace.Project) ([]byte, bool)) (f fileEdit, warn string, err error) {
 	_, path, before, err := readProjectFile(id, true)
 	if err != nil {
-		return fileEdit{}, err
+		return fileEdit{}, "", err
 	}
 	p, err := workspace.Decode(before)
 	if err != nil {
-		return fileEdit{}, fmt.Errorf("%s: %w", path, err)
+		return fileEdit{}, "", fmt.Errorf("%s: %w", path, err)
 	}
-	fn(&p)
-	after, err := workspace.Marshal(p)
-	if err != nil {
-		return fileEdit{}, err
+	orig, _ := workspace.Decode(before)
+	text := change(&p, before)
+	var after []byte
+	switch {
+	case sameProject(orig, p):
+		after = before
+	case text != nil:
+		var ok bool
+		if after, ok = text(p); !ok {
+			after = nil
+		}
+	}
+	if after == nil {
+		if after, err = workspace.Marshal(p); err != nil {
+			return fileEdit{}, "", err
+		}
+		warn = fmt.Sprintf("warning: %s was rewritten; its comments and formatting were not kept (the previous text is in cairn history)", path)
 	}
 	if probs := checkProjectData(id, after, dirs.Home); len(probs) > 0 {
-		return fileEdit{}, fmt.Errorf("%s would become invalid: %s", path, strings.Join(probs, "; "))
+		return fileEdit{}, "", fmt.Errorf("%s would become invalid: %s", path, strings.Join(probs, "; "))
 	}
-	return fileEdit{path: path, before: before, beforeExists: true, after: after, afterExists: true, perm: 0o644}, nil
+	return fileEdit{path: path, before: before, beforeExists: true, after: after, afterExists: true, perm: 0o644}, warn, nil
+}
+
+// addBindingEdit binds convID in project id (no change when bound already).
+func addBindingEdit(dirs xdg.Dirs, id, convID string) (f fileEdit, key, warn string, err error) {
+	f, warn, err = projectEdit(dirs, id, func(p *workspace.Project, before []byte) func(workspace.Project) ([]byte, bool) {
+		var ok bool
+		if key, ok = p.AgentPaneKey(convID); ok {
+			return nil
+		}
+		key = p.AddAgentPane(convID)
+		wi := 0
+		for i, w := range p.Windows {
+			if w.Key == workspace.AgentWindow {
+				wi = i
+			}
+		}
+		return func(want workspace.Project) ([]byte, bool) { return addPaneText(before, want, wi) }
+	})
+	return f, key, warn, err
+}
+
+// removeBindingEdit unbinds convID from project id.
+func removeBindingEdit(dirs xdg.Dirs, id, convID string) (f fileEdit, window string, pos int, warn string, err error) {
+	f, warn, err = projectEdit(dirs, id, func(p *workspace.Project, before []byte) func(workspace.Project) ([]byte, bool) {
+		wi := -1
+		for i, w := range p.Windows {
+			for _, pn := range w.Panes {
+				if pn.Role == workspace.RoleAgent && pn.Agent == convID {
+					wi = i
+				}
+			}
+		}
+		n := len(p.Windows)
+		var ok bool
+		if window, pos, ok = p.RemoveAgentPane(convID); !ok {
+			return nil
+		}
+		gone := len(p.Windows) < n
+		return func(want workspace.Project) ([]byte, bool) { return removePaneText(before, want, wi, pos, gone) }
+	})
+	return f, window, pos, warn, err
 }
 
 // syncPaneKeys records in each conversation of project p the key of the
@@ -276,9 +331,10 @@ func bindingOf(ws *wsState, id string) (workspace.Project, string, bool) {
 }
 
 // unbind removes the pane binding of c (one history event together with
-// the curated change, if any) and then the live pane: later panes of the
-// window get their markers moved down so they keep matching the config, and
-// the pane itself is killed last (it may be the caller's own). drv is
+// the curated change, if any), then the live pane: it is first moved off
+// its key (to an orphan key), the reconciler then moves the other agent
+// panes to their keys by identity, and the pane is killed last (it may be
+// the caller's own). Interrupted anywhere, no two panes share a key. drv is
 // called only when there is a live pane to change.
 func (e *agentsEnv) unbind(cmd *cobra.Command, c conv.Conversation, curated func(*conv.Curated), kind, summary string, drv func() (wsDriver, error)) error {
 	unlock, err := lockApply(cmd)
@@ -292,13 +348,16 @@ func (e *agentsEnv) unbind(cmd *cobra.Command, c conv.Conversation, curated func
 	}
 	var edits []fileEdit
 	var window string
-	pos := 0
 	p, _, bound := bindingOf(ws, c.ID)
 	if bound {
-		pe, err := projectEdit(e.dirs, p.ID, func(raw *workspace.Project) { window, pos, _ = raw.RemoveAgentPane(c.ID) })
+		pe, w, _, warn, err := removeBindingEdit(e.dirs, p.ID, c.ID)
 		if err != nil {
 			return err
 		}
+		if warn != "" {
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), warn)
+		}
+		window = w
 		edits = append(edits, pe)
 	}
 	if curated != nil {
@@ -315,32 +374,28 @@ func (e *agentsEnv) unbind(cmd *cobra.Command, c conv.Conversation, curated func
 	if !bound {
 		return nil
 	}
-	if ws2, err := loadWorkspace(); err == nil {
-		if np, ok := ws2.project(p.ID); ok {
-			e.syncPaneKeys(np)
-		}
+	ws2, err := loadWorkspace()
+	if err != nil {
+		return err
+	}
+	if np, ok := ws2.project(p.ID); ok {
+		e.syncPaneKeys(np)
 	}
 	d, err := drv()
 	if err != nil {
 		return nil // no tmux: the config is updated, nothing live to change
 	}
-	return unbindLive(ctxOf(cmd), d, p.ID, window, pos)
+	return unbindLive(ctxOf(cmd), d, ws2, p.ID, window, c.ID)
 }
 
-// unbindLive changes the live tmux window after the pane at pos of window
-// was removed from the config.
-func unbindLive(ctx context.Context, d wsDriver, project, window string, pos int) error {
+// unbindLive retires the live pane of conversation convID in window.
+func unbindLive(ctx context.Context, d wsDriver, ws *wsState, project, window, convID string) error {
 	snap, err := d.Snapshot(ctx)
 	if err != nil {
 		return err
 	}
 	prefix := project + "/" + window + "/"
-	type move struct {
-		id string
-		n  int
-	}
-	var target string
-	var moves []move
+	target := ""
 	for _, s := range snap.Sessions {
 		if s.Key != project {
 			continue
@@ -350,23 +405,24 @@ func unbindLive(ctx context.Context, d wsDriver, project, window string, pos int
 				continue
 			}
 			for _, tp := range w.Panes {
-				n, err := strconv.Atoi(strings.TrimPrefix(tp.Key, prefix))
-				if !strings.HasPrefix(tp.Key, prefix) || err != nil {
-					continue
-				}
-				switch {
-				case n == pos:
+				if tp.Agent == convID && strings.HasPrefix(tp.Key, prefix) {
 					target = tp.ID
-				case n > pos:
-					moves = append(moves, move{tp.ID, n})
 				}
 			}
 		}
 	}
-	sort.Slice(moves, func(i, j int) bool { return moves[i].n < moves[j].n })
-	for _, m := range moves {
-		if err := d.SetOption(ctx, "pane", m.id, "@cairn_p", prefix+strconv.Itoa(m.n-1)); err != nil {
+	if target != "" {
+		if err := d.SetOption(ctx, "pane", target, "@cairn_p", prefix+"orphan-"+strings.TrimPrefix(target, "%")); err != nil {
 			return err
+		}
+	}
+	if snap, err = d.Snapshot(ctx); err != nil {
+		return err
+	}
+	ops := nonDestructive(reconcile.Plan(ws.projects, snap, reconcile.Options{Only: project}))
+	for _, r := range reconcile.Apply(ctx, d, ws.projects, ops) {
+		if r.Err != nil {
+			return fmt.Errorf("%s: %w", opText(r.Op), r.Err)
 		}
 	}
 	if target != "" {
@@ -384,15 +440,12 @@ func (e *agentsEnv) bind(cmd *cobra.Command, c conv.Conversation, extra []fileEd
 		return "", err
 	}
 	defer unlock()
-	var key string
-	pe, err := projectEdit(e.dirs, c.Project, func(p *workspace.Project) {
-		var ok bool
-		if key, ok = p.AgentPaneKey(c.ID); !ok {
-			key = p.AddAgentPane(c.ID)
-		}
-	})
+	pe, key, warn, err := addBindingEdit(e.dirs, c.Project, c.ID)
 	if err != nil {
 		return "", err
+	}
+	if warn != "" {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), warn)
 	}
 	if err := commitEdits(e.dirs, kind, summary, append([]fileEdit{pe}, extra...)); err != nil {
 		return "", err
@@ -495,7 +548,10 @@ func newAgentsNewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "new <tool>",
 		Short: "Start a new conversation in an agent pane of a project",
-		Args:  cobra.ExactArgs(1),
+		Long: "Start a new conversation in an agent pane of a project.\n\n" +
+			"cairn undo of this removes the pane binding only; the conversation record stays\n" +
+			"listed (unbound) until you archive or remove it.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			e, err := loadAgents()
 			if err != nil {
@@ -534,8 +590,8 @@ func newAgentsNewCmd() *cobra.Command {
 			if fi, err := os.Stat(cwd); err != nil || !fi.IsDir() {
 				return fmt.Errorf("working directory %s does not exist", cwd)
 			}
-			if hasControlChars(name) {
-				return errors.New("the name must not contain control characters")
+			if err := checkConvName(name, true); err != nil {
+				return err
 			}
 			t := time.Now().UTC()
 			c := conv.Conversation{ID: conv.NewID(t, nil), Tool: a.Name, Name: name, Project: p.ID, Task: task,
@@ -586,6 +642,20 @@ func newAgentsNewCmd() *cobra.Command {
 	f.StringVar(&cwd, "cwd", "", "working directory of the tool (default: the project root)")
 	f.BoolVar(&now, "now", false, "start the tool at once instead of on first attach")
 	return cmd
+}
+
+// checkConvName rejects names a tool could misread: control characters,
+// and a leading "-" (names are passed in tool argv, e.g. --name {name}).
+func checkConvName(name string, emptyOK bool) error {
+	switch {
+	case name == "" && !emptyOK:
+		return errors.New("the name must not be empty")
+	case hasControlChars(name):
+		return errors.New("the name must not contain control characters")
+	case strings.HasPrefix(name, "-"):
+		return fmt.Errorf("the name %q must not start with \"-\"", name)
+	}
+	return nil
 }
 
 func hasControlChars(s string) bool {
@@ -682,6 +752,16 @@ func newAgentsLsCmd() *cobra.Command {
 			cs, err := e.store.List(f)
 			if err != nil {
 				return err
+			}
+			// The pane comes from the bindings in the config, which undo
+			// restores; the record's copy may be stale.
+			if ws, err := loadWorkspace(); err == nil {
+				for i := range cs {
+					cs[i].Pane = ""
+					if _, key, ok := bindingOf(ws, cs[i].ID); ok {
+						cs[i].Pane = key
+					}
+				}
 			}
 			out := cmd.OutOrStdout()
 			if asJSON {
@@ -797,8 +877,11 @@ func newAgentsNameCmd() *cobra.Command {
 					return nil
 				}
 			}
-			if name == "" || hasControlChars(name) || hasControlChars(purpose) {
-				return errors.New("the name must be non-empty and free of control characters")
+			if err := checkConvName(name, false); err != nil {
+				return err
+			}
+			if hasControlChars(purpose) {
+				return errors.New("the purpose must not contain control characters")
 			}
 			ce, err := e.curatedEdit(c.ID, func(cu *conv.Curated) {
 				cu.Name = name

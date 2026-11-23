@@ -91,7 +91,7 @@ func opSymbol(st ui.Style, styled bool, op reconcile.Op) string {
 		sym, paint = "+", st.Green
 	case op.Kind == reconcile.KindRespawnPane:
 		sym, paint = "↻", st.Cyan
-	case op.Kind == reconcile.KindSetLayout:
+	case op.Kind == reconcile.KindSetLayout || op.Kind == reconcile.KindRekeyPanes:
 		sym, paint = "~", st.Cyan
 	case strings.HasPrefix(op.Kind, "skip-"):
 		sym, paint = "⊘", st.Dim

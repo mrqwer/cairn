@@ -35,3 +35,30 @@ func (c Client) SelectPane(ctx context.Context, paneID string) error {
 	}
 	return c.run(ctx, "select-pane", "-t", paneID)
 }
+
+// AgentOption is the pane option holding an agent pane's conversation id.
+const AgentOption = "@cairn_agent"
+
+// ValidAgentID reports whether s is a usable conversation id marker
+// ([A-Za-z0-9][A-Za-z0-9_-]{0,62}).
+func ValidAgentID(s string) bool {
+	if s == "" || len(s) > 63 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || (i > 0 && (c == '_' || c == '-'))
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// agentMarker keeps only a valid @cairn_agent value.
+func agentMarker(v string) string {
+	if ValidAgentID(v) {
+		return v
+	}
+	return ""
+}

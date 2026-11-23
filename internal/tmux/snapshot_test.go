@@ -26,13 +26,13 @@ func TestSnapshotParses(t *testing.T) {
 				"$1\t@2\t0\tbash\t\t80\t24\n" +
 				"$2\t@3\t0\tw\tdemo\t80\t24\n")},
 		execx.Response{Out: []byte(
-			"@0\t%1\t1\tdemo/editor\t\t101\t0\t98\t50\t1\t3\t\t/home/u/demo\tmake\n" +
-				"@0\t%0\t0\tdemo/editor/1\t101\t0\t0\t100\t50\t0\t\t\t/home/u/demo\tnvim\n" +
-				"@1\t%2\t0\tdemo/logs/1\t103\t0\t0\t200\t50\t0\t\t\t/home/u/my dir\ttail\n" +
-				"@2\t%3\t0\t\t104\t0\t0\t80\t24\t0\t\t\t/home/u\tbash\n" +
-				"@3\t%4\t0\tdemo\t105\t0\t0\t80\t24\t0\t\t\t/home/u\tbash\n" +
+			"@0\t%1\t1\tdemo/editor\t\t101\t0\t98\t50\t1\t3\t\t\t/home/u/demo\tmake\n" +
+				"@0\t%0\t0\tdemo/editor/1\t101\t0\t0\t100\t50\t0\t\t\t\t/home/u/demo\tnvim\n" +
+				"@1\t%2\t0\tdemo/logs/1\t103\t0\t0\t200\t50\t0\t\t\t01JAGENT\t/home/u/my dir\ttail\n" +
+				"@2\t%3\t0\t\t104\t0\t0\t80\t24\t0\t\t\t\t/home/u\tbash\n" +
+				"@3\t%4\t0\tdemo\t105\t0\t0\t80\t24\t0\t\t\t\t/home/u\tbash\n" +
 				// a foreign pane whose cwd contains a tab: skipped, not fatal
-				"@2\t%5\t1\t\t106\t0\t0\t80\t24\t0\t\t\t/home/u/a\tb\tbash\n")},
+				"@2\t%5\t1\t\t106\t0\t0\t80\t24\t0\t\t\t\t/home/u/a\tb\tbash\n")},
 	)
 	snap, err := Client{R: f, Socket: "s"}.Snapshot(context.Background())
 	if err != nil {
@@ -46,7 +46,7 @@ func TestSnapshotParses(t *testing.T) {
 				{ID: "%1", Key: "", Index: 1, PID: 0, Left: 101, Top: 0, W: 98, H: 50, Dead: true, DeadStatus: 3, Cwd: "/home/u/demo", Cmd: "make"},
 			}},
 			{ID: "@1", Key: "demo/logs", Name: "logs", Index: 2, W: 200, H: 50, Panes: []Pane{
-				{ID: "%2", Key: "demo/logs/1", PID: 103, W: 200, H: 50, Cwd: "/home/u/my dir", Cmd: "tail"},
+				{ID: "%2", Key: "demo/logs/1", Agent: "01JAGENT", PID: 103, W: 200, H: 50, Cwd: "/home/u/my dir", Cmd: "tail"},
 			}},
 		}},
 		{ID: "$1", Name: "scratch", Windows: []Window{
@@ -61,7 +61,7 @@ func TestSnapshotParses(t *testing.T) {
 				{ID: "%4", PID: 105, W: 80, H: 24, Cwd: "/home/u", Cmd: "bash"},
 			}},
 		}},
-	}, Skipped: []string{"@2\t%5\t1\t\t106\t0\t0\t80\t24\t0\t\t\t/home/u/a\tb\tbash"}}
+	}, Skipped: []string{"@2\t%5\t1\t\t106\t0\t0\t80\t24\t0\t\t\t\t/home/u/a\tb\tbash"}}
 	if !reflect.DeepEqual(snap, want) {
 		t.Fatalf("snapshot\n got %+v\nwant %+v", snap, want)
 	}
@@ -152,8 +152,8 @@ func TestSnapshotSignalDeathIsFailure(t *testing.T) {
 		execx.Response{Out: []byte("$0\tdemo\tdemo\t0\n")},
 		execx.Response{Out: []byte("$0\t@0\t0\tcode\tdemo/code\t200\t50\n")},
 		execx.Response{Out: []byte(
-			"@0\t%0\t0\tdemo/code/1\t\t0\t0\t100\t50\t1\t\t9\t/home/u\tsleep\n" +
-				"@0\t%1\t1\tdemo/code/2\t\t101\t0\t99\t50\t1\t0\t\t/home/u\tsh\n")},
+			"@0\t%0\t0\tdemo/code/1\t\t0\t0\t100\t50\t1\t\t9\t\t/home/u\tsleep\n" +
+				"@0\t%1\t1\tdemo/code/2\t\t101\t0\t99\t50\t1\t0\t\t\t/home/u\tsh\n")},
 	)
 	snap, err := Client{R: f, Socket: "s"}.Snapshot(context.Background())
 	if err != nil {

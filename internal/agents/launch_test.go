@@ -192,3 +192,20 @@ func TestDiscoverListParses(t *testing.T) {
 		t.Fatalf("id %q", id)
 	}
 }
+
+// Review M4: ids from tool output must be safe in paths, globs and argv.
+func TestDiscoverRejectsUnsafeIDs(t *testing.T) {
+	a := adapter.Adapter{Name: "fake", Capabilities: adapter.Capabilities{Discovery: "list", ListJSON: true},
+		Commands: map[string][]string{"start": {"fake"}, "list": {"fake", "ls"}}}
+	run := &execx.FakeRunner{Responses: map[string]execx.Response{"fake ls": {Out: []byte(`[]`)}}}
+	before, _ := agents.TakeSnapshot(context.Background(), fsx.Root{Dir: "/"}, a, run, "/home/u")
+	for _, bad := range []string{"../x", "a/b", "a*b", "-rf", "a b", "x?", "[a]"} {
+		run.Responses["fake ls"] = execx.Response{Out: []byte(`[{"id":"` + bad + `"}]`)}
+		if id, err := agents.Discover(context.Background(), fsx.Root{Dir: "/"}, a, run, before, time.Now(), ""); err == nil {
+			t.Errorf("unsafe id %q accepted as %q", bad, id)
+		}
+	}
+	if agents.ValidNativeID("../x") || !agents.ValidNativeID(uuid) {
+		t.Fatal("ValidNativeID")
+	}
+}

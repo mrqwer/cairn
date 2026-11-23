@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mrqwer/cairn/internal/agents/adapter"
@@ -45,8 +46,8 @@ type PaneEnv struct {
 	Root   fsx.Root
 	Home   string
 	Runner execx.Runner
-	// DiscoverFor bounds how long discovery is tried after a launch
-	// (default 15 s).
+	// DiscoverFor is how long a launch holds the per-cwd discovery lock
+	// (default 15 s); discovery itself goes on while the tool runs.
 	DiscoverFor time.Duration
 	Clock       func() time.Time
 }
@@ -94,18 +95,24 @@ func takeStartRequest(s conv.Store, id string) bool {
 	return s.Root.Remove(p) == nil && fresh
 }
 
-// LockKey is the per-conversation lock: the tool's own id when known (so two
-// records of one native conversation also exclude each other), else cairn's.
-func LockKey(c conv.Conversation) string {
-	if c.NativeID != "" {
-		return c.NativeID
+// AcquireConvLocks takes the conversation's locks: always the one on
+// cairn's id (stable for the whole life of the conversation), and also the
+// one on the tool's own id when it is known, so two records of one native
+// conversation exclude each other. Either held is conv.ErrLocked.
+func AcquireConvLocks(s conv.Store, c conv.Conversation) (release func(), err error) {
+	rel, err := s.AcquireLock(c.Tool, "cairn-"+c.ID)
+	if err != nil {
+		return nil, err
 	}
-	return "cairn-" + c.ID
-}
-
-// fresh reports a conversation that was never launched.
-func fresh(c conv.Conversation) bool {
-	return len(c.LaunchArgv) == 0 && c.State == conv.StateStarting
+	if c.NativeID == "" {
+		return rel, nil
+	}
+	relNative, err := s.AcquireLock(c.Tool, c.NativeID)
+	if err != nil {
+		rel()
+		return nil, err
+	}
+	return func() { relNative(); rel() }, nil
 }
 
 // RunPane is "cairn agents pane <id>": it shows the conversation, waits for
@@ -142,6 +149,9 @@ func RunPane(ctx context.Context, env PaneEnv, id string) error {
 		// Whether it ran or was not started (locked, gone, failed), the
 		// same choices follow; r tries again.
 		c := launch(ctx, env, a, id)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := menu(env, c, true); err != errRetry {
 			return err
 		}
@@ -191,7 +201,7 @@ func launch(ctx context.Context, env PaneEnv, a adapter.Adapter, id string) conv
 		env.printf("conversation %s is gone: %v\n", id, err)
 		return conv.Conversation{ID: id}
 	}
-	release, err := env.Store.AcquireLock(c.Tool, LockKey(c))
+	release, err := AcquireConvLocks(env.Store, c)
 	if err != nil {
 		var el conv.ErrLocked
 		if errors.As(err, &el) {
@@ -209,10 +219,10 @@ func launch(ctx context.Context, env PaneEnv, a adapter.Adapter, id string) conv
 	}
 	var argv []string
 	var disc *Discovery
-	if c.NativeID != "" && !fresh(c) {
+	if ShouldResume(env.Root, env.Home, a, c) {
 		argv, err = BuildResume(a, c, profile)
 	} else {
-		if c.NativeID == "" && !fresh(c) {
+		if c.NativeID == "" && len(c.LaunchArgv) > 0 {
 			env.printf("the tool's id for %s is unknown; starting a new conversation\n", title(c))
 		}
 		argv, disc, err = BuildStart(a, c, profile)
@@ -222,9 +232,12 @@ func launch(ctx context.Context, env PaneEnv, a adapter.Adapter, id string) conv
 		return c
 	}
 
-	var stopDiscovery func()
+	var d *discovery
 	if disc != nil {
-		stopDiscovery = startDiscovery(ctx, env, a, c)
+		if d, err = startDiscovery(ctx, env, a, c); err != nil {
+			return c // ctx done while waiting: the tool is not started
+		}
+		defer d.releaseNative()
 	}
 	started := env.now()
 	if c, err = env.Store.Update(id, func(r *conv.Conversation) error {
@@ -236,14 +249,20 @@ func launch(ctx context.Context, env PaneEnv, a adapter.Adapter, id string) conv
 		return nil
 	}); err != nil {
 		env.printf("%s: %v\n", id, err)
-		if stopDiscovery != nil {
-			stopDiscovery()
+		if d != nil {
+			d.stop()
 		}
 		return conv.Conversation{ID: id}
 	}
+	if c.Cwd != "" {
+		if fi, err := os.Stat(c.Cwd); err != nil || !fi.IsDir() {
+			wd, _ := os.Getwd()
+			env.printf("note: the working directory %s is missing; the tool starts in %s\n", c.Cwd, wd)
+		}
+	}
 	code, runErr := env.Run(context.WithoutCancel(ctx), argv, toolEnv(a, c), c.Cwd)
-	if stopDiscovery != nil {
-		stopDiscovery()
+	if d != nil {
+		d.stop()
 	}
 	state := conv.StateStopped
 	switch {
@@ -289,72 +308,157 @@ func toolEnv(a adapter.Adapter, c conv.Conversation) []string {
 	return append(out, "CAIRN_CONVERSATION="+c.ID)
 }
 
-// startDiscovery serialises launches in one cwd with a short lock and polls
-// Discover while the tool runs; the returned func stops it and releases the
-// lock. A found id is written to the record at once.
-func startDiscovery(ctx context.Context, env PaneEnv, a adapter.Adapter, c conv.Conversation) func() {
+// discovery finds the native id of a conversation started without one.
+type discovery struct {
+	env     PaneEnv
+	a       adapter.Adapter
+	c       conv.Conversation
+	before  Snapshot
+	started time.Time
+
+	mu         sync.Mutex
+	found      bool
+	relNative  func()
+	releaseCwd func()
+	done       chan struct{}
+	finished   chan struct{}
+}
+
+// startDiscovery serialises launches in one cwd with a short lock (waiting
+// for another launch is ctx-aware and announced), snapshots, and polls
+// Discover for as long as the tool runs. The cwd lock is released once the
+// id is found or after DiscoverFor (default 15 s); polling continues, and
+// the ambiguity rule keeps a later overlap from guessing. A found id is
+// recorded at once and its native lock taken. An error means ctx ended
+// while waiting.
+func startDiscovery(ctx context.Context, env PaneEnv, a adapter.Adapter, c conv.Conversation) (*discovery, error) {
 	sum := sha256.Sum256([]byte(c.Cwd))
 	key := hex.EncodeToString(sum[:8])
-	var release func()
+	d := &discovery{env: env, a: a, c: c, done: make(chan struct{}), finished: make(chan struct{})}
+	announced := false
 	for deadline := time.Now().Add(10 * time.Second); ; {
 		r, err := env.Store.AcquireLock("discover", key)
 		if err == nil {
-			release = r
+			d.releaseCwd = r
 			break
 		}
-		if time.Now().After(deadline) {
-			env.printf("another launch in %s is still being identified; the id of %s may need cairn agents import\n", c.Cwd, title(c))
-			return func() {}
+		if !announced {
+			env.printf("waiting for another launch in %s to be identified\n", c.Cwd)
+			announced = true
 		}
-		time.Sleep(100 * time.Millisecond)
+		if time.Now().After(deadline) {
+			env.printf("still busy; %s starts now and its id may stay unknown\n", title(c))
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 	before, err := TakeSnapshot(ctx, env.Root, a, env.Runner, env.Home)
 	if err != nil {
-		release()
+		d.releaseCwdLock()
 		env.printf("discovery for %s unavailable: %v\n", title(c), err)
-		return func() {}
+		close(d.finished)
+		d.found = true // nothing more to try
+		return d, nil
 	}
-	started := env.now()
-	limit := env.DiscoverFor
-	if limit <= 0 {
-		limit = 15 * time.Second
+	d.before, d.started = before, env.now()
+	window := env.DiscoverFor
+	if window <= 0 {
+		window = 15 * time.Second
 	}
-	done := make(chan struct{})
-	finished := make(chan struct{})
 	go func() {
-		defer close(finished)
-		defer release()
+		defer close(d.finished)
 		t := time.NewTicker(500 * time.Millisecond)
 		defer t.Stop()
-		end := time.After(limit)
+		cwdWindow := time.After(window)
 		for {
 			select {
-			case <-done:
+			case <-d.done:
 				return
-			case <-end:
-				return
+			case <-cwdWindow:
+				d.releaseCwdLock()
+				continue
 			case <-t.C:
 			}
-			id, err := Discover(ctx, env.Root, a, env.Runner, before, started, c.Cwd)
-			switch {
-			case err == nil:
-				_, _ = env.Store.Update(c.ID, func(r *conv.Conversation) error { r.NativeID = id; return nil })
-				return
-			case errors.Is(err, ErrNotDiscovered):
-				continue
-			default:
-				env.printf("could not identify the conversation of %s: %v\n", title(c), err)
+			if d.try(ctx) {
 				return
 			}
 		}
 	}()
-	return func() {
-		select {
-		case <-done:
-		default:
-			close(done)
+	return d, nil
+}
+
+// try runs Discover once; true when finished (found or a hard error).
+func (d *discovery) try(ctx context.Context) bool {
+	id, err := Discover(ctx, d.env.Root, d.a, d.env.Runner, d.before, d.started, d.c.Cwd)
+	switch {
+	case err == nil:
+		d.record(id)
+		return true
+	case errors.Is(err, ErrNotDiscovered):
+		return false
+	default:
+		d.env.printf("could not identify the conversation of %s: %v\n", title(d.c), err)
+		d.mu.Lock()
+		d.found = true
+		d.mu.Unlock()
+		d.releaseCwdLock()
+		return true
+	}
+}
+
+func (d *discovery) record(id string) {
+	_, _ = d.env.Store.Update(d.c.ID, func(r *conv.Conversation) error { r.NativeID = id; return nil })
+	rel, err := d.env.Store.AcquireLock(d.c.Tool, id)
+	if err != nil {
+		d.env.printf("warning: the conversation %s is also open elsewhere: %v\n", id, err)
+	}
+	d.mu.Lock()
+	d.found, d.relNative = true, rel
+	d.mu.Unlock()
+	d.releaseCwdLock()
+}
+
+func (d *discovery) releaseCwdLock() {
+	d.mu.Lock()
+	r := d.releaseCwd
+	d.releaseCwd = nil
+	d.mu.Unlock()
+	if r != nil {
+		r()
+	}
+}
+
+// stop ends polling after the tool exited and makes one last attempt, for a
+// tool that wrote its session just before exiting.
+func (d *discovery) stop() {
+	select {
+	case <-d.done:
+	default:
+		close(d.done)
+	}
+	<-d.finished
+	d.mu.Lock()
+	found := d.found
+	d.mu.Unlock()
+	if !found {
+		if !d.try(context.Background()) {
+			d.env.printf("the tool's id for %s was not found; it will start as a new conversation next time\n", title(d.c))
 		}
-		<-finished
+	}
+	d.releaseCwdLock()
+}
+
+func (d *discovery) releaseNative() {
+	d.mu.Lock()
+	r := d.relNative
+	d.relNative = nil
+	d.mu.Unlock()
+	if r != nil {
+		r()
 	}
 }
 

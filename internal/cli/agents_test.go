@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mrqwer/cairn/internal/agents"
 	"github.com/mrqwer/cairn/internal/agents/conv"
 	"github.com/mrqwer/cairn/internal/agents/testtool"
 	"github.com/mrqwer/cairn/internal/fsx"
@@ -434,5 +435,152 @@ func TestResumeBoundTwiceKeepsOneBinding(t *testing.T) {
 	mustRun(t, "", "agents", "resume", c.ID)
 	if n := strings.Count(projectText(t, dir), c.ID); n != 1 {
 		t.Fatalf("bound %d times:\n%s", n, projectText(t, dir))
+	}
+}
+
+// agentsByKey maps each live agents-window pane key to the conversation its
+// wrapper runs (the last argv element).
+func agentsByKey(fd *fakeDriver) map[string]string {
+	out := map[string]string{}
+	for _, s := range fd.sessions {
+		for _, w := range s.windows {
+			if w.key != "demo/agents" {
+				continue
+			}
+			for _, p := range w.panes {
+				out[p.key] = p.argv[len(p.argv)-1]
+			}
+		}
+	}
+	return out
+}
+
+// Review I2: up → new one → new two → rm one → undo → up must leave each
+// configured pane running its own conversation.
+func TestUndoRmKeepsPanesOnTheirConversations(t *testing.T) {
+	dir, fd, _ := agentsTestEnv(t)
+	mustRun(t, "", "up")
+	mustRun(t, "", "agents", "new", "fake", "--project", "demo", "--name", "one")
+	mustRun(t, "", "agents", "new", "fake", "--project", "demo", "--name", "two")
+	ids := map[string]string{}
+	l, _ := testStore(dir).List(conv.Filter{})
+	for _, c := range l {
+		ids[c.Name] = c.ID
+	}
+	mustRun(t, "", "agents", "rm", "one")
+	mustRun(t, "", "undo")
+	mustRun(t, "", "up")
+	got := agentsByKey(fd)
+	want := map[string]string{"demo/agents/1": ids["one"], "demo/agents/2": ids["two"]}
+	for k, id := range want {
+		if got[k] != id {
+			t.Fatalf("pane %s runs %s, want %s (all: %v)", k, got[k], id, got)
+		}
+	}
+	if out := mustRun(t, "", "plan", "demo"); !strings.Contains(out, "nothing to do") {
+		t.Fatalf("plan:\n%s", out)
+	}
+}
+
+// Review I1: the lock key must not change when discovery fills in the
+// native id while the tool runs.
+func TestArchiveRefusedAfterDiscoveryWhileRunning(t *testing.T) {
+	dir, _ := wsTestEnv(t)
+	addProject(t, "demo", dir)
+	mustRun(t, "", "agents", "new", "codex", "--project", "demo", "--name", "d")
+	c := onlyConv(t, dir)
+	s := testStore(dir)
+	rel, err := agents.AcquireConvLocks(s, c) // the pane, before the id is known
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rel()
+	if _, err := s.Update(c.ID, func(r *conv.Conversation) error { r.NativeID = "n-1"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"agents", "archive", c.ID}, {"agents", "rm", c.ID}} {
+		if out, err := runHost(t, "", args...); err == nil {
+			t.Fatalf("%v ran under a running tool:\n%s", args, out)
+		}
+	}
+	onlyConv(t, dir)
+}
+
+// Review M1: if killing the removed pane fails, no two panes share a key.
+func TestUnbindKillFailureLeavesUniqueKeys(t *testing.T) {
+	_, fd, _ := agentsTestEnv(t)
+	mustRun(t, "", "up")
+	mustRun(t, "", "agents", "new", "fake", "--project", "demo", "--name", "one")
+	mustRun(t, "", "agents", "new", "fake", "--project", "demo", "--name", "two")
+	fd.failKill = true
+	_, _ = runHost(t, "", "agents", "rm", "one")
+	seen := map[string]bool{}
+	for _, s := range fd.sessions {
+		for _, w := range s.windows {
+			for _, p := range w.panes {
+				if seen[p.key] {
+					t.Fatalf("duplicate key %s: %v", p.key, fd.calls)
+				}
+				seen[p.key] = true
+			}
+		}
+	}
+}
+
+// Review M5: names starting with "-" could be read as tool flags.
+func TestNamesStartingWithDashRejected(t *testing.T) {
+	dir, _, _ := agentsTestEnv(t)
+	if _, err := runHost(t, "", "agents", "new", "fake", "--project", "demo", "--name=--danger"); err == nil {
+		t.Fatal("new accepted a dash name")
+	}
+	mustRun(t, "", "agents", "new", "fake", "--project", "demo", "--name", "ok")
+	c := onlyConv(t, dir)
+	if _, err := runHost(t, "", "agents", "name", c.ID, "--", "-x"); err == nil {
+		t.Fatal("name accepted a dash name")
+	}
+}
+
+// Review M3: after undo of rm the listed pane matches the binding.
+func TestLsPaneAfterUndo(t *testing.T) {
+	dir, _, _ := agentsTestEnv(t)
+	mustRun(t, "", "agents", "new", "fake", "--project", "demo", "--name", "p")
+	c := onlyConv(t, dir)
+	mustRun(t, "", "agents", "rm", c.ID)
+	mustRun(t, "", "undo")
+	var js []map[string]any
+	if err := json.Unmarshal([]byte(mustRun(t, "", "agents", "ls", "--json")), &js); err != nil {
+		t.Fatal(err)
+	}
+	if len(js) != 1 || js[0]["pane"] != "demo/agents/1" {
+		t.Fatalf("ls %v", js)
+	}
+}
+
+// Review I3: binding edits keep the user's comments and formatting.
+func TestBindingEditsKeepComments(t *testing.T) {
+	dir, _, _ := agentsTestEnv(t)
+	p := filepath.Join(dir, "config/cairn/projects/demo.toml")
+	orig := "# my project, hand written\n" + projectText(t, dir) + "\n# trailing note\n"
+	orig = strings.Replace(orig, "[[windows]]", "# the main window\n[[windows]]", 1)
+	if err := os.WriteFile(p, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := mustRun(t, "", "agents", "new", "fake", "--project", "demo", "--name", "a")
+	if strings.Contains(out, "warning") {
+		t.Fatalf("unexpected fallback:\n%s", out)
+	}
+	mustRun(t, "", "agents", "new", "fake", "--project", "demo", "--name", "b")
+	text := projectText(t, dir)
+	for _, want := range []string{"# my project, hand written", "# the main window", "# trailing note"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("lost %q:\n%s", want, text)
+		}
+	}
+	l, _ := testStore(dir).List(conv.Filter{})
+	for _, c := range l {
+		mustRun(t, "", "agents", "rm", c.ID)
+	}
+	if got := projectText(t, dir); got != orig {
+		t.Fatalf("after removing both agents the file differs:\n--- got\n%s\n--- want\n%s", got, orig)
 	}
 }

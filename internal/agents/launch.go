@@ -91,10 +91,62 @@ func BuildDelete(a adapter.Adapter, c conv.Conversation) ([]string, error) {
 	if !a.Capabilities.Delete {
 		return nil, fmt.Errorf("%s has no native delete (capabilities.delete is off)", a.Name)
 	}
-	if c.NativeID == "" {
-		return nil, fmt.Errorf("conversation %s has no native id to delete", c.ID)
+	if !ValidNativeID(c.NativeID) {
+		return nil, fmt.Errorf("conversation %s has no usable native id to delete (%q)", c.ID, c.NativeID)
 	}
 	return a.Render("delete", vars(c, nil))
+}
+
+// ValidNativeID reports whether a tool's conversation id is safe to put in a
+// path, a glob and an argv element: 1-128 characters of [A-Za-z0-9._:-],
+// not starting with '-' or '.', without "..".
+func ValidNativeID(s string) bool {
+	if s == "" || len(s) > 128 || s[0] == '-' || s[0] == '.' || strings.Contains(s, "..") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == ':' || c == '-'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// TranscriptPaths returns the transcript files of nativeID found through
+// the adapter's history.locator ("~/" is home).
+func TranscriptPaths(root fsx.Root, home string, a adapter.Adapter, nativeID string) ([]string, error) {
+	if a.History.Locator == "" {
+		return nil, fmt.Errorf("adapter %s declares no history.locator", a.Name)
+	}
+	if !ValidNativeID(nativeID) {
+		return nil, fmt.Errorf("native id %q is not usable", nativeID)
+	}
+	loc := a.History.Locator
+	if strings.HasPrefix(loc, "~/") {
+		loc = filepath.Join(home, loc[2:])
+	}
+	return filepath.Glob(root.Path(strings.ReplaceAll(loc, "{native_id}", nativeID)))
+}
+
+// ShouldResume decides between resume and start for c. With a
+// history.locator, the tool persisted the conversation only if a transcript
+// for the native id exists (a tool may drop a session that never got a
+// prompt); without one, a discovered id means it exists, and a pre-assigned
+// id is trusted once the conversation was launched.
+func ShouldResume(root fsx.Root, home string, a adapter.Adapter, c conv.Conversation) bool {
+	if c.NativeID == "" {
+		return false
+	}
+	if a.History.Locator != "" {
+		ms, err := TranscriptPaths(root, home, a, c.NativeID)
+		return err == nil && len(ms) > 0
+	}
+	if !a.Capabilities.PreassignID {
+		return true
+	}
+	return len(c.LaunchArgv) > 0
 }
 
 // Snapshot is what existed before a launch, so Discover can tell what is new.
@@ -184,7 +236,7 @@ func Discover(ctx context.Context, root fsx.Root, a adapter.Adapter, run execx.R
 			if cwd != "" && !mentions(m, cwd) {
 				continue
 			}
-			if id := idFromPath(a, m); id != "" {
+			if id := idFromPath(a, m); ValidNativeID(id) {
 				cands = append(cands, id)
 			}
 		}
@@ -194,7 +246,7 @@ func Discover(ctx context.Context, root fsx.Root, a adapter.Adapter, run execx.R
 			return "", err
 		}
 		for _, e := range entries {
-			if before.IDs[e.id] || (e.cwd != "" && cwd != "" && filepath.Clean(e.cwd) != filepath.Clean(cwd)) {
+			if !ValidNativeID(e.id) || before.IDs[e.id] || (e.cwd != "" && cwd != "" && filepath.Clean(e.cwd) != filepath.Clean(cwd)) {
 				continue
 			}
 			if !e.at.IsZero() && e.at.Before(since) {

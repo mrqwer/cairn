@@ -133,6 +133,9 @@ func Desired(p workspace.Project, size layout.Size, rootExists func(string) bool
 				Split: pn.Split, From: from, Size: sz,
 				Spec: tmux.PaneSpec{Cwd: pn.Cwd, Argv: argv},
 			}
+			if pn.Role == workspace.RoleAgent {
+				dp.Spec.Agent = pn.Agent
+			}
 			if i == 0 {
 				dp.Split, dp.From, dp.Size = "", 0, 0
 			}

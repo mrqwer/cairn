@@ -3,6 +3,8 @@ package agents_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
@@ -329,5 +331,158 @@ func TestStaleStartRequestIgnored(t *testing.T) {
 	_ = agents.RunPane(ctx, f.env, "C1")
 	if len(f.argvs(t)) != 0 {
 		t.Fatal("stale start request started the tool")
+	}
+}
+
+// Review I1: one lock per conversation id always, plus the native id once
+// known; either held means in use.
+func TestConvLocksCoverCairnAndNativeIDs(t *testing.T) {
+	f := newPaneFixture(t, 0, "")
+	c := conv.Conversation{ID: "C1", Tool: "fake"}
+	rel, err := agents.AcquireConvLocks(f.store, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.NativeID = uuid
+	if _, err := agents.AcquireConvLocks(f.store, c); err == nil {
+		t.Fatal("cairn-id lock ignored once the native id is known")
+	}
+	rel()
+	other := conv.Conversation{ID: "C2", Tool: "fake", NativeID: uuid}
+	rel2, err := agents.AcquireConvLocks(f.store, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rel2()
+	if _, err := agents.AcquireConvLocks(f.store, c); err == nil {
+		t.Fatal("two records of one native conversation both locked")
+	}
+}
+
+// discoveryTool writes a session file for its cwd, then sleeps.
+func discoveryTool(t *testing.T, home string, sleep string) string {
+	t.Helper()
+	tool := filepath.Join(t.TempDir(), "disco")
+	script := "#!/bin/sh\nd=" + home + "/sessions/day\nmkdir -p \"$d\"\nprintf '{\"cwd\":\"%s\"}\\n' \"$PWD\" > \"$d/rollout-x-" + uuid + ".jsonl\"\nsleep " + sleep + "\n"
+	if err := os.WriteFile(tool, []byte(script), 0o755); err != nil { //nolint:gosec // test tool
+		t.Fatal(err)
+	}
+	return tool
+}
+
+func discoveryFixture(t *testing.T, sleep string) (*paneFixture, string) {
+	t.Helper()
+	f := newPaneFixture(t, 0, "x")
+	home := t.TempDir()
+	a := dirDiffAdapter()
+	a.Commands["start"] = []string{discoveryTool(t, home, sleep)}
+	f.env.Adapter = func(string) (adapter.Adapter, bool) { return a, true }
+	f.env.Root, f.env.Home, f.env.Now = fsx.Root{Dir: "/"}, home, true
+	f.put(t, conv.Conversation{ID: "C1", Name: "d", Cwd: t.TempDir(), State: conv.StateStarting})
+	return f, home
+}
+
+// Review I4: a tool that exits before the first poll is still identified.
+func TestPaneFinalDiscoveryAfterExit(t *testing.T) {
+	f, _ := discoveryFixture(t, "0")
+	if err := agents.RunPane(context.Background(), f.env, "C1"); err != nil {
+		t.Fatal(err)
+	}
+	if c, _, _ := f.store.Get("C1"); c.NativeID != uuid {
+		t.Fatalf("native id %q\n%s", c.NativeID, f.out.String())
+	}
+}
+
+// Review I1: once discovery finds the id, the native lock is held too.
+func TestPaneTakesNativeLockAfterDiscovery(t *testing.T) {
+	f, _ := discoveryFixture(t, "2")
+	done := make(chan error, 1)
+	go func() { done <- agents.RunPane(context.Background(), f.env, "C1") }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, _, _ := f.store.Get("C1")
+		if c.NativeID == uuid {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("not discovered")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if rel, err := f.store.AcquireLock("fake", uuid); err == nil {
+		rel()
+		t.Fatal("native id lock not held while the tool runs")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Review M2: waiting for another launch's discovery honours ctx and says so.
+func TestPaneDiscoveryLockWaitHonoursCtx(t *testing.T) {
+	f, _ := discoveryFixture(t, "0")
+	c, _, _ := f.store.Get("C1")
+	sum := sha256.Sum256([]byte(c.Cwd))
+	rel, err := f.store.AcquireLock("discover", hex.EncodeToString(sum[:8]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rel()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_ = agents.RunPane(ctx, f.env, "C1")
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("waited %v despite ctx", time.Since(start))
+	}
+	if !strings.Contains(f.out.String(), "waiting") {
+		t.Fatalf("no waiting message:\n%s", f.out.String())
+	}
+}
+
+// Review I5: a launched conversation whose transcript does not exist is
+// started again with the same id; with a transcript it is resumed.
+func TestPaneResumesOnlyWithTranscript(t *testing.T) {
+	home := t.TempDir()
+	for _, withTranscript := range []bool{false, true} {
+		f := newPaneFixture(t, 0, "x")
+		base := f.env.Adapter
+		f.env.Adapter = func(n string) (adapter.Adapter, bool) {
+			a, ok := base(n)
+			a.History = adapter.History{Locator: "~/tr/{native_id}.jsonl", Parser: "x@1"}
+			return a, ok
+		}
+		f.env.Root, f.env.Home, f.env.Now = fsx.Root{Dir: "/"}, home, true
+		_ = os.RemoveAll(filepath.Join(home, "tr"))
+		if withTranscript {
+			_ = os.MkdirAll(filepath.Join(home, "tr"), 0o700)
+			_ = os.WriteFile(filepath.Join(home, "tr", uuid+".jsonl"), []byte("{}\n"), 0o600)
+		}
+		f.put(t, conv.Conversation{ID: "C1", NativeID: uuid, Name: "n", State: conv.StateStopped, LaunchArgv: []string{"x"}})
+		if err := agents.RunPane(context.Background(), f.env, "C1"); err != nil {
+			t.Fatal(err)
+		}
+		got := f.argvs(t)
+		want := "start"
+		if withTranscript {
+			want = "resume"
+		}
+		if len(got) != 1 || got[0][0] != want || got[0][1] != uuid {
+			t.Fatalf("transcript=%v: argv %q", withTranscript, got)
+		}
+	}
+}
+
+// Review M6: a missing working directory is reported, not silently replaced.
+func TestPaneWarnsMissingCwd(t *testing.T) {
+	f := newPaneFixture(t, 0, "x")
+	f.env.Now = true
+	f.put(t, conv.Conversation{ID: "C1", NativeID: uuid, Name: "n", Cwd: "/nonexistent/dir", State: conv.StateStarting})
+	if err := agents.RunPane(context.Background(), f.env, "C1"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.out.String(), "/nonexistent/dir") {
+		t.Fatalf("no note:\n%s", f.out.String())
 	}
 }

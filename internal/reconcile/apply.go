@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/mrqwer/cairn/internal/tmux"
@@ -240,6 +241,12 @@ func (a *applier) do(ctx context.Context, op Op) error {
 		return a.setLayout(ctx, w, true)
 	case KindRespawnPane:
 		return a.respawn(ctx, op)
+	case KindRekeyPanes:
+		w, err := a.window(op.WindowKey)
+		if err != nil {
+			return err
+		}
+		return a.rekey(ctx, w)
 	case KindKillPane, KindKillWindow:
 		return a.kill(ctx, op)
 	}
@@ -439,6 +446,54 @@ func (a *applier) setLayout(ctx context.Context, w DesiredWindow, strict bool) e
 		current[i], current[j] = current[j], current[i]
 	}
 	return a.d.SelectLayout(ctx, tw.ID, s)
+}
+
+// rekey moves the pane markers of window w (on a fresh snapshot, see
+// matchWindow): every pane that changes key first gets a temporary unique
+// one, so no two panes ever share a key, even if this is interrupted; then
+// matched panes get their configured key and unmatched ones an orphan key.
+func (a *applier) rekey(ctx context.Context, w DesiredWindow) error {
+	loc, err := a.fresh(ctx, w.Key, "", a.windows[w.Key])
+	if err != nil {
+		return err
+	}
+	byKey, extras, _ := matchWindow(w, loc.w)
+	prefix := w.FullKey() + "/"
+	final := map[string]string{} // pane id -> key
+	for k, tp := range byKey {
+		if tp.Key != k {
+			final[tp.ID] = k
+		}
+	}
+	for _, tp := range extras {
+		if _, configured := w.pane(tp.Key); configured {
+			final[tp.ID] = prefix + "orphan-" + strings.TrimPrefix(tp.ID, "%")
+		}
+	}
+	ids := make([]string, 0, len(final))
+	for id := range final {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if err := a.d.SetOption(ctx, "pane", id, "@cairn_p", prefix+"tmp-"+strings.TrimPrefix(id, "%")); err != nil {
+			return err
+		}
+	}
+	for _, id := range ids {
+		if err := a.d.SetOption(ctx, "pane", id, "@cairn_p", final[id]); err != nil {
+			return err
+		}
+	}
+	for k := range a.panes {
+		if strings.HasPrefix(k, prefix) {
+			delete(a.panes, k)
+		}
+	}
+	for k, tp := range byKey {
+		a.panes[k] = tp.ID
+	}
+	return nil
 }
 
 // respawn restarts a configured pane only while it is still dead and still
