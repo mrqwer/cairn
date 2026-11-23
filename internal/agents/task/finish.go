@@ -1,16 +1,22 @@
 package task
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 )
 
-// Finish modes: there is no default, and none is ever implied.
+// Finish modes: there is no default, and none is ever implied. Cleanup
+// is for a task that is already done or abandoned: it only removes a
+// worktree that is left, under the same loss rules; the branch stays.
 const (
 	ModeMerge   = "merge"
 	ModePR      = "pr"
 	ModeAbandon = "abandon"
+	ModeCleanup = "cleanup"
 )
 
 // Step is one step of a finish, in the order it runs. Irreversible steps
@@ -41,6 +47,14 @@ type FinishPlan struct {
 	bases        []string // what new commits are counted against
 	switchTo     string   // a --here checkout on the task branch goes here
 	deleteBranch bool
+	branchGone   bool // the branch no longer exists (a finish being completed)
+}
+
+// PlanOptions: FinishedTip is the branch tip an earlier, interrupted
+// finish recorded before its merge. When the branch is gone and that tip
+// is in the base, the merge happened and the plan completes the rest.
+type PlanOptions struct {
+	FinishedTip string
 }
 
 // ErrLoss means finishing would lose work and was not forced.
@@ -63,10 +77,26 @@ type FinishResult struct {
 }
 
 // Plan works out finishing t in mode: merge into its base, push and open
-// a pull request, or abandon. Nothing is changed.
+// a pull request, abandon, or clean up after a finished task. Nothing is
+// changed.
 func Plan(g Git, t Task, mode string) (FinishPlan, error) {
+	return PlanWith(g, t, mode, PlanOptions{})
+}
+
+// PlanWith is Plan with options (see PlanOptions).
+func PlanWith(g Git, t Task, mode string, o PlanOptions) (FinishPlan, error) {
+	p, err := planWith(g, t, mode, o)
+	for _, s := range p.Steps {
+		if s.Irreversible {
+			p.Irreversible = append(p.Irreversible, s.Text)
+		}
+	}
+	return p, err
+}
+
+func planWith(g Git, t Task, mode string, o PlanOptions) (FinishPlan, error) {
 	switch mode {
-	case ModeMerge, ModePR, ModeAbandon:
+	case ModeMerge, ModePR, ModeAbandon, ModeCleanup:
 	default:
 		return FinishPlan{}, fmt.Errorf("unknown finish mode %q (merge, pr or abandon)", mode)
 	}
@@ -84,21 +114,80 @@ func Plan(g Git, t Task, mode string) (FinishPlan, error) {
 		p.Steps = append(p.Steps, Step{Text: fmt.Sprintf(f, a...), Irreversible: irr})
 	}
 
-	exists, err := g.BranchExists(r.Branch)
-	if err != nil {
-		return p, err
+	// The worktree: what removing it loses.
+	var wtLoss []string
+	wtExists := false
+	if r.Worktree != "" {
+		if _, err := os.Lstat(r.Worktree); err == nil {
+			wtExists = true
+			if wtLoss, err = WorktreeLoss(g, r.Repo, r.Worktree); err != nil {
+				return p, err
+			}
+		}
 	}
-	if !exists {
-		block("branch %s does not exist in %s", r.Branch, r.Repo)
-		return p, nil
+	removeStep := func() {
+		switch {
+		case r.Worktree == "":
+		case !wtExists:
+			add(false, "remove what git still records of worktree %s (it is gone)", r.Worktree)
+		case len(wtLoss) > 0:
+			add(true, "remove worktree %s, losing what is listed", r.Worktree)
+		default:
+			add(false, "remove worktree %s", r.Worktree)
+		}
 	}
 	if r.Base != "" && !shaRe.MatchString(r.Base) && checkBranch(r.Base) == nil {
 		if ok, err := g.BranchExists(r.Base); err != nil {
 			return p, err
 		} else if ok {
 			p.base = r.Base
-			p.bases = append(p.bases, "refs/heads/"+r.Base)
 		}
+	}
+	baseName := r.Base
+	if baseName == "" {
+		baseName = r.BaseCommit
+	}
+
+	if mode == ModeCleanup {
+		if wtExists {
+			removeStep()
+			p.Loss = wtLoss
+		}
+		return p, nil
+	}
+
+	exists, err := g.BranchExists(r.Branch)
+	if err != nil {
+		return p, err
+	}
+	if !exists {
+		// A finish that was cut off, or a branch deleted by hand.
+		p.branchGone = true
+		closeHint := fmt.Sprintf("if its work is merged or no longer needed, close the task with: cairn task finish %s --abandon", t.Slug)
+		switch mode {
+		case ModeMerge:
+			merged := false
+			if o.FinishedTip != "" && p.base != "" && CheckRef(o.FinishedTip) == nil {
+				merged, _ = g.IsAncestor(o.FinishedTip, "refs/heads/"+p.base)
+			}
+			if !merged {
+				block("branch %s does not exist in %s, so nothing shows it was merged; %s", r.Branch, r.Repo, closeHint)
+				return p, nil
+			}
+			add(false, "%s is already merged into %s (branch %s is gone)", o.FinishedTip[:7], p.base, r.Branch)
+		case ModePR:
+			block("branch %s does not exist in %s; %s", r.Branch, r.Repo, closeHint)
+			return p, nil
+		case ModeAbandon:
+			add(false, "branch %s is already gone", r.Branch)
+		}
+		removeStep()
+		p.Loss = wtLoss
+		return p, nil
+	}
+
+	if p.base != "" {
+		p.bases = append(p.bases, "refs/heads/"+p.base)
 	}
 	switch {
 	case r.BaseCommit != "":
@@ -118,20 +207,10 @@ func Plan(g Git, t Task, mode string) (FinishPlan, error) {
 	if p.Unpushed, err = g.Unpushed(r.Repo, r.Branch, p.bases...); err != nil {
 		return p, err
 	}
-	baseName := r.Base
-	if baseName == "" {
-		baseName = r.BaseCommit
-	}
 
-	// The worktree: what removing it loses.
-	var wtLoss []string
-	if r.Worktree != "" {
-		if wtLoss, err = WorktreeLoss(g, r.Repo, r.Worktree); err != nil {
-			return p, err
-		}
-	}
 	// A --here task: the main checkout is switched, never cleaned, so its
-	// changes block a switch (untracked and ignored files stay as they are).
+	// changes block a switch (untracked and ignored files stay as they
+	// are, unless the switch would overwrite them).
 	onBranch := false
 	if r.Worktree == "" {
 		cur, err := g.CurrentBranch()
@@ -150,15 +229,15 @@ func Plan(g Git, t Task, mode string) (FinishPlan, error) {
 			}
 		}
 	}
-	removeStep := func() {
-		if r.Worktree == "" {
-			return
+	checkSwitch := func(to string) error {
+		ow, err := g.Overwritten(r.Repo, "HEAD", to)
+		if err != nil {
+			return err
 		}
-		if len(wtLoss) > 0 {
-			add(true, "remove worktree %s, losing what is listed", r.Worktree)
-			return
+		if len(ow) > 0 {
+			block("switching %s to %s would overwrite ignored files there (%s): move them away first", r.Repo, to, strings.Join(ow, ", "))
 		}
-		add(false, "remove worktree %s", r.Worktree)
+		return nil
 	}
 
 	switch mode {
@@ -170,6 +249,11 @@ func Plan(g Git, t Task, mode string) (FinishPlan, error) {
 		if len(p.Unmerged) == 0 {
 			add(false, "nothing to merge: %s has no commits beyond %s", r.Branch, p.base)
 		} else {
+			if bp, op, err := g.BranchBusy(p.base); err != nil {
+				return p, err
+			} else if op != "" {
+				block("%s is in the middle of a %s in %s: finish or abort it first", p.base, op, bp)
+			}
 			at, err := g.CheckedOutAt(p.base)
 			if err != nil {
 				return p, err
@@ -188,10 +272,20 @@ func Plan(g Git, t Task, mode string) (FinishPlan, error) {
 				if g.in(at).mergeInProgress() {
 					block("%s has a merge in progress: finish or abort it first", at)
 				}
+				ow, err := g.Overwritten(at, "refs/heads/"+p.base, "refs/heads/"+r.Branch)
+				if err != nil {
+					return p, err
+				}
+				if len(ow) > 0 {
+					block("merging into %s would overwrite ignored files there (%s): move them away first", at, strings.Join(ow, ", "))
+				}
 			}
 			add(true, "merge %s into %s %s (%s)", r.Branch, p.base, where, plural(len(p.Unmerged), "commit"))
 		}
 		if onBranch {
+			if err := checkSwitch("refs/heads/" + p.base); err != nil {
+				return p, err
+			}
 			p.switchTo = p.base
 			add(false, "switch %s to %s", r.Repo, p.base)
 		}
@@ -217,8 +311,15 @@ func Plan(g Git, t Task, mode string) (FinishPlan, error) {
 			if back == "" {
 				back = p.base
 			}
-			if back == "" {
+			switch back {
+			case "":
 				block("what %s had checked out before the task is unknown: switch it yourself, then run again", r.Repo)
+			default:
+				if _, err := g.ResolveCommit(back); err != nil {
+					block("%s had %s checked out before the task, which no longer exists: switch it yourself, then run again", r.Repo, back)
+				} else if err := checkSwitch(back); err != nil {
+					return p, err
+				}
 			}
 			p.switchTo = back
 			add(false, "switch %s back to %s", r.Repo, back)
@@ -238,11 +339,6 @@ func Plan(g Git, t Task, mode string) (FinishPlan, error) {
 		default:
 			add(false, "keep branch %s: its %s beyond %s are on a remote (delete it with: git branch -D %s)",
 				r.Branch, plural(len(p.Unmerged), "commit"), baseName, r.Branch)
-		}
-	}
-	for _, s := range p.Steps {
-		if s.Irreversible {
-			p.Irreversible = append(p.Irreversible, s.Text)
 		}
 	}
 	return p, nil
@@ -266,8 +362,9 @@ func Finish(g Git, t Task, p FinishPlan, o FinishOptions) (res FinishResult, err
 	}
 	r := t.Repos[0]
 	g = g.in(r.Repo)
-	switch p.Mode {
-	case ModeMerge:
+	switch {
+	case p.branchGone || p.Mode == ModeCleanup || p.Mode == ModeAbandon:
+	case p.Mode == ModeMerge:
 		if len(p.Unmerged) > 0 {
 			msg, err := MergeInto(g, p.base, r.Branch)
 			if err != nil {
@@ -275,7 +372,7 @@ func Finish(g Git, t Task, p FinishPlan, o FinishOptions) (res FinishResult, err
 			}
 			res.Done = append(res.Done, msg)
 		}
-	case ModePR:
+	case p.Mode == ModePR:
 		if o.OpenPR == nil {
 			return res, errors.New("no pull request command")
 		}
@@ -291,7 +388,6 @@ func Finish(g Git, t Task, p FinishPlan, o FinishOptions) (res FinishResult, err
 			return res, fmt.Errorf("%s was pushed to %s, but the pull request was not opened: %w", r.Branch, remote, err)
 		}
 		res.Done = append(res.Done, "opened a pull request of "+r.Branch)
-	case ModeAbandon:
 	default:
 		return res, fmt.Errorf("unknown finish mode %q", p.Mode)
 	}
@@ -311,6 +407,11 @@ func Finish(g Git, t Task, p FinishPlan, o FinishOptions) (res FinishResult, err
 			if changed, err := g.Changed(r.Repo); err != nil || len(changed) > 0 {
 				branchFree = false
 				res.Left = append(res.Left, fmt.Sprintf("%s stays on %s: it has uncommitted changes (%s)", r.Repo, r.Branch, strings.Join(changed, ", ")))
+				break
+			}
+			if ow, err := g.Overwritten(r.Repo, "HEAD", p.switchTo); err != nil || len(ow) > 0 {
+				branchFree = false
+				res.Left = append(res.Left, fmt.Sprintf("%s stays on %s: switching would overwrite ignored files (%s)", r.Repo, r.Branch, strings.Join(ow, ", ")))
 				break
 			}
 			if err := g.Switch(p.switchTo); err != nil {
@@ -337,6 +438,9 @@ func Finish(g Git, t Task, p FinishPlan, o FinishOptions) (res FinishResult, err
 		}
 	}
 
+	if p.branchGone || p.Mode == ModeCleanup {
+		return res, nil
+	}
 	if !p.deleteBranch {
 		switch p.Mode {
 		case ModePR:
@@ -475,6 +579,11 @@ func MergeInto(g Git, base, branch string) (string, error) {
 	} else if ok {
 		return fmt.Sprintf("%s is already merged into %s", branch, base), nil
 	}
+	if bp, op, err := g.BranchBusy(base); err != nil {
+		return "", err
+	} else if op != "" {
+		return "", fmt.Errorf("%s is in the middle of a %s in %s; nothing was merged", base, op, bp)
+	}
 	at, err := g.CheckedOutAt(base)
 	if err != nil {
 		return "", err
@@ -517,6 +626,16 @@ func MergeInto(g Git, base, branch string) (string, error) {
 	return fmt.Sprintf("merged %s into %s (merge commit %s)", branch, base, merge[:7]), nil
 }
 
+// recoveryTimeout bounds the clean-up after a failed merge; it runs on a
+// fresh context, so it also runs after the merge itself was interrupted.
+var recoveryTimeout = 2 * time.Minute
+
+func (g Git) recovery() (Git, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(g.ctx()), recoveryTimeout)
+	g.Ctx = ctx
+	return g, cancel
+}
+
 func mergeInCheckout(g Git, base, branch, old, tip string) (string, error) {
 	if changed, err := g.Changed(g.Dir); err != nil {
 		return "", err
@@ -526,16 +645,34 @@ func mergeInCheckout(g Git, base, branch, old, tip string) (string, error) {
 	if g.mergeInProgress() {
 		return "", fmt.Errorf("%s has a merge in progress; nothing was merged", g.Dir)
 	}
+	if ow, err := g.Overwritten(g.Dir, old, tip); err != nil {
+		return "", err
+	} else if len(ow) > 0 {
+		return "", fmt.Errorf("merging %s into %s would overwrite ignored files in %s (%s); nothing was merged", branch, base, g.Dir, strings.Join(ow, ", "))
+	}
 	if _, merr := g.run("merge", "--no-edit", "--", branch); merr != nil {
-		conflicts, _ := lines(g.run("diff", "--name-only", "--diff-filter=U"))
-		if g.mergeInProgress() {
-			if _, err := g.run("merge", "--abort"); err != nil {
+		// The checkout was clean before, so whatever the merge left (a
+		// conflict, or a half merge cut off by a signal or timeout) is
+		// undone: merge --abort with MERGE_HEAD, else reset --merge.
+		rg, cancel := g.recovery()
+		defer cancel()
+		conflicts, _ := lines(rg.run("diff", "--name-only", "--diff-filter=U"))
+		switch {
+		case rg.mergeInProgress():
+			if _, err := rg.run("merge", "--abort"); err != nil {
 				return "", fmt.Errorf("merging %s into %s failed (%v) and could not be aborted (%v): see git status in %s", branch, base, merr, err, g.Dir)
 			}
+		default:
+			if changed, err := rg.Changed(g.Dir); err == nil && len(changed) > 0 {
+				if _, err := rg.run("reset", "--merge"); err != nil {
+					return "", fmt.Errorf("merging %s into %s failed (%v) and could not be undone (%v): see git status in %s", branch, base, merr, err, g.Dir)
+				}
+			}
 		}
-		head, err := g.ResolveCommit("HEAD")
-		if err != nil || head != old {
-			return "", fmt.Errorf("merging %s into %s failed (%v); %s is no longer at %s: see git status there", branch, base, merr, g.Dir, old[:7])
+		head, err := rg.ResolveCommit("HEAD")
+		changed, cerr := rg.Changed(g.Dir)
+		if err != nil || head != old || cerr != nil || len(changed) > 0 {
+			return "", fmt.Errorf("merging %s into %s failed (%v); %s is not as it was (at %s, clean): see git status there", branch, base, merr, g.Dir, old[:7])
 		}
 		if len(conflicts) > 0 {
 			return "", fmt.Errorf("merging %s into %s conflicts in %s; the merge was aborted, nothing was changed", branch, base, strings.Join(conflicts, ", "))

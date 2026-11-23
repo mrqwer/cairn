@@ -3,9 +3,13 @@ package execx_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/mrqwer/cairn/internal/execx"
 )
@@ -75,5 +79,17 @@ func TestOSRunnerStreams(t *testing.T) {
 	}
 	if len(b) != 0 || out.String() != "in\n" || errOut.String() != "e\n" {
 		t.Fatalf("returned %q, out %q, err %q", b, out.String(), errOut.String())
+	}
+}
+
+func TestOSRunnerInterruptSignal(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	r := execx.OSRunner{Interrupt: syscall.SIGTERM, Dir: dir}
+	_, _ = r.Run(ctx, "sh", "-c", "trap 'echo term > got; exit 1' TERM; sleep 5 >/dev/null 2>&1 & wait")
+	b, _ := os.ReadFile(filepath.Join(dir, "got"))
+	if strings.TrimSpace(string(b)) != "term" {
+		t.Fatalf("child was not sent the signal: %q", b)
 	}
 }

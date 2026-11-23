@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -553,5 +555,151 @@ func TestHereAbandonSwitchesBack(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(repo, "notes.md")); err != nil {
 		t.Fatal("untracked file in the main checkout removed")
+	}
+}
+
+func TestMergeBlockedWhileBaseIsRebasedElsewhere(t *testing.T) {
+	repo := tempRepo(t)
+	g := newGit(repo)
+	tk := worktreeTask(t, repo, "x")
+	commitFile(t, tk.Repos[0].Worktree, "a.txt", "a\n")
+	// main is rebased in its own worktree and stops on a conflict; the
+	// main checkout is elsewhere, so main is not "checked out" by name.
+	run(t, repo, "switch", "-q", "-c", "side")
+	commitFile(t, repo, "README", "side\n")
+	run(t, repo, "switch", "-q", "-c", "elsewhere", "main")
+	wt := filepath.Join(t.TempDir(), "rb")
+	run(t, repo, "worktree", "add", "-q", wt, "main")
+	commitFile(t, wt, "README", "main\n")
+	if out, err := exec.Command("git", "-C", wt, "rebase", "side").CombinedOutput(); err == nil {
+		t.Fatalf("rebase did not stop:\n%s", out)
+	}
+	before := run(t, repo, "rev-parse", "refs/heads/main")
+	p, err := Plan(g, tk, ModeMerge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(p.Blocked, "rebase") {
+		t.Fatalf("blocked %q", p.Blocked)
+	}
+	if _, err := MergeInto(g, "main", "task/x"); err == nil || !strings.Contains(err.Error(), "rebase") {
+		t.Fatalf("merge into a base under rebase: %v", err)
+	}
+	if run(t, repo, "rev-parse", "refs/heads/main") != before {
+		t.Fatal("main moved under its rebase")
+	}
+}
+
+func TestMergeRefusesOverwritingIgnoredFiles(t *testing.T) {
+	repo := tempRepo(t) // .env is ignored
+	g := newGit(repo)
+	tk := worktreeTask(t, repo, "x")
+	wt := tk.Repos[0].Worktree
+	write(t, filepath.Join(wt, ".env"), "SECRET=branch\n", 0o600)
+	run(t, wt, "add", "-f", ".env")
+	run(t, wt, "commit", "-q", "-m", "track env")
+	write(t, filepath.Join(repo, ".env"), "SECRET=mine\n", 0o600)
+	p, err := Plan(g, tk, ModeMerge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(p.Blocked, ".env") {
+		t.Fatalf("blocked %q", p.Blocked)
+	}
+	if _, err := MergeInto(g, "main", "task/x"); err == nil || !strings.Contains(err.Error(), ".env") {
+		t.Fatalf("merge err %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(repo, ".env")); string(b) != "SECRET=mine\n" {
+		t.Fatalf("ignored file overwritten: %q", b)
+	}
+}
+
+func TestInterruptedMergeInCheckoutIsRolledBack(t *testing.T) {
+	repo := tempRepo(t)
+	tk := worktreeTask(t, repo, "x")
+	commitFile(t, tk.Repos[0].Worktree, "b.txt", "b\n")
+	commitFile(t, repo, "c.txt", "c\n") // no fast-forward: the hook runs
+	write(t, filepath.Join(repo, ".git", "hooks", "pre-merge-commit"), "#!/bin/sh\nsleep 5\n", 0o755)
+	head := run(t, repo, "rev-parse", "HEAD")
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	g := Git{R: execx.OSRunner{Interrupt: syscall.SIGTERM}, Dir: repo, Ctx: ctx}
+	if _, err := MergeInto(g, "main", "task/x"); err == nil {
+		t.Fatal("interrupted merge reported success")
+	}
+	if run(t, repo, "rev-parse", "HEAD") != head {
+		t.Fatal("main moved")
+	}
+	if st := run(t, repo, "status", "--porcelain"); st != "" {
+		t.Fatalf("checkout left with the half merge:\n%s", st)
+	}
+}
+
+func TestPlanResumesFinishWhoseBranchIsGone(t *testing.T) {
+	repo := tempRepo(t)
+	g := newGit(repo)
+	tk := worktreeTask(t, repo, "x")
+	commitFile(t, tk.Repos[0].Worktree, "a.txt", "a\n")
+	tip := run(t, repo, "rev-parse", "task/x")
+	// A merge that was cut off after the branch was deleted.
+	run(t, repo, "merge", "-q", "--ff-only", "task/x")
+	run(t, repo, "worktree", "remove", tk.Repos[0].Worktree)
+	run(t, repo, "branch", "-q", "-d", "task/x")
+
+	p, err := PlanWith(g, tk, ModeMerge, PlanOptions{FinishedTip: tip})
+	if err != nil || len(p.Blocked) != 0 || len(p.Irreversible) != 0 || len(p.Loss) != 0 {
+		t.Fatalf("resume plan %+v %v", p, err)
+	}
+	if _, err := Finish(g, tk, p, FinishOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	// Without the recorded tip nothing proves the merge: blocked, with
+	// the way out.
+	p, err = Plan(g, tk, ModeMerge)
+	if err != nil || !has(p.Blocked, "--abandon") {
+		t.Fatalf("plan %+v %v", p, err)
+	}
+	// A tip that is not in main is no merge either.
+	p, _ = PlanWith(g, tk, ModeMerge, PlanOptions{FinishedTip: strings.Repeat("1", 40)})
+	if len(p.Blocked) == 0 {
+		t.Fatal("unmerged tip accepted")
+	}
+	// Abandon closes a task whose branch is gone.
+	p, err = Plan(g, tk, ModeAbandon)
+	if err != nil || len(p.Blocked) != 0 || len(p.Loss) != 0 {
+		t.Fatalf("abandon plan %+v %v", p, err)
+	}
+}
+
+func TestPlanBlocksUnknownSwitchBack(t *testing.T) {
+	repo := tempRepo(t)
+	g := newGit(repo)
+	tk := hereTask(t, repo, "h")
+	tk.Repos[0].Return = "gone"
+	p, err := Plan(g, tk, ModeAbandon)
+	if err != nil || !has(p.Blocked, "gone") {
+		t.Fatalf("plan %+v %v", p, err)
+	}
+}
+
+func TestCleanupPlanForFinishedTask(t *testing.T) {
+	repo := tempRepo(t)
+	g := newGit(repo)
+	tk := worktreeTask(t, repo, "x")
+	tk.Status = StatusDone
+	write(t, filepath.Join(tk.Repos[0].Worktree, "notes.md"), "n\n", 0o644)
+	p, err := Plan(g, tk, ModeCleanup)
+	if err != nil || !slices.Contains(p.Loss, "uncommitted notes.md") || has(stepTexts(p), "branch task/x") && !has(stepTexts(p), "keep branch") {
+		t.Fatalf("cleanup plan %+v %v", p, err)
+	}
+	res, err := Finish(g, tk, p, FinishOptions{Force: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(tk.Repos[0].Worktree); !os.IsNotExist(err) || !has(res.Lost, "notes.md") {
+		t.Fatalf("worktree kept: %+v", res)
+	}
+	if ok, _ := g.BranchExists("task/x"); !ok {
+		t.Fatal("cleanup deleted the branch")
 	}
 }

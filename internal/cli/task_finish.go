@@ -3,17 +3,23 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mrqwer/cairn/internal/agents/conv"
 	"github.com/mrqwer/cairn/internal/agents/task"
+	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/xdg"
 )
 
@@ -77,6 +83,17 @@ func newTaskReviewCmd() *cobra.Command {
 				return fmt.Errorf("the diff viewer %q is not a command", v)
 			}
 			if err := showTaskDiff(cmd, t, argv); err != nil {
+				return err
+			}
+			// The viewer may have been open for long: the task is read
+			// again under the task lock, and only an open task becomes
+			// review (a finish meanwhile is never undone).
+			unlock, err := lockTasks(ctxOf(cmd), e.dirs, taskLockWait)
+			if err != nil {
+				return err
+			}
+			defer unlock()
+			if t, err = findTask(e, io.Discard, t.ID); err != nil {
 				return err
 			}
 			if t.Status != task.StatusOpen {
@@ -215,10 +232,7 @@ func newTaskFinishCmd() *cobra.Command {
 func finishTask(cmd *cobra.Command, e *agentsEnv, st taskSettings, t task.Task, mode string, force, yes bool) error {
 	ctx := ctxOf(cmd)
 	out := cmd.OutOrStdout()
-	switch t.Status {
-	case task.StatusDone, task.StatusAbandoned:
-		return fmt.Errorf("task %s is already %s", t.Slug, t.Status)
-	}
+	finished := t.Status == task.StatusDone || t.Status == task.StatusAbandoned
 	r := t.Repos[0]
 	// No agent may run in the task while it is finished: every
 	// conversation's lock is held until the end.
@@ -240,7 +254,12 @@ func finishTask(cmd *cobra.Command, e *agentsEnv, st taskSettings, t task.Task, 
 		rels = append(rels, rel)
 	}
 
-	g := newGit(ctx, r.Repo)
+	g, cancel := finishGit(ctx, r.Repo)
+	defer cancel()
+	if finished {
+		return cleanupFinished(cmd, e, g, t, force, yes)
+	}
+	intent, _ := readFinishIntent(e.dirs, t.ID)
 	if mode == task.ModePR {
 		if st.prTool == "" {
 			return fmt.Errorf("no pull request tool is configured (set tasks.pr_tool to gh or glab); nothing was changed. To do it yourself:\n"+
@@ -256,7 +275,7 @@ func finishTask(cmd *cobra.Command, e *agentsEnv, st taskSettings, t task.Task, 
 			return fmt.Errorf("%s has no remote %q (tasks.pr_remote); nothing was changed", r.Repo, st.prRemote)
 		}
 	}
-	p, err := task.Plan(g, t, mode)
+	p, err := task.PlanWith(g, t, mode, task.PlanOptions{FinishedTip: intent.Tip})
 	if err != nil {
 		return err
 	}
@@ -294,7 +313,18 @@ func finishTask(cmd *cobra.Command, e *agentsEnv, st taskSettings, t task.Task, 
 
 	var opener func() error
 	if mode == task.ModePR {
-		opener = func() error { return openPullRequest(cmd, st.prTool, t) }
+		opener = func() error { return openPullRequest(cmd, g, st, t) }
+	}
+	// Interrupted until now: nothing has changed. From here on the steps
+	// run to their end (git gets SIGTERM only on the finish timeout).
+	if ctx.Err() != nil {
+		return fmt.Errorf("interrupted; task %s was not finished, nothing was changed", t.Slug)
+	}
+	// The intent lets a rerun complete a finish cut off after its merge.
+	if tip, err := g.ResolveCommit("refs/heads/" + r.Branch); err == nil {
+		if err := writeFinishIntent(e.dirs, t.ID, finishIntent{Mode: mode, Tip: tip}); err != nil {
+			return err
+		}
 	}
 	res, ferr := task.Finish(g, t, p, task.FinishOptions{Force: force && yes, Remote: st.prRemote, OpenPR: opener})
 	for _, d := range res.Done {
@@ -307,6 +337,9 @@ func finishTask(cmd *cobra.Command, e *agentsEnv, st taskSettings, t task.Task, 
 		_, _ = fmt.Fprintf(out, "remains: %s\n", l)
 	}
 	if ferr != nil {
+		if len(res.Done) == 0 {
+			removeFinishIntent(e.dirs, t.ID)
+		}
 		return fmt.Errorf("task %s is not finished: %w", t.Slug, ferr)
 	}
 
@@ -322,6 +355,7 @@ func finishTask(cmd *cobra.Command, e *agentsEnv, st taskSettings, t task.Task, 
 	if err := commitEdits(e.dirs, "task.finish", fmt.Sprintf("finish task %s (%s)", t.Slug, mode), []fileEdit{ed}); err != nil {
 		return err
 	}
+	removeFinishIntent(e.dirs, t.ID)
 	_, _ = fmt.Fprintf(out, "task %s is %s\n", t.Slug, t.Status)
 	if mode != task.ModeAbandon {
 		finishRecord(cmd, e, t, p, res)
@@ -349,26 +383,133 @@ func printFinishPlan(w io.Writer, t task.Task, p task.FinishPlan, st taskSetting
 	_, _ = fmt.Fprintln(w, "  then archive the task's conversations")
 }
 
-// openPullRequest runs gh or glab in the main checkout with the task's
-// title; every value is one argument (--flag=value), never shell text.
-func openPullRequest(cmd *cobra.Command, tool string, t task.Task) error {
-	r := t.Repos[0]
-	body := fmt.Sprintf("Task: %s\nBranch: %s", t.Title, r.Branch)
-	var argv []string
-	switch tool {
-	case "gh":
-		argv = []string{"pr", "create", "--base=" + r.Base, "--head=" + r.Branch, "--title=" + t.Title, "--body=" + body}
-	case "glab":
-		argv = []string{"mr", "create", "--source-branch=" + r.Branch, "--target-branch=" + r.Base,
-			"--title=" + t.Title, "--description=" + body, "--yes"}
-	default:
-		return fmt.Errorf("unknown pull request tool %q", tool)
-	}
+// prTimeout bounds gh or glab; finishGitTimeout bounds each git step of a
+// finish. Both stop the command with SIGTERM.
+var (
+	prTimeout        = 2 * time.Minute
+	finishGitTimeout = 10 * time.Minute
+)
+
+// finishGit runs git for a finish: not cancelled by Ctrl-C or SIGTERM once
+// started (a merge is never killed halfway), bounded by finishGitTimeout
+// per command, and stopped with SIGTERM so git cleans up its locks.
+func finishGit(ctx context.Context, dir string) (task.Git, func()) {
 	run := taskRunner()
-	run.Dir, run.Stdout, run.Stderr = r.Repo, cmd.OutOrStdout(), cmd.ErrOrStderr()
-	if _, err := run.Run(context.WithoutCancel(ctxOf(cmd)), tool, argv...); err != nil {
-		return fmt.Errorf("%s %s create: %w", tool, argv[0], err)
+	run.Interrupt = syscall.SIGTERM
+	g := task.Git{R: timedRunner{run, finishGitTimeout}, Dir: dir, Ctx: context.WithoutCancel(ctx)}
+	return g, func() {}
+}
+
+// timedRunner gives every command its own timeout.
+type timedRunner struct {
+	r execx.OSRunner
+	d time.Duration
+}
+
+func (t timedRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, t.d)
+	defer cancel()
+	return t.r.Run(ctx, name, args...)
+}
+
+// prRepo is the repository of the remote's URL as gh and glab name it
+// ("host/owner/repo"), or "" when the URL is not a host URL (a local path).
+func prRepo(remoteURL string) string {
+	host, path := "", ""
+	switch {
+	case strings.Contains(remoteURL, "://"):
+		u, err := url.Parse(remoteURL)
+		if err != nil {
+			return ""
+		}
+		host, path = u.Hostname(), u.Path
+	default:
+		// scp-like: [user@]host:path
+		hp, p, ok := strings.Cut(remoteURL, ":")
+		if !ok || strings.Contains(hp, "/") {
+			return ""
+		}
+		if _, h, ok := strings.Cut(hp, "@"); ok {
+			hp = h
+		}
+		host, path = hp, p
 	}
+	path = strings.TrimSuffix(strings.Trim(path, "/"), ".git")
+	if host == "" || !strings.Contains(path, "/") || !prRepoRe.MatchString(host+"/"+path) {
+		return ""
+	}
+	return host + "/" + path
+}
+
+var prRepoRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]*(/[A-Za-z0-9_.][A-Za-z0-9_.-]*)+$`)
+
+// openPullRequest runs gh or glab in the main checkout with the task's
+// title, pinned to the repository of tasks.pr_remote when its URL names
+// one; every value is one argument (--flag=value), never shell text. A
+// pull request that already exists for the branch counts as opened.
+func openPullRequest(cmd *cobra.Command, g task.Git, st taskSettings, t task.Task) error {
+	r := t.Repos[0]
+	repo := ""
+	if u, err := g.RemoteURL(st.prRemote); err == nil {
+		repo = prRepo(u)
+	}
+	body := fmt.Sprintf("Task: %s\nBranch: %s", t.Title, r.Branch)
+	var create, view []string
+	switch st.prTool {
+	case "gh":
+		create = []string{"pr", "create", "--base=" + r.Base, "--head=" + r.Branch, "--title=" + t.Title, "--body=" + body}
+		view = []string{"pr", "view", "--json=url", "--jq=.url"}
+	case "glab":
+		create = []string{"mr", "create", "--source-branch=" + r.Branch, "--target-branch=" + r.Base,
+			"--title=" + t.Title, "--description=" + body, "--yes"}
+		view = []string{"mr", "view", "--output=json"}
+		if repo != "" {
+			repo = "https://" + repo
+		}
+	default:
+		return fmt.Errorf("unknown pull request tool %q", st.prTool)
+	}
+	if repo != "" {
+		create = append(create, "--repo="+repo)
+		view = append(view, "--repo="+repo)
+	}
+	view = append(view, "--", r.Branch)
+	out := cmd.OutOrStdout()
+	var got bytes.Buffer
+	run := taskRunner()
+	run.Interrupt = syscall.SIGTERM
+	run.Dir, run.Stdout, run.Stderr = r.Repo, io.MultiWriter(out, &got), io.MultiWriter(cmd.ErrOrStderr(), &got)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctxOf(cmd)), prTimeout)
+	defer cancel()
+	_, err := run.Run(ctx, st.prTool, create...)
+	switch {
+	case ctx.Err() != nil:
+		return fmt.Errorf("%s %s create did not finish within %s; check whether the pull request exists, then run finish --pr again", st.prTool, create[0], prTimeout)
+	case err == nil:
+		return nil
+	case !strings.Contains(strings.ToLower(got.String()), "already exists"):
+		return fmt.Errorf("%s %s create: %w", st.prTool, create[0], err)
+	}
+	// It exists (an earlier run, or by hand): show it.
+	vrun := taskRunner()
+	vrun.Dir = r.Repo
+	vctx, vcancel := context.WithTimeout(context.WithoutCancel(ctxOf(cmd)), prTimeout)
+	defer vcancel()
+	b, verr := vrun.Run(vctx, st.prTool, view...)
+	link := strings.TrimSpace(string(b))
+	if st.prTool == "glab" {
+		var mr struct {
+			WebURL string `json:"web_url"`
+		}
+		if json.Unmarshal(b, &mr) == nil {
+			link = mr.WebURL
+		}
+	}
+	if verr != nil || link == "" {
+		_, _ = fmt.Fprintf(out, "a pull request of %s already exists (its address could not be read)\n", r.Branch)
+		return nil
+	}
+	_, _ = fmt.Fprintf(out, "a pull request of %s already exists: %s\n", r.Branch, link)
 	return nil
 }
 
@@ -394,4 +535,120 @@ func (e *agentsEnv) archiveFinished(cmd *cobra.Command, t task.Task, cs []conv.C
 	if n > 0 {
 		_, _ = fmt.Fprintf(out, "archived %d conversation(s) of the task (cairn agents resume brings one back)\n", n)
 	}
+}
+
+// finishIntent is written before a finish's first irreversible step and
+// removed with its status write: a finish cut off in between is reported,
+// and its rerun knows the branch tip that was merged.
+type finishIntent struct {
+	Mode string `json:"mode"`
+	Tip  string `json:"tip"`
+}
+
+func finishIntentDir(d xdg.Dirs) string { return filepath.Join(d.State, "agents", "tasks-finishing") }
+
+func writeFinishIntent(d xdg.Dirs, id string, fi finishIntent) error {
+	if !conv.ValidID(id) {
+		return fmt.Errorf("task id %q", id)
+	}
+	b, err := json.Marshal(fi)
+	if err != nil {
+		return err
+	}
+	if err := wsRoot.MkdirAll(finishIntentDir(d), 0o700); err != nil {
+		return err
+	}
+	return wsRoot.WriteAtomic(filepath.Join(finishIntentDir(d), id+".json"), b, 0o600)
+}
+
+func readFinishIntent(d xdg.Dirs, id string) (finishIntent, bool) {
+	var fi finishIntent
+	if !conv.ValidID(id) {
+		return fi, false
+	}
+	b, err := wsRoot.ReadFile(filepath.Join(finishIntentDir(d), id+".json"))
+	if err != nil || json.Unmarshal(b, &fi) != nil {
+		return finishIntent{}, false
+	}
+	switch fi.Mode {
+	case task.ModeMerge, task.ModePR, task.ModeAbandon:
+	default:
+		return finishIntent{}, false
+	}
+	if task.CheckRef(fi.Tip) != nil {
+		fi.Tip = ""
+	}
+	return fi, true
+}
+
+func removeFinishIntent(d xdg.Dirs, id string) {
+	if conv.ValidID(id) {
+		_ = wsRoot.Remove(filepath.Join(finishIntentDir(d), id+".json"))
+	}
+}
+
+// reportFinishing tells about finishes that were cut off and about
+// finished tasks whose worktree is left; recover also prints the fix.
+func (e *agentsEnv) reportFinishing(w io.Writer) int {
+	ts, _, err := task.Load(wsRoot, e.dirs)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, t := range ts {
+		if fi, ok := readFinishIntent(e.dirs, t.ID); ok && t.Status != task.StatusDone && t.Status != task.StatusAbandoned {
+			_, _ = fmt.Fprintf(w, "the finish of task %s was interrupted; complete it with: cairn task finish %s --%s\n", t.Slug, t.Slug, fi.Mode)
+			n++
+			continue
+		}
+		if (t.Status == task.StatusDone || t.Status == task.StatusAbandoned) && t.Repos[0].Worktree != "" {
+			if _, err := os.Lstat(t.Repos[0].Worktree); err == nil {
+				_, _ = fmt.Fprintf(w, "task %s is %s but its worktree %s remains; remove it with: cairn task finish %s --abandon\n",
+					t.Slug, t.Status, t.Repos[0].Worktree, t.Slug)
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// cleanupFinished removes what a finished task left (its worktree), under
+// the same loss rules; the status and the branch stay.
+func cleanupFinished(cmd *cobra.Command, e *agentsEnv, g task.Git, t task.Task, force, yes bool) error {
+	out := cmd.OutOrStdout()
+	removeFinishIntent(e.dirs, t.ID)
+	p, err := task.Plan(g, t, task.ModeCleanup)
+	if err != nil {
+		return err
+	}
+	if len(p.Steps) == 0 {
+		return fmt.Errorf("task %s is already %s and nothing of it remains", t.Slug, t.Status)
+	}
+	_, _ = fmt.Fprintf(out, "task %s is already %s; what remains:\n", t.Slug, t.Status)
+	for i, s := range p.Steps {
+		_, _ = fmt.Fprintf(out, "  %d. %s\n", i+1, s.Text)
+	}
+	if len(p.Loss) > 0 {
+		_, _ = fmt.Fprintln(out, "would be lost:")
+		for _, l := range p.Loss {
+			_, _ = fmt.Fprintf(out, "  %s\n", l)
+		}
+		if !force {
+			return fmt.Errorf("refused: removing the worktree of task %s would lose the work listed above; nothing was changed (--force --yes loses exactly this)", t.Slug)
+		}
+		if !yes {
+			return errors.New("--force needs --yes: it loses the work listed above; nothing was changed")
+		}
+	}
+	res, err := task.Finish(g, t, p, task.FinishOptions{Force: force && yes})
+	for _, d := range res.Done {
+		_, _ = fmt.Fprintf(out, "done: %s\n", d)
+	}
+	for _, l := range res.Lost {
+		_, _ = fmt.Fprintf(out, "lost (forced): %s\n", l)
+	}
+	for _, l := range res.Left {
+		_, _ = fmt.Fprintf(out, "remains: %s\n", l)
+	}
+	return err
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -19,13 +20,16 @@ type Runner interface {
 // environment of the child ("KEY=value" pairs); nil inherits the caller's.
 // Dir, when set, is the child's working directory. Stdin, when set, is the
 // child's input; with Stdout set, the child writes to Stdout and Stderr
-// (a terminal stays a terminal) and Run returns no output.
+// (a terminal stays a terminal) and Run returns no output. Interrupt, when
+// set, is sent instead of SIGKILL when ctx ends, so the child can clean up
+// (git removes its lock files); it is killed WaitDelay later.
 type OSRunner struct {
-	Env    []string
-	Dir    string
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
+	Env       []string
+	Dir       string
+	Stdin     io.Reader
+	Stdout    io.Writer
+	Stderr    io.Writer
+	Interrupt os.Signal
 }
 
 func (r OSRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -37,6 +41,10 @@ func (r OSRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 		cmd.Env = r.Env
 	}
 	cmd.Dir = r.Dir
+	if r.Interrupt != nil {
+		sig := r.Interrupt
+		cmd.Cancel = func() error { return cmd.Process.Signal(sig) }
+	}
 	cmd.Stdin = r.Stdin
 	if r.Stdout != nil {
 		cmd.Stdout, cmd.Stderr = r.Stdout, r.Stderr

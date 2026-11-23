@@ -187,6 +187,7 @@ func (e *agentsEnv) windowFor(c conv.Conversation) (key, name string) {
 // reportPending tells about task creations that died midway, for read
 // commands: they never change git themselves.
 func (e *agentsEnv) reportPending(w io.Writer) {
+	e.reportFinishing(w)
 	ps, err := taskJournal(e.dirs).Pending()
 	if err != nil || len(ps) == 0 {
 		return
@@ -896,8 +897,11 @@ func newTaskRecoverCmd() *cobra.Command {
 			}
 			defer unlock()
 			out := cmd.OutOrStdout()
+			n := e.reportFinishing(out)
 			if ps, _ := taskJournal(e.dirs).Pending(); len(ps) == 0 {
-				_, _ = fmt.Fprintln(out, "nothing to recover")
+				if n == 0 {
+					_, _ = fmt.Fprintln(out, "nothing to recover")
+				}
 				return nil
 			}
 			e.recoverTasks(ctx, out, force)

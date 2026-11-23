@@ -15,9 +15,15 @@ type FieldError struct{ Key, Msg string }
 
 func (e FieldError) Error() string { return e.Key + ": " + e.Msg }
 
-// branchPrefixRe matches task.ValidBranchPrefix.
 var remoteRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
+// ValidRemoteName reports whether name is a git remote name cairn passes
+// to git (tasks.pr_remote): [A-Za-z0-9._-], not starting with - or ., no "..".
+func ValidRemoteName(name string) bool {
+	return remoteRe.MatchString(name) && !strings.Contains(name, "..")
+}
+
+// branchPrefixRe matches task.ValidBranchPrefix.
 var branchPrefixRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*(/[A-Za-z0-9][A-Za-z0-9_-]*)*$`)
 
 const (
@@ -64,7 +70,7 @@ func (c *Config) validateAgents() []FieldError {
 	if e := oneOf("tasks.pr_tool", c.Tasks.PRTool, "", "gh", "glab"); e != nil {
 		errs = append(errs, *e)
 	}
-	if !remoteRe.MatchString(c.Tasks.PRRemote) || strings.Contains(c.Tasks.PRRemote, "..") {
+	if !ValidRemoteName(c.Tasks.PRRemote) {
 		errs = append(errs, FieldError{"tasks.pr_remote", fmt.Sprintf("%q must be a git remote name ([A-Za-z0-9._-], not starting with - or .)", c.Tasks.PRRemote)})
 	}
 	if c.Agents.MaxRunning < 0 {

@@ -5,11 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
+	"github.com/mrqwer/cairn/internal/config"
 	"github.com/mrqwer/cairn/internal/execx"
 )
 
@@ -255,13 +256,8 @@ func checkBases(bases []string) error {
 	return nil
 }
 
-// remoteRe is a remote name cairn passes to git push.
-var remoteRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
-
 // ValidRemote reports whether name is a remote name cairn accepts.
-func ValidRemote(name string) bool {
-	return remoteRe.MatchString(name) && !strings.Contains(name, "..")
-}
+func ValidRemote(name string) bool { return config.ValidRemoteName(name) }
 
 // Push pushes branch to the same name on remote and sets it as the
 // branch's upstream. Not undoable: callers confirm first.
@@ -292,6 +288,104 @@ func (g Git) HasRemote(name string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// RemoteURL is the (fetch) URL of remote name.
+func (g Git) RemoteURL(name string) (string, error) {
+	if !ValidRemote(name) {
+		return "", fmt.Errorf("remote %q is not a remote name", name)
+	}
+	out, err := g.run("remote", "get-url", "--", name)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// BranchBusy reports a checkout in which branch is being rebased or
+// bisected: git shows such a worktree as detached, yet the operation will
+// write the branch when it ends, so cairn must not move it meanwhile. It
+// returns the checkout and the operation, or "" when there is none.
+func (g Git) BranchBusy(branch string) (path, op string, err error) {
+	if err := checkBranch(branch); err != nil {
+		return "", "", err
+	}
+	out, err := g.run("rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", "", err
+	}
+	common := strings.TrimSpace(string(out))
+	main, err := g.run("worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return "", "", err
+	}
+	mainPath := ""
+	if f := strings.SplitN(string(main), "\x00", 2)[0]; strings.HasPrefix(f, "worktree ") {
+		mainPath = strings.TrimPrefix(f, "worktree ")
+	}
+	type gd struct{ dir, path string }
+	dirs := []gd{{common, mainPath}}
+	ents, _ := os.ReadDir(filepath.Join(common, "worktrees"))
+	for _, e := range ents {
+		d := filepath.Join(common, "worktrees", e.Name())
+		p := d
+		if b, err := os.ReadFile(filepath.Join(d, "gitdir")); err == nil {
+			p = filepath.Dir(strings.TrimSpace(string(b)))
+		}
+		dirs = append(dirs, gd{d, p})
+	}
+	ref := "refs/heads/" + branch
+	for _, d := range dirs {
+		for _, f := range []string{"rebase-merge/head-name", "rebase-apply/head-name"} {
+			if b, err := os.ReadFile(filepath.Join(d.dir, f)); err == nil && strings.TrimSpace(string(b)) == ref {
+				return d.path, "rebase", nil
+			}
+		}
+		if b, err := os.ReadFile(filepath.Join(d.dir, "BISECT_START")); err == nil {
+			if s := strings.TrimSpace(string(b)); s == branch || s == ref {
+				return d.path, "bisect", nil
+			}
+		}
+	}
+	return "", "", nil
+}
+
+// Overwritten lists the ignored files of the checkout at path that a
+// change from commit from to commit to would overwrite: paths that differ
+// between the two and are ignored (not tracked) there. git replaces such
+// files silently.
+func (g Git) Overwritten(path, from, to string) ([]string, error) {
+	if err := checkPath(path); err != nil {
+		return nil, err
+	}
+	if err := CheckRef(from); err != nil {
+		return nil, err
+	}
+	if err := CheckRef(to); err != nil {
+		return nil, err
+	}
+	ignored, err := g.Ignored(path)
+	if err != nil || len(ignored) == 0 {
+		return nil, err
+	}
+	out, err := g.in(path).run("diff", "--name-only", "--no-renames", "-z", "--end-of-options", from, to, "--")
+	if err != nil {
+		return nil, err
+	}
+	var hit []string
+	for _, f := range strings.Split(string(out), "\x00") {
+		if f == "" {
+			continue
+		}
+		for _, ig := range ignored {
+			if f == ig || (strings.HasSuffix(ig, "/") && strings.HasPrefix(f, ig)) {
+				hit = append(hit, f)
+				break
+			}
+		}
+	}
+	sort.Strings(hit)
+	return hit, nil
 }
 
 // IsAncestor reports whether commit a is an ancestor of (or equal to) b.

@@ -103,11 +103,19 @@ cairn task finish fix-login --abandon            # drop it
 - `finish` needs exactly one mode and prints every step first; steps marked "not undoable"
   (merge, push, pull request) need `--yes` or a yes on a terminal.
   - `--merge` merges into the base branch where it is checked out (a fast-forward when possible).
-    It refuses uncommitted changes there; a conflict is aborted and nothing changes. A base that
-    is not checked out moves as a ref only. Then the worktree and the merged branch are removed.
+    It refuses uncommitted changes there and ignored files the merge would overwrite; a conflict
+    or an interrupted merge is rolled back and nothing changes. Then the worktree and the merged
+    branch are removed. A base in the middle of a rebase or bisect blocks the merge.
+  - The two merge paths differ: where the base is checked out, `git merge` runs there and follows
+    your git config (`merge.ff`, hooks such as `pre-merge-commit`, `commit.gpgSign`). A base that
+    is not checked out anywhere only moves as a ref: a fast-forward, or a merge commit made with
+    `git merge-tree` and `git commit-tree`, which runs no hooks and is never signed. Check out the
+    base first if you need hooks or signing.
   - `--pr` needs `tasks.pr_tool = "gh"` or `"glab"` (otherwise it stops and prints the commands to
-    run yourself). It pushes to `tasks.pr_remote` (default `origin`), opens the pull request,
-    then removes the worktree; the branch stays.
+    run yourself). It pushes to `tasks.pr_remote` (default `origin`) and opens the pull request in
+    that remote's repository (`--repo`, when its URL names one), then removes the worktree; the
+    branch stays. The tool is stopped after 2 minutes; a pull request that already exists for
+    the branch counts as opened and its address is shown.
   - `--abandon` removes the worktree, and the branch when it has no commits beyond its base. A
     branch whose commits are all pushed is kept.
 - Nothing that holds work is removed silently: uncommitted, changed or ignored files in the
@@ -117,6 +125,13 @@ cairn task finish fix-login --abandon            # drop it
   after a merge), never cleaned: its uncommitted changes block the finish even with `--force`.
 - The task's conversations are archived and its window removed; an agent still running in the
   task blocks the finish. `cairn undo` of a finish restores only the task's status.
+- `review` never changes a task that was finished while the viewer was open.
+- Once a finish has started its steps, Ctrl-C does not stop them (git is stopped only by a
+  10-minute timeout per step, cleanly). A finish cut off anyway (a crash) is reported by
+  `task ls` and `task recover`; run the same `finish` again to complete it: a merge already done
+  is recognised, and what is left is removed under the same rules. A finished task whose worktree
+  was kept is listed by `task recover`; `cairn task finish <task> --abandon` removes it then
+  (the status and the branch stay). A branch deleted by hand can only be closed with `--abandon`.
 
 ## Concurrency limit
 

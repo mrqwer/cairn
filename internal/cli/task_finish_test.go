@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mrqwer/cairn/internal/agents/task"
 )
@@ -441,5 +444,190 @@ func TestReviewViewerIsNotAShell(t *testing.T) {
 	}
 	if _, err := runHost(t, "", "task", "review", "fix-login", "--viewer", "  "); err == nil {
 		t.Fatal("empty viewer accepted")
+	}
+}
+
+func taskFilePath(t *testing.T, dir string) string {
+	t.Helper()
+	return filepath.Join(dir, "config/cairn/tasks", loadTaskFiles(t)[0].ID+".toml")
+}
+
+func TestReviewDoesNotUndoAFinish(t *testing.T) {
+	dir, _, _ := taskTestEnv(t)
+	newWorktreeTask(t, dir)
+	// While the viewer is open, the task is finished in another terminal.
+	bin := filepath.Join(t.TempDir(), "viewer")
+	writeFile(t, bin, "#!/bin/sh\nsed -i 's/^status = .*/status = \"done\"/' '"+taskFilePath(t, dir)+"'\n")
+	if err := os.Chmod(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, "", "task", "review", "fix-login", "--viewer", bin)
+	if s := taskStatus(t); s != task.StatusDone {
+		t.Fatalf("review turned a finished task into %q", s)
+	}
+}
+
+func TestFinishResumesAfterInterruptedMerge(t *testing.T) {
+	dir, repo, _ := taskTestEnv(t)
+	wt := newWorktreeTask(t, dir)
+	writeFile(t, filepath.Join(wt, "a.txt"), "a\n")
+	git(t, wt, "add", "a.txt")
+	git(t, wt, "commit", "-q", "-m", "add a")
+	tip := git(t, repo, "rev-parse", "task/fix-login")
+	// The finish recorded its intent, merged, removed the worktree and
+	// deleted the branch, then died before writing the status.
+	tk := loadTaskFiles(t)[0]
+	if err := writeFinishIntent(testDirs(t), tk.ID, finishIntent{Mode: task.ModeMerge, Tip: tip}); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "merge", "-q", "--ff-only", "task/fix-login")
+	git(t, repo, "worktree", "remove", wt)
+	git(t, repo, "branch", "-q", "-d", "task/fix-login")
+	out, _ := runHost(t, "", "task", "ls")
+	if !strings.Contains(out, "cairn task finish fix-login --merge") {
+		t.Fatalf("interrupted finish not reported:\n%s", out)
+	}
+	out = mustRun(t, "", "task", "finish", "fix-login", "--merge", "--yes")
+	if taskStatus(t) != task.StatusDone || !taskConvArchived(t, dir) {
+		t.Fatalf("status %s\n%s", taskStatus(t), out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state/cairn/agents/tasks-finishing", tk.ID+".json")); !os.IsNotExist(err) {
+		t.Fatal("finish intent left behind")
+	}
+}
+
+func TestFinishWithBranchDeletedByHandNeedsAbandon(t *testing.T) {
+	dir, repo, _ := taskTestEnv(t)
+	wt := newWorktreeTask(t, dir)
+	git(t, repo, "worktree", "remove", wt)
+	git(t, repo, "branch", "-q", "-D", "task/fix-login")
+	out, err := runHost(t, "", "task", "finish", "fix-login", "--merge", "--yes")
+	if err == nil || !strings.Contains(err.Error(), "--abandon") {
+		t.Fatalf("err %v\n%s", err, out)
+	}
+	mustRun(t, "", "task", "finish", "fix-login", "--abandon")
+	if taskStatus(t) != task.StatusAbandoned {
+		t.Fatalf("status %s", taskStatus(t))
+	}
+}
+
+func TestFinishedTaskLeftoverWorktreeIsCleanedByRerun(t *testing.T) {
+	dir, repo, _ := taskTestEnv(t)
+	wt := newWorktreeTask(t, dir)
+	// A finish that ended with "remains: worktree": the task is done.
+	p := taskFilePath(t, dir)
+	b, _ := os.ReadFile(p)
+	done := regexp.MustCompile(`(?m)^status = .*$`).ReplaceAllString(string(b), `status = "done"`)
+	if done == string(b) {
+		t.Fatal("no status line")
+	}
+	writeFile(t, p, done)
+	writeFile(t, filepath.Join(wt, "notes.md"), "n\n")
+	out, _ := runHost(t, "", "task", "recover")
+	if !strings.Contains(out, "cairn task finish fix-login") {
+		t.Fatalf("leftover worktree not reported by recover:\n%s", out)
+	}
+	if _, err := runHost(t, "", "task", "finish", "fix-login", "--abandon"); err == nil || !exists(wt) {
+		t.Fatal("leftover work removed without --force")
+	}
+	out = mustRun(t, "", "task", "finish", "fix-login", "--abandon", "--force", "--yes")
+	if exists(wt) || !strings.Contains(out, "notes.md") {
+		t.Fatalf("worktree kept:\n%s", out)
+	}
+	if !branchExists(t, repo, "task/fix-login") || taskStatus(t) != task.StatusDone {
+		t.Fatalf("cleanup changed the branch or status %s", taskStatus(t))
+	}
+	if _, err := runHost(t, "", "task", "finish", "fix-login", "--abandon"); err == nil {
+		t.Fatal("nothing remains, yet finish succeeded")
+	}
+}
+
+func TestFinishInterruptedBeforeMergeChangesNothing(t *testing.T) {
+	dir, repo, _ := taskTestEnv(t)
+	wt := newWorktreeTask(t, dir)
+	writeFile(t, filepath.Join(wt, "a.txt"), "a\n")
+	git(t, wt, "add", "a.txt")
+	git(t, wt, "commit", "-q", "-m", "add a")
+	main := git(t, repo, "rev-parse", "main")
+	cmd := NewRootCmd()
+	var buf strings.Builder
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetArgs([]string{"task", "finish", "fix-login", "--merge", "--yes"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := cmd.ExecuteContext(ctx); err == nil {
+		t.Fatalf("interrupted finish succeeded:\n%s", buf.String())
+	}
+	if git(t, repo, "rev-parse", "main") != main {
+		t.Fatal("merged after the interrupt")
+	}
+	unchanged(t, dir, repo, wt, buf.String())
+}
+
+// prRemote makes origin fetch from a parseable URL and push to a local
+// bare repository.
+func prRemote(t *testing.T, dir, repo string) string {
+	t.Helper()
+	bare := filepath.Join(dir, "origin.git")
+	git(t, repo, "init", "-q", "--bare", bare)
+	git(t, repo, "remote", "add", "origin", "https://example.invalid/owner/api.git")
+	git(t, repo, "remote", "set-url", "--push", "origin", bare)
+	return bare
+}
+
+func TestPRUsesRemoteRepoAndAcceptsExisting(t *testing.T) {
+	dir, repo, _ := taskTestEnv(t)
+	prRemote(t, dir, repo)
+	bin := t.TempDir()
+	rec := filepath.Join(bin, "args")
+	writeFile(t, filepath.Join(bin, "gh"), "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '"+rec+"'\n"+
+		"case \"$2\" in create) echo 'a pull request for branch \"task/fix-login\" into branch \"main\" already exists:' >&2; exit 1;;\n"+
+		"view) echo https://example.invalid/owner/api/pull/7;; esac\n")
+	if err := os.Chmod(filepath.Join(bin, "gh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CAIRN_TASKS_PR_TOOL", "gh")
+	wt := newWorktreeTask(t, dir)
+	writeFile(t, filepath.Join(wt, "a.txt"), "a\n")
+	git(t, wt, "add", "a.txt")
+	git(t, wt, "commit", "-q", "-m", "add a")
+	out := mustRun(t, "", "task", "finish", "fix-login", "--pr", "--yes")
+	if !strings.Contains(out, "https://example.invalid/owner/api/pull/7") || taskStatus(t) != task.StatusDone {
+		t.Fatalf("existing PR not accepted (status %s):\n%s", taskStatus(t), out)
+	}
+	if b, _ := os.ReadFile(rec); !strings.Contains(string(b), "--repo=example.invalid/owner/api") {
+		t.Fatalf("gh not pinned to the remote's repo:\n%s", b)
+	}
+}
+
+func TestPRToolTimeout(t *testing.T) {
+	dir, repo, _ := taskTestEnv(t)
+	bareOrigin(t, dir, repo)
+	bin := t.TempDir()
+	writeFile(t, filepath.Join(bin, "gh"), "#!/bin/sh\nexec sleep 30\n")
+	if err := os.Chmod(filepath.Join(bin, "gh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CAIRN_TASKS_PR_TOOL", "gh")
+	old := prTimeout
+	prTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { prTimeout = old })
+	wt := newWorktreeTask(t, dir)
+	writeFile(t, filepath.Join(wt, "a.txt"), "a\n")
+	git(t, wt, "add", "a.txt")
+	git(t, wt, "commit", "-q", "-m", "add a")
+	start := time.Now()
+	if _, err := runHost(t, "", "task", "finish", "fix-login", "--pr", "--yes"); err == nil {
+		t.Fatal("hung PR tool reported success")
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatal("PR tool not stopped by the timeout")
+	}
+	if taskStatus(t) != task.StatusOpen {
+		t.Fatalf("status %s", taskStatus(t))
 	}
 }
