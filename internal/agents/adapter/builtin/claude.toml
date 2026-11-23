@@ -1,0 +1,31 @@
+name = "claude"
+binary = "claude"
+version_check = ["claude", "--version"]
+
+[capabilities]
+name_at_start = true
+preassign_id = true
+resume_by_id = true
+resume_by_name = true
+fork = true
+list_json = true
+hooks = "settings-file"
+delete = true
+
+[commands]
+start = ["claude", "--session-id", "{id}", "--name", "{name}", "{profile_args...}"]
+resume = ["claude", "--resume", "{id}", "{profile_args...}"]
+fork = ["claude", "--resume", "{id}", "--fork-session", "--session-id", "{new_id}"]
+list = ["claude", "agents", "--json", "--all"]
+
+[profile_flags]
+model = ["--model", "{value}"]
+effort = ["--effort", "{value}"]
+permission_mode = ["--permission-mode", "{value}"]
+
+[env]
+unset = ["ANTHROPIC_API_KEY"]
+
+[history]
+locator = "~/.claude/projects/*/{native_id}.jsonl"
+parser = "claude-jsonl@1"

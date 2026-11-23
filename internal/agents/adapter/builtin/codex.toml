@@ -1,0 +1,22 @@
+# Codex assigns its own session id; cairn discovers it after launch (directory
+# diff / start time) and keeps the conversation name itself.
+name = "codex"
+binary = "codex"
+version_check = ["codex", "--version"]
+
+[capabilities]
+resume_by_id = true
+hooks = "config-override"
+discovery = "dir-diff"
+
+[commands]
+start = ["codex", "{profile_args...}"]
+resume = ["codex", "resume", "{native_id}", "{profile_args...}"]
+
+[profile_flags]
+model = ["--model", "{value}"]
+permission_mode = ["--ask-for-approval", "{value}"]
+
+[history]
+locator = "~/.codex/sessions/*/*/*/*-{native_id}.jsonl"
+parser = "codex-jsonl@1"
