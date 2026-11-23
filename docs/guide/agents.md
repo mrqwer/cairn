@@ -28,7 +28,11 @@ you (a permission prompt, or input).
   state (`state_source = observed`). It comes from the pane: output means working, no output for 2
   minutes means idle, and the tool's exit means stopped or failed.
 
-Which events map to which kind is adapter data (`[hooks]` in `tools/<name>.toml`).
+Which events map to which kind is adapter data (`[hooks]` in `tools/<name>.toml`). Besides the states, two
+kinds exist: `ready` (the tool is up and waits for input; it only moves `starting` to `idle`, so a restart
+signal in the middle of a turn changes nothing) and `activity` (only the time moves). When a tool's hooks
+never report `working` (codex reports only finished turns), new output in the pane moves it from `idle`
+back to `working`.
 
 ## Status line
 

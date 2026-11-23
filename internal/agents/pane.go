@@ -272,7 +272,7 @@ func launch(ctx context.Context, env PaneEnv, a adapter.Adapter, id string) conv
 			env.printf("note: the working directory %s is missing; the tool starts in %s\n", c.Cwd, wd)
 		}
 	}
-	stopObserve := observe(env, id)
+	stopObserve := observe(env, a, id)
 	code, runErr := env.Run(context.WithoutCancel(ctx), argv, toolEnv(a, c), c.Cwd)
 	stopObserve()
 	if d != nil {
@@ -315,13 +315,13 @@ func withHooks(env PaneEnv, a adapter.Adapter, c conv.Conversation, argv []strin
 	return append(out, argv[1:]...)
 }
 
-// errUnchanged skips writing a record nothing changed in.
-var errUnchanged = errors.New("unchanged")
-
 // observe polls env.Activity while the tool runs and applies Observe for
 // an idle or active pane; records are written only on a change. The
 // returned func stops it and waits.
-func observe(env PaneEnv, id string) (stop func()) {
+func observe(env PaneEnv, a adapter.Adapter, id string) (stop func()) {
+	// Hooks that never report working (codex notify: turn complete only)
+	// cannot end their own idle; then fresh output may.
+	reviveIdle := !a.HooksReport(conv.StateWorking)
 	if env.Activity == nil {
 		return func() {}
 	}
@@ -348,9 +348,13 @@ func observe(env PaneEnv, id string) (stop func()) {
 			}
 			now := env.now()
 			_, _ = env.Store.Update(id, func(r *conv.Conversation) error {
-				o := Observe(*r, false, 0, now.Sub(last), now)
-				if o.State == r.State && o.StateSource == r.StateSource {
-					return errUnchanged
+				in := *r
+				if reviveIdle && in.StateSource == conv.SourceHook && in.State == conv.StateIdle {
+					in.StateSource = conv.SourceObserved
+				}
+				o := Observe(in, false, 0, now.Sub(last), now)
+				if o.State == r.State {
+					return conv.ErrNoChange
 				}
 				*r = o
 				return nil

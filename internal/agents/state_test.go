@@ -5,7 +5,10 @@ import (
 	"time"
 
 	"github.com/mrqwer/cairn/internal/agents"
+	"github.com/mrqwer/cairn/internal/agents/adapter"
 	"github.com/mrqwer/cairn/internal/agents/conv"
+	"github.com/mrqwer/cairn/internal/fsx"
+	"github.com/mrqwer/cairn/internal/xdg"
 )
 
 var t0 = time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
@@ -155,5 +158,73 @@ func TestObserveFallbackMarksLowConfidence(t *testing.T) {
 	a.ArchivedAt = &arch
 	if got := agents.Observe(a, true, 1, 0, now); got.State != conv.StateWorking || got.ArchivedAt == nil {
 		t.Fatalf("archived changed: %+v", got)
+	}
+}
+
+func TestFoldReadyOnlyFromStarting(t *testing.T) {
+	c := conv.Conversation{ID: "C", State: conv.StateStarting, LastActivityAt: t0}
+	got := agents.Fold(c, agents.Event{TS: t0.Add(time.Second), Kind: "ready"})
+	if got.State != conv.StateIdle || got.StateSource != conv.SourceHook {
+		t.Fatalf("starting + ready: %+v", got)
+	}
+	for _, from := range []string{conv.StateWorking, conv.StateWaiting, conv.StateIdle, conv.StateStopped} {
+		c := conv.Conversation{ID: "C", State: from, StateSource: conv.SourceObserved, LastActivityAt: t0}
+		got := agents.Fold(c, agents.Event{TS: t0.Add(time.Second), Kind: "ready"})
+		if got.State != from || got.StateSource != conv.SourceObserved || got.IgnoredEvents != 0 {
+			t.Fatalf("%s + ready must change nothing: %+v", from, got)
+		}
+	}
+}
+
+// TestFoldClaudeTurn: the built-in claude hook mapping over one turn with a
+// permission prompt and a compaction keeps the state right.
+func TestFoldClaudeTurn(t *testing.T) {
+	as, lerrs, err := adapter.Load(fsx.Root{Dir: t.TempDir()}, xdg.Dirs{Config: "/cfg"})
+	if err != nil || len(lerrs) != 0 {
+		t.Fatal(err, lerrs)
+	}
+	var events map[string]string
+	for _, a := range as {
+		if a.Name == "claude" {
+			events = a.Hooks.Events
+		}
+	}
+	c := conv.Conversation{ID: "C", State: conv.StateStarting, LastActivityAt: t0}
+	steps := []struct{ hook, want string }{
+		{"SessionStart", conv.StateIdle},
+		{"UserPromptSubmit", conv.StateWorking},
+		{"Notification", conv.StateWaiting},
+		{"PostToolUse", conv.StateWorking},
+		{"SessionStart", conv.StateWorking}, // compaction mid-turn
+		{"PostToolUse", conv.StateWorking},
+		{"Stop", conv.StateIdle},
+		{"SessionEnd", conv.StateStopped},
+	}
+	for i, st := range steps {
+		kind, ok := events[st.hook]
+		if !ok {
+			t.Fatalf("claude maps no %s", st.hook)
+		}
+		c = agents.Fold(c, agents.Event{TS: t0.Add(time.Duration(i+1) * time.Second), Kind: kind})
+		if c.State != st.want {
+			t.Fatalf("step %d %s (%s): state %q want %q", i, st.hook, kind, c.State, st.want)
+		}
+	}
+}
+
+// TestEventKindsSingleSource: every kind the adapter schema accepts is a
+// kind Fold acts on from starting.
+func TestEventKindsSingleSource(t *testing.T) {
+	for _, k := range adapter.EventKinds {
+		if !agents.ValidKind(k) {
+			t.Errorf("%s not valid", k)
+		}
+		c := agents.Fold(conv.Conversation{ID: "C", State: conv.StateStarting}, agents.Event{TS: t0, Kind: k})
+		if c.IgnoredEvents != 0 {
+			t.Errorf("%s ignored from starting", k)
+		}
+	}
+	if agents.ValidKind("bogus") {
+		t.Error("bogus kind valid")
 	}
 }

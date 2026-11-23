@@ -252,7 +252,7 @@ func TestLockStalePidTakenOver(t *testing.T) {
 	}
 	defer rel()
 	b, _ := os.ReadFile(p)
-	if strings.TrimSpace(string(b)) != strconv.Itoa(os.Getpid()) {
+	if f := strings.Fields(string(b)); len(f) == 0 || f[0] != strconv.Itoa(os.Getpid()) {
 		t.Fatalf("pid file=%q", b)
 	}
 }
@@ -501,37 +501,82 @@ func TestLockLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	p := filepath.Join(root, "state/agents/locks/claude-n1.lock")
+	held, _ := os.ReadFile(p)
 	if !s.LockLive("claude", "n1") {
-		t.Fatal("held lock must be live")
+		t.Fatalf("held lock must be live (%q)", held)
 	}
 	rel()
 	if s.LockLive("claude", "n1") {
 		t.Fatal("released lock must not be live")
 	}
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		t.Skip("no boot_id")
+	}
+	thisBoot := strings.TrimSpace(string(boot))
+	// A pid above pid_max never exists.
+	pm, _ := os.ReadFile("/proc/sys/kernel/pid_max")
+	maxPid, err := strconv.Atoi(strings.TrimSpace(string(pm)))
+	if err != nil {
+		t.Skip("no pid_max")
+	}
+	for _, tc := range []struct {
+		content string
+		live    bool
+	}{
+		{fmt.Sprintf("%d %s", os.Getpid(), thisBoot), true},
+		{fmt.Sprintf("%d %s", maxPid+1, thisBoot), false},                            // dead holder
+		{fmt.Sprintf("%d 00000000-0000-0000-0000-000000000000", os.Getpid()), false}, // written in another boot
+		{strconv.Itoa(os.Getpid()), false},                                           // no boot id
+		{"", false},
+	} {
+		if err := os.WriteFile(p, []byte(tc.content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// The file time does not matter (a clock stepped after boot).
+		old := time.Unix(1000, 0)
+		_ = os.Chtimes(p, old, old)
+		if got := s.LockLive("claude", "n1"); got != tc.live {
+			t.Errorf("%q: live=%v want %v", tc.content, got, tc.live)
+		}
+	}
+}
+
+func TestLockHolderIsPid(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("no flock binary")
+	}
+	s, root := newStore(t)
+	rel, err := s.AcquireLock("claude", "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := filepath.Join(root, "state/agents/locks/claude-n1.lock")
-	cmd := exec.Command("true")
-	if err := cmd.Run(); err != nil {
-		t.Skip("no true")
-	}
-	if err := os.WriteFile(p, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600); err != nil {
+	content, _ := os.ReadFile(p)
+	rel()
+	// Another process holds it with our content: the holder shown is the pid alone.
+	if err := os.WriteFile(p, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if s.LockLive("claude", "n1") {
-		t.Fatal("dead holder must not be live")
-	}
-	// A live pid written before the last boot is a reused pid.
-	if err := os.WriteFile(p, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+	ready := filepath.Join(t.TempDir(), "ready")
+	cmd := exec.Command("flock", "-n", p, "sh", "-c", "touch "+ready+"; sleep 30")
+	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if !s.LockLive("claude", "n1") {
-		t.Fatal("live pid must be live")
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("flock never held")
+		}
 	}
-	old := time.Unix(1000, 0)
-	if err := os.Chtimes(p, old, old); err != nil {
-		t.Fatal(err)
-	}
-	if s.LockLive("claude", "n1") {
-		t.Fatal("lock file older than the boot must not be live")
+	_, err = s.AcquireLock("claude", "n1")
+	var el conv.ErrLocked
+	if !errors.As(err, &el) || el.Holder != strconv.Itoa(os.Getpid()) {
+		t.Fatalf("err %v holder %q", err, el.Holder)
 	}
 }
 
@@ -605,5 +650,58 @@ func TestScanAppliesOverlaysToKeptOnly(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != "a" || got[0].Name != "curated-a" {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+func dataLines(t testing.TB, root string) int {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "state/agents/conversations.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes.Count(b, []byte("\n"))
+}
+
+// TestUpdateCompactsAsItGrows: frequent updates (one per hook event) keep
+// the record file near the number of conversations, without a Compact call.
+func TestUpdateCompactsAsItGrows(t *testing.T) {
+	s, root := newStore(t)
+	for i := 0; i < 10; i++ {
+		if err := s.Put(conv.Conversation{ID: fmt.Sprintf("c%d", i), State: conv.StateWorking}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 5000; i++ {
+		id := fmt.Sprintf("c%d", i%10)
+		if _, err := s.Update(id, func(c *conv.Conversation) error { c.Summary = strconv.Itoa(i); return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := dataLines(t, root); n > 400 {
+		t.Fatalf("record file has %d lines for 10 conversations", n)
+	}
+	l, err := s.List(conv.Filter{})
+	if err != nil || len(l) != 10 {
+		t.Fatalf("%v %v", l, err)
+	}
+	for _, c := range l {
+		if c.Summary < "4990" {
+			t.Fatalf("lost the latest write of %s: %q", c.ID, c.Summary)
+		}
+	}
+}
+
+func TestPutCompactsAsItGrows(t *testing.T) {
+	s, root := newStore(t)
+	for i := 0; i < 5000; i++ {
+		if err := s.Put(conv.Conversation{ID: "only", Summary: strconv.Itoa(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := dataLines(t, root); n > 400 {
+		t.Fatalf("record file has %d lines for 1 conversation", n)
+	}
+	if c, _, _ := s.Get("only"); c.Summary != "4999" {
+		t.Fatalf("%+v", c)
 	}
 }

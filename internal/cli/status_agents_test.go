@@ -3,12 +3,16 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mrqwer/cairn/internal/agents"
 	"github.com/mrqwer/cairn/internal/agents/conv"
+	"github.com/mrqwer/cairn/internal/agents/hooks"
 )
 
 // putLive stores c and, when live, holds its conversation lock the way a
@@ -193,6 +197,67 @@ func BenchmarkStatusTmux(b *testing.B) {
 		cmd.SetArgs([]string{"status", "--tmux"})
 		if err := cmd.Execute(); err != nil || o.String() == "" {
 			b.Fatalf("%q %v", o.String(), err)
+		}
+	}
+}
+
+// TestStatusTmuxAfterManyEvents: 10k hook events (each one record update)
+// keep the record file compact, so status --tmux stays fast.
+func TestStatusTmuxAfterManyEvents(t *testing.T) {
+	dir := hostTestEnv(t)
+	noTmux(t)
+	s := testStore(dir)
+	for i := 0; i < 10; i++ {
+		putLive(t, s, conv.Conversation{ID: fmt.Sprintf("01M%02d", i), State: conv.StateWorking}, true)
+	}
+	kinds := []string{"waiting", "working", "idle", "working"}
+	base := time.Now().UTC()
+	for i := 0; i < 10000; i++ {
+		ev := agents.Event{TS: base.Add(time.Duration(i) * time.Millisecond), Conversation: fmt.Sprintf("01M%02d", i%10),
+			Kind: kinds[(i/10)%4], Reason: "permission: Bash"}
+		if _, err := hooks.Post(s, ev, time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "state/cairn/agents/conversations.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), "\n"); n > 200 {
+		t.Fatalf("record file has %d lines after 10k events for 10 conversations", n)
+	}
+	best := time.Hour
+	for i := 0; i < 10; i++ {
+		start := time.Now()
+		out, _, err := runSplit(t, "status", "--tmux")
+		best = min(best, time.Since(start))
+		if err != nil || out != "10 working\n" {
+			t.Fatalf("got %q %v", out, err)
+		}
+	}
+	t.Logf("status --tmux after 10k events: %v", best)
+	if best > 20*time.Millisecond {
+		t.Fatalf("status --tmux took %v", best)
+	}
+}
+
+// TestStatusSurvivesBrokenAgentStore: the workspace status does not depend
+// on the agents store; a broken one is a note on stderr.
+func TestStatusSurvivesBrokenAgentStore(t *testing.T) {
+	dir, _ := wsTestEnv(t)
+	if err := os.MkdirAll(filepath.Join(dir, "state/cairn/agents/conversations.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"status"}, {"status", "--json"}} {
+		out, errOut, err := runSplit(t, args...)
+		if err != nil || !strings.Contains(errOut, "agents") {
+			t.Fatalf("%q: err %v stderr %q", args, err, errOut)
+		}
+		if len(args) == 2 && !strings.Contains(out, `"projects"`) {
+			t.Fatalf("json lost: %s", out)
+		}
+		if len(args) == 1 && !strings.Contains(out, "no active projects") {
+			t.Fatalf("plain lost: %s", out)
 		}
 	}
 }

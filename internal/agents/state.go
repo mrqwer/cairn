@@ -1,7 +1,10 @@
 package agents
 
 import (
+	"slices"
 	"time"
+
+	"github.com/mrqwer/cairn/internal/agents/adapter"
 
 	"github.com/mrqwer/cairn/internal/agents/conv"
 )
@@ -16,8 +19,16 @@ type Event struct {
 	NativeID     string    `json:"native_id,omitempty"`
 }
 
-// KindActivity only records that the tool did something.
-const KindActivity = "activity"
+// MaxIgnoredEvents caps IgnoredEvents ("at least this many"), so a tool
+// that keeps posting events cairn ignores stops rewriting the record.
+const MaxIgnoredEvents = 100
+
+// KindActivity only records that the tool did something; KindReady says
+// the tool is up and awaits input.
+const (
+	KindActivity = "activity"
+	KindReady    = "ready"
+)
 
 // transitions is the table of spec §9.3: starting → working ⇄ waiting →
 // idle → done | failed | stopped. working, waiting and idle reach each
@@ -39,18 +50,9 @@ func set(xs ...string) map[string]bool {
 	return m
 }
 
-// ValidKind reports whether k is an event kind cairn event accepts.
-func ValidKind(k string) bool {
-	if k == KindActivity {
-		return true
-	}
-	for _, to := range transitions {
-		if to[k] {
-			return true
-		}
-	}
-	return false
-}
+// ValidKind reports whether k is an event kind cairn event accepts
+// (adapter.EventKinds).
+func ValidKind(k string) bool { return slices.Contains(adapter.EventKinds, k) }
 
 func archived(c conv.Conversation) bool {
 	return c.ArchivedAt != nil || c.State == conv.StateArchived
@@ -64,7 +66,12 @@ func archived(c conv.Conversation) bool {
 // conversation or not in the table is ignored and counted in IgnoredEvents.
 // A native id from the event fills an unknown one only.
 func Fold(c conv.Conversation, ev Event) conv.Conversation {
-	ignore := func() conv.Conversation { c.IgnoredEvents++; return c }
+	ignore := func() conv.Conversation {
+		if c.IgnoredEvents < MaxIgnoredEvents {
+			c.IgnoredEvents++
+		}
+		return c
+	}
 	if archived(c) || ev.TS.Before(c.LastActivityAt) || !ValidKind(ev.Kind) {
 		return ignore()
 	}
@@ -78,6 +85,12 @@ func Fold(c conv.Conversation, ev Event) conv.Conversation {
 	from := c.State
 	if from == "" {
 		from = conv.StateStarting
+	}
+	if ev.Kind == KindReady {
+		if from != conv.StateStarting {
+			return c // expected outside a start (resume, compaction): not counted
+		}
+		ev.Kind = conv.StateIdle
 	}
 	if from != ev.Kind && !transitions[from][ev.Kind] {
 		return ignore()

@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -55,7 +54,9 @@ func (s Store) AcquireLock(tool, nativeID string) (release func(), err error) {
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		holder := ""
 		if b, rerr := os.ReadFile(p); rerr == nil {
-			holder = strings.TrimSpace(string(b))
+			if f := strings.Fields(string(b)); len(f) > 0 {
+				holder = f[0]
+			}
 		}
 		_ = f.Close()
 		if errors.Is(err, unix.EWOULDBLOCK) {
@@ -80,14 +81,18 @@ func (s Store) AcquireLock(tool, nativeID string) (release func(), err error) {
 	}, nil
 }
 
-// writePid replaces the lock file content with this process id. A contender
-// that reads between flock and this write sees an empty or old holder; the
-// ErrLocked message copes with an empty one.
+// writePid replaces the lock file content with "<pid> <boot id>". A
+// contender that reads between flock and this write sees an empty or old
+// holder; the ErrLocked message copes with an empty one.
 func writePid(f *os.File) error {
 	if err := f.Truncate(0); err != nil {
 		return err
 	}
-	_, err := f.WriteAt([]byte(strconv.Itoa(os.Getpid())), 0)
+	content := strconv.Itoa(os.Getpid())
+	if id := bootID(); id != "" {
+		content += " " + id
+	}
+	_, err := f.WriteAt([]byte(content), 0)
 	return err
 }
 
@@ -96,22 +101,21 @@ func (s Store) lockPath(tool, key string) string {
 }
 
 // LockLive reports, without taking it, whether the lock looks held: its
-// file names a running process and was written since the last boot (a
-// released lock is emptied; a pid from before a reboot may be reused). It
-// reads only the lock file, so it never makes a contender see the lock
-// busy. Best effort: a holder killed after writing its pid whose pid was
-// reused since counts as live.
+// file names a running process and the current boot (a released lock is
+// emptied; a pid from an earlier boot may be reused by now). It reads only
+// the lock file, so it never makes a contender see the lock busy. Best
+// effort: a holder killed after writing whose pid was reused within the
+// same boot counts as live.
 func (s Store) LockLive(tool, key string) bool {
-	p := s.lockPath(tool, key)
-	fi, err := os.Stat(p)
-	if err != nil || fi.ModTime().Before(bootTime()) {
-		return false
-	}
-	b, err := os.ReadFile(p)
+	b, err := os.ReadFile(s.lockPath(tool, key))
 	if err != nil {
 		return false
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	f := strings.Fields(string(b))
+	if len(f) != 2 || f[1] != bootID() {
+		return false
+	}
+	pid, err := strconv.Atoi(f[0])
 	if err != nil || pid <= 0 {
 		return false
 	}
@@ -119,12 +123,11 @@ func (s Store) LockLive(tool, key string) bool {
 	return err == nil || errors.Is(err, unix.EPERM)
 }
 
-// bootTime is when the system started (zero if unknown).
-func bootTime() time.Time {
-	var si unix.Sysinfo_t
-	if unix.Sysinfo(&si) != nil {
-		return time.Time{}
+// bootID identifies the running boot ("" when unknown).
+func bootID() string {
+	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
 	}
-	// One second of slack: uptime is whole seconds.
-	return time.Now().Add(-time.Duration(si.Uptime+1) * time.Second)
+	return strings.TrimSpace(string(b))
 }

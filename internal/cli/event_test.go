@@ -228,3 +228,29 @@ func TestEventLogRotates(t *testing.T) {
 		t.Fatalf("new log %+v", evs)
 	}
 }
+
+// TestEventDrainsLargeHookInput: a hook's input larger than what is parsed
+// (a tool result) is read to the end, and the event still applies.
+func TestEventDrainsLargeHookInput(t *testing.T) {
+	dir := hostTestEnv(t)
+	s := testStore(dir)
+	if err := s.Put(conv.Conversation{ID: "01EV", Tool: "fake", State: conv.StateWaiting}); err != nil {
+		t.Fatal(err)
+	}
+	in := strings.NewReader(`{"tool_response":"` + strings.Repeat("x", 300<<10) + `"}`)
+	cmd := NewRootCmd()
+	var o, e bytes.Buffer
+	cmd.SetOut(&o)
+	cmd.SetErr(&e)
+	cmd.SetIn(in)
+	cmd.SetArgs([]string{"event", "--conversation", "01EV", "--kind", "working", "--stdin-json"})
+	if err := cmd.Execute(); err != nil || o.Len() != 0 {
+		t.Fatalf("%v %q", err, o.String())
+	}
+	if in.Len() != 0 {
+		t.Fatalf("%d bytes of hook input left unread", in.Len())
+	}
+	if c, _, _ := s.Get("01EV"); c.State != conv.StateWorking {
+		t.Fatalf("record %+v", c)
+	}
+}

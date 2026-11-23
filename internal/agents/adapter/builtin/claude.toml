@@ -37,8 +37,9 @@ flag = "--settings"
 format = "claude-settings@1"
 
 [hooks.events]
-SessionStart = "idle"
+SessionStart = "ready"
 UserPromptSubmit = "working"
+PostToolUse = "working"
 Notification = "waiting"
 Stop = "idle"
 SessionEnd = "stopped"

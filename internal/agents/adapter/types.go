@@ -63,8 +63,27 @@ type HookConfig struct {
 	Kind string `toml:"kind"`
 }
 
-// EventKinds are the kinds `cairn event --kind` accepts.
-var EventKinds = []string{"working", "waiting", "idle", "done", "failed", "stopped", "activity"}
+// HooksReport reports whether the adapter's hooks post event kind k.
+func (a Adapter) HooksReport(k string) bool {
+	switch a.Capabilities.Hooks {
+	case "settings-file":
+		for _, v := range a.Hooks.Events {
+			if v == k {
+				return true
+			}
+		}
+	case "config-override":
+		return a.Hooks.Kind == k
+	}
+	return false
+}
+
+// EventKinds are the kinds `cairn event --kind` accepts, the single list
+// adapters and the state fold use: the states working … stopped; ready
+// (the tool is up and awaits input: starting → idle only, nothing in any
+// other state, so a mid-turn restart signal cannot end a turn); activity
+// (only the time moves).
+var EventKinds = []string{"working", "waiting", "idle", "done", "failed", "stopped", "ready", "activity"}
 
 // FieldError is one validation problem, naming the TOML key.
 type FieldError struct {

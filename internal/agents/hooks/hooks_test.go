@@ -76,8 +76,8 @@ func TestInjectClaudeWritesSettingsFile0600(t *testing.T) {
 	if err := json.Unmarshal(b, &sf); err != nil {
 		t.Fatalf("settings: %v\n%s", err, b)
 	}
-	want := map[string]string{"SessionStart": "idle", "UserPromptSubmit": "working", "Notification": "waiting",
-		"Stop": "idle", "SessionEnd": "stopped"}
+	want := map[string]string{"SessionStart": "ready", "UserPromptSubmit": "working", "PostToolUse": "working",
+		"Notification": "waiting", "Stop": "idle", "SessionEnd": "stopped"}
 	if len(sf.Hooks) != len(want) {
 		t.Fatalf("events %v", sf.Hooks)
 	}

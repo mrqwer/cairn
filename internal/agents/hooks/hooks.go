@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -172,23 +173,21 @@ func CleanReason(s string) string {
 	return s
 }
 
-// Post records one hook event: it appends ev as one line to the
-// conversation's event log (a single O_APPEND write, so concurrent hooks
-// never interleave) and folds it into the record, waiting at most wait for
-// the store lock (conv.ErrBusy after that; the event stays in the log). An
-// invalid id or a conversation that does not exist is an error and nothing
-// is written.
+// Post records one hook event under the store lock (waiting at most wait
+// for it): it appends ev as one line to the conversation's event log (a
+// single O_APPEND write) and folds it into the record, which is rewritten
+// only when something changed. An invalid id or a conversation that does
+// not exist is an error and nothing is written.
+//
+// When the lock stays taken the result is conv.ErrBusy: the event is still
+// logged and kept in a pending file, which the next event of the
+// conversation folds first (in time order).
 func Post(s conv.Store, ev agents.Event, wait time.Duration) (conv.Conversation, error) {
 	if !conv.ValidID(ev.Conversation) {
 		return conv.Conversation{}, fmt.Errorf("invalid conversation id %q", ev.Conversation)
 	}
 	if !agents.ValidKind(ev.Kind) {
 		return conv.Conversation{}, fmt.Errorf("unknown event kind %q", ev.Kind)
-	}
-	if _, ok, err := s.Get(ev.Conversation); err != nil {
-		return conv.Conversation{}, err
-	} else if !ok {
-		return conv.Conversation{}, fmt.Errorf("%w: %s", conv.ErrNotFound, ev.Conversation)
 	}
 	ev.Reason = CleanReason(ev.Reason)
 	if !agents.ValidNativeID(ev.NativeID) {
@@ -198,25 +197,74 @@ func Post(s conv.Store, ev agents.Event, wait time.Duration) (conv.Conversation,
 	if err != nil {
 		return conv.Conversation{}, err
 	}
+	line = append(line, '\n')
+	logPath := s.Root.Path(EventsPath(s, ev.Conversation))
+	pending := logPath + ".pending"
+	c, err := s.TryUpdate(ev.Conversation, wait, func(c *conv.Conversation) error {
+		if err := appendLine(s, logPath, line); err != nil {
+			return err
+		}
+		rotate(logPath)
+		before := *c
+		for _, p := range drain(pending) {
+			*c = agents.Fold(*c, p)
+		}
+		*c = agents.Fold(*c, ev)
+		if reflect.DeepEqual(before, *c) {
+			return conv.ErrNoChange
+		}
+		return nil
+	})
+	if errors.Is(err, conv.ErrBusy) {
+		// Read without the lock: keep the event only for a conversation
+		// that exists.
+		if cs, serr := s.Scan(func(r conv.Conversation) bool { return r.ID == ev.Conversation }); serr == nil && len(cs) == 1 {
+			_ = appendLine(s, logPath, line)
+			_ = appendLine(s, pending, line)
+		}
+	}
+	return c, err
+}
+
+// appendLine appends one line with a single O_APPEND write (0600).
+func appendLine(s conv.Store, path string, line []byte) error {
 	if err := s.Root.MkdirAll(s.Dir+"/events", 0o700); err != nil {
-		return conv.Conversation{}, err
+		return err
 	}
-	f, err := os.OpenFile(s.Root.Path(EventsPath(s, ev.Conversation)), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
-		return conv.Conversation{}, err
+		return err
 	}
-	_, werr := f.Write(append(line, '\n'))
+	_, werr := f.Write(line)
 	if cerr := f.Close(); werr == nil {
 		werr = cerr
 	}
-	if werr != nil {
-		return conv.Conversation{}, werr
-	}
-	return s.TryUpdate(ev.Conversation, wait, func(c *conv.Conversation) error {
-		rotate(s.Root.Path(EventsPath(s, ev.Conversation)))
-		*c = agents.Fold(*c, ev)
+	return werr
+}
+
+// drain takes the pending events (caller holds the store lock), oldest
+// first. The file is moved aside before reading, so an event added at the
+// same time lands in a new pending file for the next drain.
+func drain(pending string) []agents.Event {
+	taken := pending + ".taken"
+	if os.Rename(pending, taken) != nil {
 		return nil
-	})
+	}
+	b, err := os.ReadFile(taken)
+	_ = os.Remove(taken)
+	if err != nil {
+		return nil
+	}
+	var out []agents.Event
+	for _, l := range bytes.Split(b, []byte("\n")) {
+		var e agents.Event
+		if len(bytes.TrimSpace(l)) > 0 && json.Unmarshal(l, &e) == nil && agents.ValidKind(e.Kind) {
+			e.Reason = CleanReason(e.Reason)
+			out = append(out, e)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].TS.Before(out[j].TS) })
+	return out
 }
 
 // MaxEventLog is the size at which an event log is moved to <log>.1 (the

@@ -642,7 +642,8 @@ func newWsStatusCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			ast, err := readAgentsStatus(agentStore(r.ws.dirs), false)
 			if err != nil {
-				return err
+				// The workspace status does not depend on the agents store.
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "agents: cannot read the conversation records: %v\n", err)
 			}
 			if asJSON {
 				return writeJSON(out, statusJSON{Projects: rows, LoadErrors: loadErrorsJSON(r.ws), Agents: ast})

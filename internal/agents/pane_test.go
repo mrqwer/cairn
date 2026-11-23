@@ -588,12 +588,16 @@ func TestPaneObserveLeavesHookStateAlone(t *testing.T) {
 	f.env.Activity = func() (time.Time, error) { return time.Now().Add(-time.Hour), nil }
 	f.env.ObservePoll = 5 * time.Millisecond
 	var c conv.Conversation
+	data := filepath.Join(f.store.Root.Dir, "state/agents/conversations.jsonl")
+	var before, after []byte
 	f.env.Run = func(context.Context, []string, []string, string) (int, error) {
 		_, _ = f.store.Update("C1", func(r *conv.Conversation) error {
 			r.State, r.StateSource = conv.StateWaiting, conv.SourceHook
 			return nil
 		})
+		before, _ = os.ReadFile(data)
 		time.Sleep(100 * time.Millisecond)
+		after, _ = os.ReadFile(data)
 		c, _, _ = f.store.Get("C1")
 		return 0, nil
 	}
@@ -603,8 +607,57 @@ func TestPaneObserveLeavesHookStateAlone(t *testing.T) {
 	if c.State != conv.StateWaiting || c.StateSource != conv.SourceHook {
 		t.Fatalf("observation overrode hooks: %+v", c)
 	}
-	b, _ := os.ReadFile(filepath.Join(f.store.Root.Dir, "state/agents/conversations.jsonl"))
-	if n := strings.Count(string(b), "\n"); n > 8 {
-		t.Fatalf("observation wrote %d records", n)
+	if string(before) != string(after) {
+		t.Fatal("an unchanged observation wrote a record")
+	}
+}
+
+// TestPaneObserveRevivesIdleWhenHooksNeverSayWorking: a tool whose hooks
+// only report idle (codex notify) is moved from a hook idle back to working
+// by fresh output; a tool with a working hook is not.
+func TestPaneObserveRevivesIdleWhenHooksNeverSayWorking(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		hooks adapter.HookConfig
+		mode  string
+		want  string
+	}{
+		{"idle-only hook", adapter.HookConfig{Flag: "-c", Key: "notify", Kind: "idle"}, "config-override", conv.StateWorking},
+		{"working hook", adapter.HookConfig{Flag: "--settings", Format: adapter.HookFormatClaudeSettings,
+			Events: map[string]string{"UserPromptSubmit": "working", "Stop": "idle"}}, "settings-file", conv.StateIdle},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPaneFixture(t, 0, "x")
+			a, _ := f.env.Adapter("fake")
+			a.Capabilities.Hooks, a.Hooks = tc.mode, tc.hooks
+			f.env.Adapter = func(name string) (adapter.Adapter, bool) { return a, name == "fake" }
+			f.put(t, conv.Conversation{ID: "C1", NativeID: uuid, Name: "n", State: conv.StateStarting})
+			var fresh atomic.Bool
+			f.env.Activity = func() (time.Time, error) {
+				if fresh.Load() {
+					return time.Now(), nil
+				}
+				return time.Now().Add(-time.Hour), nil
+			}
+			f.env.ObservePoll = 5 * time.Millisecond
+			var got conv.Conversation
+			f.env.Run = func(context.Context, []string, []string, string) (int, error) {
+				time.Sleep(30 * time.Millisecond)
+				_, _ = f.store.Update("C1", func(r *conv.Conversation) error {
+					r.State, r.StateSource = conv.StateIdle, conv.SourceHook
+					return nil
+				})
+				fresh.Store(true)
+				time.Sleep(100 * time.Millisecond)
+				got, _, _ = f.store.Get("C1")
+				return 0, nil
+			}
+			if err := agents.RunPane(context.Background(), f.env, "C1"); err != nil {
+				t.Fatal(err)
+			}
+			if got.State != tc.want {
+				t.Fatalf("state %q want %q (%+v)", got.State, tc.want, got)
+			}
+		})
 	}
 }

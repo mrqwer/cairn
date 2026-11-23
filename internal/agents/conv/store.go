@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mrqwer/cairn/internal/fsx"
@@ -19,6 +21,8 @@ import (
 const (
 	dataFile  = "conversations.jsonl"
 	storeLock = ".store.lock"
+	// compactBase holds the record file size after the last compaction.
+	compactBase = ".compact-base"
 )
 
 // ErrNotFound is returned by Update for an unknown id.
@@ -34,6 +38,12 @@ type Store struct {
 func (s Store) path(name string) string { return s.Root.Path(s.Dir + "/" + name) }
 
 func (s Store) ensureDir() error { return s.Root.MkdirAll(s.Dir, 0o700) }
+
+// ErrNoChange, returned by an Update fn, means nothing is to be written;
+// Update then returns the current record and no error.
+var ErrNoChange = errors.New("no change")
+
+var errNoWrite = errors.New("no write")
 
 // ErrBusy is returned by TryUpdate when the store lock stayed taken.
 var ErrBusy = errors.New("conversation store is busy")
@@ -176,9 +186,32 @@ func (s Store) appendLocked(c Conversation) error {
 		return err
 	}
 	if created {
-		return syncDir(filepath.Dir(p))
+		if err := syncDir(filepath.Dir(p)); err != nil {
+			return err
+		}
 	}
+	s.compactIfGrown(st.Size() + int64(len(b)))
 	return nil
+}
+
+// compactSlack is how far the record file may grow past twice its size
+// after the last compaction before it is compacted again.
+const compactSlack = 16 << 10
+
+// compactIfGrown compacts the record file (caller holds the lock) once it
+// is more than twice its compacted size plus compactSlack, so a stream of
+// updates (one per hook event) keeps it near one line per conversation and
+// readers stay fast. The compacted size is a hint in a side file. A failed
+// compaction is left for the next write: the record is already appended.
+func (s Store) compactIfGrown(size int64) {
+	var base int64
+	if b, err := os.ReadFile(s.path(compactBase)); err == nil {
+		base, _ = strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	}
+	if size <= 2*base+compactSlack {
+		return
+	}
+	_ = s.compactLocked()
 }
 
 func syncDir(dir string) error {
@@ -263,12 +296,20 @@ func (s Store) update(wait time.Duration, id string, fn func(*Conversation) erro
 		if !found {
 			return fmt.Errorf("%w: %s", ErrNotFound, id)
 		}
+		orig := res
 		if err := fn(&res); err != nil {
+			if errors.Is(err, ErrNoChange) {
+				res = orig
+				return errNoWrite
+			}
 			return err
 		}
 		res.ID = id
 		return s.appendLocked(res)
 	})
+	if errors.Is(err, errNoWrite) {
+		return res, nil
+	}
 	if err != nil {
 		return Conversation{}, err
 	}
@@ -277,23 +318,26 @@ func (s Store) update(wait time.Duration, id string, fn func(*Conversation) erro
 
 // Compact atomically rewrites the file keeping the last record per id.
 // Records hidden by a removed overlay are kept so undo can restore them.
-func (s Store) Compact() error {
-	return s.withLock(func() error {
-		recs, err := s.loadRaw()
+func (s Store) Compact() error { return s.withLock(s.compactLocked) }
+
+func (s Store) compactLocked() error {
+	recs, err := s.loadRaw()
+	if err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	for _, c := range recs {
+		b, err := json.Marshal(c)
 		if err != nil {
 			return err
 		}
-		var buf bytes.Buffer
-		for _, c := range recs {
-			b, err := json.Marshal(c)
-			if err != nil {
-				return err
-			}
-			buf.Write(b)
-			buf.WriteByte('\n')
-		}
-		return s.Root.WriteAtomic(s.Dir+"/"+dataFile, buf.Bytes(), 0o600)
-	})
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	if err := s.Root.WriteAtomic(s.Dir+"/"+dataFile, buf.Bytes(), 0o600); err != nil {
+		return err
+	}
+	return os.WriteFile(s.path(compactBase), []byte(strconv.Itoa(buf.Len())), 0o600)
 }
 
 const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"

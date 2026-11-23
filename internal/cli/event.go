@@ -29,7 +29,7 @@ func newEventCmd() *cobra.Command {
 		Use:   "event --conversation <id> --kind <kind>",
 		Short: "Record a state event of an agent conversation (run by tool hooks)",
 		Long: "Appends the event to <state>/agents/events/<id>.jsonl and updates the conversation's state.\n" +
-			"Kinds: working, waiting, idle, done, failed, stopped, activity. Extra arguments are ignored.\n" +
+			"Kinds: working, waiting, idle, done, failed, stopped, ready, activity. Extra arguments are ignored.\n" +
 			"Always exits 0; problems are reported on stderr.",
 		Args:               cobra.ArbitraryArgs,
 		FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
@@ -64,7 +64,7 @@ func newEventCmd() *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.StringVar(&id, "conversation", "", "conversation id")
-	f.StringVar(&kind, "kind", "", "working | waiting | idle | done | failed | stopped | activity")
+	f.StringVar(&kind, "kind", "", "working | waiting | idle | done | failed | stopped | ready | activity")
 	f.StringVar(&reason, "reason", "", "why the conversation waits")
 	f.StringVar(&nativeID, "native-id", "", "the tool's own id of the conversation (fills an unknown one)")
 	f.BoolVar(&stdinJSON, "stdin-json", false, "read the hook's JSON input (message, session_id) from stdin")
@@ -77,6 +77,9 @@ func readHookInput(in io.Reader) (message, sessionID string) {
 	done := make(chan []byte, 1)
 	go func() {
 		b, _ := io.ReadAll(io.LimitReader(in, eventStdinMax))
+		// Drain the rest (a tool's output can be large) so the tool's
+		// write to the hook does not fail.
+		_, _ = io.Copy(io.Discard, in)
 		done <- b
 	}()
 	var b []byte
