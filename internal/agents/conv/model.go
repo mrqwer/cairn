@@ -61,6 +61,9 @@ type Conversation struct {
 	CreatedAt        time.Time  `json:"created_at"`
 	ArchivedAt       *time.Time `json:"archived_at,omitempty"`
 	AdapterVersion   string     `json:"adapter_version,omitempty"`
+	// IgnoredEvents counts hook events that were not applied: invalid
+	// transitions, stale or unknown events.
+	IgnoredEvents int `json:"ignored_events,omitempty"`
 }
 
 // Filter selects conversations; empty fields match everything. Archived
@@ -106,6 +109,23 @@ func (f Filter) match(c Conversation) bool {
 	}
 	if !f.Since.IsZero() && c.LastActivityAt.Before(f.Since) {
 		return false
+	}
+	return true
+}
+
+// ValidID reports whether s is a usable conversation id: it is put into file
+// names, tmux options and hook commands, so only
+// [A-Za-z0-9][A-Za-z0-9_-]{0,62} is accepted.
+func ValidID(s string) bool {
+	if s == "" || len(s) > 63 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || (i > 0 && (c == '_' || c == '-'))
+		if !ok {
+			return false
+		}
 	}
 	return true
 }

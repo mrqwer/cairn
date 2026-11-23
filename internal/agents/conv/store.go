@@ -35,8 +35,15 @@ func (s Store) path(name string) string { return s.Root.Path(s.Dir + "/" + name)
 
 func (s Store) ensureDir() error { return s.Root.MkdirAll(s.Dir, 0o700) }
 
+// ErrBusy is returned by TryUpdate when the store lock stayed taken.
+var ErrBusy = errors.New("conversation store is busy")
+
 // withLock runs fn holding the exclusive store lock (blocking).
-func (s Store) withLock(fn func() error) error {
+func (s Store) withLock(fn func() error) error { return s.withLockWait(-1, fn) }
+
+// withLockWait runs fn holding the exclusive store lock, waiting at most
+// wait for it (blocking when wait < 0); a lock still taken is ErrBusy.
+func (s Store) withLockWait(wait time.Duration, fn func() error) error {
 	if err := s.ensureDir(); err != nil {
 		return err
 	}
@@ -45,8 +52,20 @@ func (s Store) withLock(fn func() error) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
+	deadline := time.Now().Add(wait)
 	for {
-		err = unix.Flock(int(f.Fd()), unix.LOCK_EX)
+		if wait < 0 {
+			err = unix.Flock(int(f.Fd()), unix.LOCK_EX)
+		} else {
+			err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+			if errors.Is(err, unix.EWOULDBLOCK) {
+				if time.Now().After(deadline) {
+					return ErrBusy
+				}
+				time.Sleep(5 * time.Millisecond)
+				continue
+			}
+		}
 		if !errors.Is(err, unix.EINTR) {
 			break
 		}
@@ -214,8 +233,22 @@ func (s Store) List(f Filter) ([]Conversation, error) {
 // returned. fn runs while the store lock is held and must not call any Store
 // method: the flock is not reentrant and that would deadlock.
 func (s Store) Update(id string, fn func(*Conversation) error) (Conversation, error) {
+	return s.update(-1, id, fn)
+}
+
+// TryUpdate is Update waiting at most wait for the store lock; when it
+// stays taken nothing is written and ErrBusy is returned. Hooks use it so a
+// long compaction never stalls the tool.
+func (s Store) TryUpdate(id string, wait time.Duration, fn func(*Conversation) error) (Conversation, error) {
+	if wait < 0 {
+		wait = 0
+	}
+	return s.update(wait, id, fn)
+}
+
+func (s Store) update(wait time.Duration, id string, fn func(*Conversation) error) (Conversation, error) {
 	var res Conversation
-	err := s.withLock(func() error {
+	err := s.withLockWait(wait, func() error {
 		recs, err := s.load()
 		if err != nil {
 			return err

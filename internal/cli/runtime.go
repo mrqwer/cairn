@@ -574,6 +574,7 @@ func switchOrAttach(cmd *cobra.Command, drv wsDriver, socket, session, sid strin
 type statusJSON struct {
 	Projects   []statusRow     `json:"projects"`
 	LoadErrors []loadErrorJSON `json:"load_errors"`
+	Agents     agentsStatus    `json:"agents"`
 }
 
 // statusRow is one project in status --json.
@@ -590,12 +591,19 @@ type statusRow struct {
 }
 
 func newWsStatusCmd() *cobra.Command {
-	var asJSON bool
+	var asJSON, forTmux bool
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show the live state of every active project",
-		Args:  cobra.NoArgs,
+		Short: "Show the live state of every active project and agent conversation",
+		Long: "Shows each active project's session and the agent conversations waiting or working.\n" +
+			"--tmux prints only the agent badge (\"2 waiting · 3 working\", empty when none) for a tmux\n" +
+			"status line: it reads cairn's records only, never tmux, and is fast enough for #(cairn status --tmux).",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if forTmux {
+				printStatusTmux(cmd.OutOrStdout(), cmd.ErrOrStderr())
+				return nil
+			}
 			r, err := prepare(cmd)
 			if err != nil {
 				return err
@@ -632,10 +640,15 @@ func newWsStatusCmd() *cobra.Command {
 				rows = append(rows, row)
 			}
 			out := cmd.OutOrStdout()
+			ast, err := readAgentsStatus(agentStore(r.ws.dirs), false)
+			if err != nil {
+				return err
+			}
 			if asJSON {
-				return writeJSON(out, statusJSON{Projects: rows, LoadErrors: loadErrorsJSON(r.ws)})
+				return writeJSON(out, statusJSON{Projects: rows, LoadErrors: loadErrorsJSON(r.ws), Agents: ast})
 			}
 			printLoadErrors(cmd.ErrOrStderr(), r.ws.loadErrs)
+			defer printAgentsStatus(out, ast)
 			if len(rows) == 0 {
 				_, _ = fmt.Fprintln(out, "no active projects")
 				return nil
@@ -668,5 +681,6 @@ func newWsStatusCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "machine-readable output")
+	cmd.Flags().BoolVar(&forTmux, "tmux", false, "print only the agent badge for a tmux status line")
 	return cmd
 }

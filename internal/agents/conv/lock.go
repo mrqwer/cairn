@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -46,7 +47,7 @@ func (s Store) AcquireLock(tool, nativeID string) (release func(), err error) {
 	if err := s.Root.MkdirAll(s.Dir+"/locks", 0o700); err != nil {
 		return nil, err
 	}
-	p := s.path("locks/" + safeName(tool) + "-" + safeName(nativeID) + ".lock")
+	p := s.lockPath(tool, nativeID)
 	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
@@ -70,6 +71,9 @@ func (s Store) AcquireLock(tool, nativeID string) (release func(), err error) {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
+			// Clear the holder while still locked: an empty file is a
+			// lock nobody holds (see LockLive).
+			_ = f.Truncate(0)
 			_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
 			_ = f.Close()
 		})
@@ -85,4 +89,42 @@ func writePid(f *os.File) error {
 	}
 	_, err := f.WriteAt([]byte(strconv.Itoa(os.Getpid())), 0)
 	return err
+}
+
+func (s Store) lockPath(tool, key string) string {
+	return s.path("locks/" + safeName(tool) + "-" + safeName(key) + ".lock")
+}
+
+// LockLive reports, without taking it, whether the lock looks held: its
+// file names a running process and was written since the last boot (a
+// released lock is emptied; a pid from before a reboot may be reused). It
+// reads only the lock file, so it never makes a contender see the lock
+// busy. Best effort: a holder killed after writing its pid whose pid was
+// reused since counts as live.
+func (s Store) LockLive(tool, key string) bool {
+	p := s.lockPath(tool, key)
+	fi, err := os.Stat(p)
+	if err != nil || fi.ModTime().Before(bootTime()) {
+		return false
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	err = unix.Kill(pid, 0)
+	return err == nil || errors.Is(err, unix.EPERM)
+}
+
+// bootTime is when the system started (zero if unknown).
+func bootTime() time.Time {
+	var si unix.Sysinfo_t
+	if unix.Sysinfo(&si) != nil {
+		return time.Time{}
+	}
+	// One second of slack: uptime is whole seconds.
+	return time.Now().Add(-time.Duration(si.Uptime+1) * time.Second)
 }

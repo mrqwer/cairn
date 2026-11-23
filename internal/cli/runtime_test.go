@@ -256,11 +256,13 @@ func TestStatusJSON(t *testing.T) {
 	s.windows = append(s.windows, &fWindow{id: "@80", key: "api/old", panes: []*fPane{{id: "%80", key: "api/old/1", cmd: "bash"}}})
 
 	out := mustRun(t, "", "status", "--json")
-	var raw map[string][]map[string]any
+	var raw struct {
+		Projects []map[string]any `json:"projects"`
+	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		t.Fatalf("status --json: %v\n%s", err, out)
 	}
-	rows := raw["projects"]
+	rows := raw.Projects
 	if len(rows) != 2 {
 		t.Fatalf("rows: %s", out)
 	}

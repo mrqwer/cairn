@@ -118,3 +118,33 @@ func (s Store) overlays() (map[string]Curated, error) {
 	}
 	return out, nil
 }
+
+// Scan returns the visible, non-archived conversations whose raw record
+// passes keep, reading the overlay files of those only. It is List for hot
+// paths (the tmux status line) where few records are of interest.
+func (s Store) Scan(keep func(Conversation) bool) ([]Conversation, error) {
+	recs, err := s.loadRaw()
+	if err != nil {
+		return nil, err
+	}
+	var out []Conversation
+	for _, c := range recs {
+		if !keep(c) {
+			continue
+		}
+		if b, ok, err := s.ReadCurated(c.ID); err == nil && ok {
+			var cu Curated
+			if cu.Decode(b) == nil {
+				if cu.Removed {
+					continue
+				}
+				cu.apply(&c)
+			}
+		}
+		if c.isArchived() {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}

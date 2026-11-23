@@ -12,6 +12,7 @@ type Adapter struct {
 	ProfileFlags map[string][]string `toml:"profile_flags"`
 	Env          Env                 `toml:"env"`
 	History      History             `toml:"history"`
+	Hooks        HookConfig          `toml:"hooks"`
 }
 
 // Capabilities declares what a tool can do; cairn fills the gaps.
@@ -41,6 +42,29 @@ type History struct {
 	Locator string `toml:"locator"`
 	Parser  string `toml:"parser"`
 }
+
+// HookFormatClaudeSettings is the settings-file layout of a JSON file with
+// {"hooks": {<Event>: [{"hooks": [{"type": "command", "command": ...}]}]}}.
+const HookFormatClaudeSettings = "claude-settings@1"
+
+// HookConfig says how cairn's event hooks are passed to a tool, per process
+// (capabilities.hooks). The tool's own settings are never edited.
+type HookConfig struct {
+	// Flag takes the settings file path (settings-file) or one key=value
+	// override (config-override).
+	Flag string `toml:"flag"`
+	// Format is the layout of the settings file cairn writes (settings-file).
+	Format string `toml:"format"`
+	// Events maps a tool hook event to a cairn event kind (settings-file).
+	Events map[string]string `toml:"events"`
+	// Key is the config key set to the event command and Kind the event kind
+	// it posts (config-override).
+	Key  string `toml:"key"`
+	Kind string `toml:"kind"`
+}
+
+// EventKinds are the kinds `cairn event --kind` accepts.
+var EventKinds = []string{"working", "waiting", "idle", "done", "failed", "stopped", "activity"}
 
 // FieldError is one validation problem, naming the TOML key.
 type FieldError struct {

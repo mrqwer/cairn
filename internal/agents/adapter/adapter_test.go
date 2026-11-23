@@ -240,3 +240,64 @@ func TestForkNeedsCapability(t *testing.T) {
 		t.Fatal("unknown command must fail")
 	}
 }
+
+func TestValidateHooks(t *testing.T) {
+	settings := func(a *adapter.Adapter) {
+		a.Capabilities.Hooks = "settings-file"
+		a.Hooks = adapter.HookConfig{Flag: "--settings", Format: adapter.HookFormatClaudeSettings,
+			Events: map[string]string{"Stop": "idle"}}
+	}
+	override := func(a *adapter.Adapter) {
+		a.Capabilities.Hooks = "config-override"
+		a.Hooks = adapter.HookConfig{Flag: "-c", Key: "notify", Kind: "idle"}
+	}
+	cases := []struct {
+		name string
+		mod  func(*adapter.Adapter)
+		want string
+	}{
+		{"settings flag missing", func(a *adapter.Adapter) { settings(a); a.Hooks.Flag = "" },
+			"hooks.flag: required when capabilities.hooks is settings-file"},
+		{"settings format unknown", func(a *adapter.Adapter) { settings(a); a.Hooks.Format = "yaml@9" },
+			`hooks.format: unknown settings format "yaml@9" (known: claude-settings@1)`},
+		{"settings events missing", func(a *adapter.Adapter) { settings(a); a.Hooks.Events = nil },
+			"hooks.events: required when capabilities.hooks is settings-file"},
+		{"settings bad kind", func(a *adapter.Adapter) { settings(a); a.Hooks.Events["Stop"] = "sleeping" },
+			`hooks.events.Stop: unknown event kind "sleeping"`},
+		{"settings bad event name", func(a *adapter.Adapter) { settings(a); a.Hooks.Events["a b"] = "idle" },
+			`hooks.events: event name "a b" must be letters, digits and _`},
+		{"override key missing", func(a *adapter.Adapter) { override(a); a.Hooks.Key = "" },
+			"hooks.key: required when capabilities.hooks is config-override"},
+		{"override bad key", func(a *adapter.Adapter) { override(a); a.Hooks.Key = "a=b" },
+			`hooks.key: "a=b" must be letters, digits, _, - and .`},
+		{"override bad kind", func(a *adapter.Adapter) { override(a); a.Hooks.Kind = "" },
+			`hooks.kind: unknown event kind ""`},
+		{"override flag missing", func(a *adapter.Adapter) { override(a); a.Hooks.Flag = "" },
+			"hooks.flag: required when capabilities.hooks is config-override"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := okAdapter()
+			c.mod(&a)
+			errs := a.Validate()
+			if len(errs) != 1 || errs[0].Error() != c.want {
+				t.Fatalf("want exactly [%s], got %v", c.want, errs)
+			}
+		})
+	}
+	for _, mod := range []func(*adapter.Adapter){settings, override} {
+		a := okAdapter()
+		mod(&a)
+		if errs := a.Validate(); len(errs) != 0 {
+			t.Fatalf("valid hooks rejected: %v", errs)
+		}
+	}
+	m := loadBuiltins(t)
+	if ev := m["claude"].Hooks.Events; ev["Notification"] != "waiting" || ev["UserPromptSubmit"] != "working" ||
+		ev["Stop"] != "idle" || ev["SessionEnd"] != "stopped" {
+		t.Fatalf("claude hook events: %v", ev)
+	}
+	if h := m["codex"].Hooks; h.Flag != "-c" || h.Key != "notify" || h.Kind != "idle" {
+		t.Fatalf("codex hooks: %+v", h)
+	}
+}

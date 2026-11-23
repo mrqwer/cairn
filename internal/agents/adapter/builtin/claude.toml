@@ -28,3 +28,17 @@ unset = ["ANTHROPIC_API_KEY"]
 [history]
 locator = "~/.claude/projects/*/{native_id}.jsonl"
 parser = "claude-jsonl@1"
+
+# Hooks go in a cairn-owned settings file passed with --settings at launch;
+# the user's own ~/.claude settings are never edited. Each event runs
+# `cairn event --conversation <id> --kind <kind>`.
+[hooks]
+flag = "--settings"
+format = "claude-settings@1"
+
+[hooks.events]
+SessionStart = "idle"
+UserPromptSubmit = "working"
+Notification = "waiting"
+Stop = "idle"
+SessionEnd = "stopped"

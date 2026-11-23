@@ -22,6 +22,7 @@ import (
 	"github.com/mrqwer/cairn/internal/agents"
 	"github.com/mrqwer/cairn/internal/agents/adapter"
 	"github.com/mrqwer/cairn/internal/agents/conv"
+	"github.com/mrqwer/cairn/internal/agents/hooks"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/history"
 	"github.com/mrqwer/cairn/internal/reconcile"
@@ -1158,6 +1159,10 @@ func newAgentsPaneCmd() *cobra.Command {
 				Root:    wsRoot,
 				Home:    e.dirs.Home,
 				Runner:  agentRunner,
+				Hooks: func(a adapter.Adapter, c conv.Conversation) ([]string, error) {
+					return hooks.Inject(a, c.ID, agentSelf(), e.dirs, wsRoot)
+				},
+				Activity: terminalActivity(cmd.InOrStdin()),
 				Close: func(c conv.Conversation) error {
 					return e.unbind(cmd, c, nil, "agents.close", "close agent pane of "+convTitle(c), drv)
 				},
@@ -1179,4 +1184,22 @@ func newAgentsPaneCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&now, "now", false, "start the tool without waiting for a client")
 	return cmd
+}
+
+// terminalActivity reports when the pane's terminal last showed output:
+// the kernel moves a tty's modification time when it is written to (in
+// steps of a few seconds), so no tmux call is needed. nil when in is not a
+// terminal.
+func terminalActivity(in io.Reader) func() (time.Time, error) {
+	f, ok := in.(*os.File)
+	if !ok || !isTerminal(f) {
+		return nil
+	}
+	return func() (time.Time, error) {
+		fi, err := f.Stat()
+		if err != nil {
+			return time.Time{}, err
+		}
+		return fi.ModTime(), nil
+	}
 }

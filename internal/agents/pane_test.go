@@ -486,3 +486,125 @@ func TestPaneWarnsMissingCwd(t *testing.T) {
 		t.Fatalf("no note:\n%s", f.out.String())
 	}
 }
+
+func TestPaneInjectsHookArgs(t *testing.T) {
+	f := newPaneFixture(t, 0, "x")
+	f.put(t, conv.Conversation{ID: "C1", NativeID: uuid, Name: "n", State: conv.StateStarting})
+	var gotID string
+	f.env.Hooks = func(_ adapter.Adapter, c conv.Conversation) ([]string, error) {
+		gotID = c.ID
+		return []string{"--settings", "/h/C1.json"}, nil
+	}
+	if err := agents.RunPane(context.Background(), f.env, "C1"); err != nil {
+		t.Fatal(err)
+	}
+	got := f.argvs(t)
+	if gotID != "C1" || len(got) != 1 || strings.Join(got[0], " ") != "--settings /h/C1.json start "+uuid+" --name n" {
+		t.Fatalf("argv %q (hooks for %q)", got, gotID)
+	}
+	c, _, _ := f.store.Get("C1")
+	if len(c.LaunchArgv) < 3 || c.LaunchArgv[1] != "--settings" {
+		t.Fatalf("launch argv %q", c.LaunchArgv)
+	}
+}
+
+// TestPaneHookFailureDegradesToObserved: a hook that cannot be set up never
+// keeps the tool from starting; the state is then observed.
+func TestPaneHookFailureDegradesToObserved(t *testing.T) {
+	f := newPaneFixture(t, 0, "x")
+	f.put(t, conv.Conversation{ID: "C1", NativeID: uuid, Name: "n", State: conv.StateStarting})
+	f.env.Hooks = func(adapter.Adapter, conv.Conversation) ([]string, error) { return nil, errors.New("disk full") }
+	var during conv.Conversation
+	run := f.env.Run
+	f.env.Run = func(ctx context.Context, argv, env []string, dir string) (int, error) {
+		during, _, _ = f.store.Get("C1")
+		return run(ctx, argv, env, dir)
+	}
+	if err := agents.RunPane(context.Background(), f.env, "C1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.argvs(t); len(got) != 1 || strings.Join(got[0], " ") != "start "+uuid+" --name n" {
+		t.Fatalf("argv %q", got)
+	}
+	if !strings.Contains(f.out.String(), "disk full") {
+		t.Fatalf("no note:\n%s", f.out.String())
+	}
+	if during.StateSource != conv.SourceObserved {
+		t.Fatalf("state source while running: %+v", during)
+	}
+}
+
+// TestPaneLaunchResetsLiveState: a state left by a crash (working, from a
+// hook) is reset to starting/observed by the next launch.
+func TestPaneLaunchResetsLiveState(t *testing.T) {
+	f := newPaneFixture(t, 0, "x")
+	f.put(t, conv.Conversation{ID: "C1", NativeID: uuid, Name: "n", State: conv.StateWaiting, StateSource: conv.SourceHook,
+		WaitingReason: "old", LaunchArgv: []string{"x"}})
+	var during conv.Conversation
+	f.env.Run = func(context.Context, []string, []string, string) (int, error) {
+		during, _, _ = f.store.Get("C1")
+		return 0, nil
+	}
+	if err := agents.RunPane(context.Background(), f.env, "C1"); err != nil {
+		t.Fatal(err)
+	}
+	if during.State != conv.StateStarting || during.StateSource != conv.SourceObserved || during.WaitingReason != "" {
+		t.Fatalf("while running: %+v", during)
+	}
+}
+
+func TestPaneObservesIdleTool(t *testing.T) {
+	f := newPaneFixture(t, 0, "x")
+	f.put(t, conv.Conversation{ID: "C1", NativeID: uuid, Name: "n", State: conv.StateStarting})
+	quietSince := time.Now().Add(-time.Hour)
+	f.env.Activity = func() (time.Time, error) { return quietSince, nil }
+	f.env.ObservePoll = 5 * time.Millisecond
+	var sawIdle bool
+	f.env.Run = func(context.Context, []string, []string, string) (int, error) {
+		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			if c, _, _ := f.store.Get("C1"); c.State == conv.StateIdle && c.StateSource == conv.SourceObserved {
+				sawIdle = true
+				break
+			}
+		}
+		return 2, nil
+	}
+	if err := agents.RunPane(context.Background(), f.env, "C1"); err != nil {
+		t.Fatal(err)
+	}
+	if !sawIdle {
+		t.Fatal("quiet tool never observed idle")
+	}
+	if c, _, _ := f.store.Get("C1"); c.State != conv.StateFailed || c.StateSource != conv.SourceObserved {
+		t.Fatalf("after exit: %+v", c)
+	}
+}
+
+// TestPaneObserveLeavesHookStateAlone: once hooks report, observation does
+// not override them, and an unchanged observation writes no record.
+func TestPaneObserveLeavesHookStateAlone(t *testing.T) {
+	f := newPaneFixture(t, 0, "x")
+	f.put(t, conv.Conversation{ID: "C1", NativeID: uuid, Name: "n", State: conv.StateStarting})
+	f.env.Activity = func() (time.Time, error) { return time.Now().Add(-time.Hour), nil }
+	f.env.ObservePoll = 5 * time.Millisecond
+	var c conv.Conversation
+	f.env.Run = func(context.Context, []string, []string, string) (int, error) {
+		_, _ = f.store.Update("C1", func(r *conv.Conversation) error {
+			r.State, r.StateSource = conv.StateWaiting, conv.SourceHook
+			return nil
+		})
+		time.Sleep(100 * time.Millisecond)
+		c, _, _ = f.store.Get("C1")
+		return 0, nil
+	}
+	if err := agents.RunPane(context.Background(), f.env, "C1"); err != nil {
+		t.Fatal(err)
+	}
+	if c.State != conv.StateWaiting || c.StateSource != conv.SourceHook {
+		t.Fatalf("observation overrode hooks: %+v", c)
+	}
+	b, _ := os.ReadFile(filepath.Join(f.store.Root.Dir, "state/agents/conversations.jsonl"))
+	if n := strings.Count(string(b), "\n"); n > 8 {
+		t.Fatalf("observation wrote %d records", n)
+	}
+}

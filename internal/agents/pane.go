@@ -50,6 +50,15 @@ type PaneEnv struct {
 	// (default 15 s); discovery itself goes on while the tool runs.
 	DiscoverFor time.Duration
 	Clock       func() time.Time
+	// Hooks returns the tool arguments that make the tool report its state
+	// to cairn event (hooks.Inject); nil or an error runs the tool without,
+	// and its state is then only observed.
+	Hooks func(adapter.Adapter, conv.Conversation) ([]string, error)
+	// Activity returns when the pane last showed output (nil: no idle
+	// observation); polled every ObservePoll (default 10 s) while the tool
+	// runs, for Observe.
+	Activity    func() (time.Time, error)
+	ObservePoll time.Duration
 }
 
 func (e PaneEnv) now() time.Time {
@@ -231,6 +240,7 @@ func launch(ctx context.Context, env PaneEnv, a adapter.Adapter, id string) conv
 		env.printf("%s: %v\n", title(c), err)
 		return c
 	}
+	argv = withHooks(env, a, c, argv)
 
 	var d *discovery
 	if disc != nil {
@@ -243,8 +253,10 @@ func launch(ctx context.Context, env PaneEnv, a adapter.Adapter, id string) conv
 	if c, err = env.Store.Update(id, func(r *conv.Conversation) error {
 		r.LaunchArgv = argv
 		r.LastActivityAt = started
-		if r.State == "" || r.State == conv.StateStopped || r.State == conv.StateFailed || r.State == conv.StateDone {
-			r.State = conv.StateStarting
+		if r.ArchivedAt == nil {
+			// Whatever an earlier run left (even a hook state after a
+			// crash), a launch starts over; hooks take it from here.
+			r.State, r.StateSource, r.WaitingReason = conv.StateStarting, conv.SourceObserved, ""
 		}
 		return nil
 	}); err != nil {
@@ -260,29 +272,93 @@ func launch(ctx context.Context, env PaneEnv, a adapter.Adapter, id string) conv
 			env.printf("note: the working directory %s is missing; the tool starts in %s\n", c.Cwd, wd)
 		}
 	}
+	stopObserve := observe(env, id)
 	code, runErr := env.Run(context.WithoutCancel(ctx), argv, toolEnv(a, c), c.Cwd)
+	stopObserve()
 	if d != nil {
 		d.stop()
 	}
-	state := conv.StateStopped
-	switch {
-	case runErr != nil:
+	status := code
+	if runErr != nil {
 		env.printf("%s: %v\n", strings.Join(argv, " "), runErr)
-		state = conv.StateFailed
-	case code != 0:
-		state = conv.StateFailed
+		status = -1
 	}
 	env.printf("\n%s exited (status %d)\n", title(c), code)
 	if u, err := env.Store.Update(id, func(r *conv.Conversation) error {
-		if r.ArchivedAt == nil {
-			r.State, r.StateSource = state, conv.SourceObserved
-		}
+		*r = Observe(*r, true, status, 0, env.now())
 		r.LastActivityAt = env.now()
 		return nil
 	}); err == nil {
 		c = u
 	}
 	return c
+}
+
+// withHooks puts the tool arguments of env.Hooks right after the binary
+// (argv[0]), where every tool reads options. A failure is reported and the
+// tool runs without hooks: its state is then observed.
+func withHooks(env PaneEnv, a adapter.Adapter, c conv.Conversation, argv []string) []string {
+	if env.Hooks == nil || len(argv) == 0 {
+		return argv
+	}
+	extra, err := env.Hooks(a, c)
+	if err != nil {
+		env.printf("note: state hooks for %s are unavailable (%v); its state is observed instead\n", title(c), err)
+		return argv
+	}
+	if len(extra) == 0 {
+		return argv
+	}
+	out := make([]string, 0, len(argv)+len(extra))
+	out = append(out, argv[0])
+	out = append(out, extra...)
+	return append(out, argv[1:]...)
+}
+
+// errUnchanged skips writing a record nothing changed in.
+var errUnchanged = errors.New("unchanged")
+
+// observe polls env.Activity while the tool runs and applies Observe for
+// an idle or active pane; records are written only on a change. The
+// returned func stops it and waits.
+func observe(env PaneEnv, id string) (stop func()) {
+	if env.Activity == nil {
+		return func() {}
+	}
+	poll := env.ObservePoll
+	if poll <= 0 {
+		poll = 10 * time.Second
+	}
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(poll)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+			}
+			last, err := env.Activity()
+			if err != nil {
+				continue
+			}
+			now := env.now()
+			_, _ = env.Store.Update(id, func(r *conv.Conversation) error {
+				o := Observe(*r, false, 0, now.Sub(last), now)
+				if o.State == r.State && o.StateSource == r.StateSource {
+					return errUnchanged
+				}
+				*r = o
+				return nil
+			})
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done); wg.Wait() }) }
 }
 
 // toolEnv is the pane's environment adjusted by the adapter, plus the

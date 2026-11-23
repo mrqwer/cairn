@@ -491,3 +491,119 @@ func TestCuratedRemovedHidden(t *testing.T) {
 		t.Fatal("compact dropped a removed record")
 	}
 }
+
+func TestLockLive(t *testing.T) {
+	s, root := newStore(t)
+	if s.LockLive("claude", "n1") {
+		t.Fatal("no lock file must not be live")
+	}
+	rel, err := s.AcquireLock("claude", "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.LockLive("claude", "n1") {
+		t.Fatal("held lock must be live")
+	}
+	rel()
+	if s.LockLive("claude", "n1") {
+		t.Fatal("released lock must not be live")
+	}
+	p := filepath.Join(root, "state/agents/locks/claude-n1.lock")
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Skip("no true")
+	}
+	if err := os.WriteFile(p, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if s.LockLive("claude", "n1") {
+		t.Fatal("dead holder must not be live")
+	}
+	// A live pid written before the last boot is a reused pid.
+	if err := os.WriteFile(p, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !s.LockLive("claude", "n1") {
+		t.Fatal("live pid must be live")
+	}
+	old := time.Unix(1000, 0)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if s.LockLive("claude", "n1") {
+		t.Fatal("lock file older than the boot must not be live")
+	}
+}
+
+func TestTryUpdateGivesUpWhenBusy(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("no flock binary")
+	}
+	s, root := newStore(t)
+	if err := s.Put(conv.Conversation{ID: "a", Name: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.TryUpdate("a", time.Second, func(c *conv.Conversation) error { c.Name = "two"; return nil })
+	if err != nil || c.Name != "two" {
+		t.Fatalf("free lock: %+v %v", c, err)
+	}
+	lock := filepath.Join(root, "state/agents/.store.lock")
+	ready := filepath.Join(t.TempDir(), "ready")
+	cmd := exec.Command("flock", lock, "sh", "-c", "touch "+ready+"; sleep 30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("flock never held")
+		}
+	}
+	start := time.Now()
+	_, err = s.TryUpdate("a", 100*time.Millisecond, func(c *conv.Conversation) error { c.Name = "three"; return nil })
+	if !errors.Is(err, conv.ErrBusy) {
+		t.Fatalf("err %v", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("waited %v", d)
+	}
+	if got, _, _ := s.Get("a"); got.Name != "two" {
+		t.Fatalf("busy update written: %+v", got)
+	}
+}
+
+// TestScanAppliesOverlaysToKeptOnly: Scan filters on the raw record, then
+// applies the overlays of what it kept (archived and removed hide it).
+func TestScanAppliesOverlaysToKeptOnly(t *testing.T) {
+	s, _ := newStore(t)
+	arch := time.Now().UTC()
+	for _, c := range []conv.Conversation{
+		{ID: "a", State: conv.StateWorking, Name: "raw-a"},
+		{ID: "b", State: conv.StateWorking},
+		{ID: "c", State: conv.StateWaiting},
+		{ID: "d", State: conv.StateStopped},
+	} {
+		if err := s.Put(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.WriteCurated("a", conv.Curated{Name: "curated-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteCurated("b", conv.Curated{ArchivedAt: &arch}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteCurated("c", conv.Curated{Removed: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Scan(func(c conv.Conversation) bool { return c.State != conv.StateStopped })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "a" || got[0].Name != "curated-a" {
+		t.Fatalf("got %+v", got)
+	}
+}

@@ -20,3 +20,11 @@ permission_mode = ["--ask-for-approval", "{value}"]
 [history]
 locator = "~/.codex/sessions/*/*/*/*-{native_id}.jsonl"
 parser = "codex-jsonl@1"
+
+# Per-process override `-c notify=[...]`: codex runs the program when a turn
+# completes (it appends a JSON payload, which cairn event ignores). It
+# replaces a notify program from the user's config for this process only.
+[hooks]
+flag = "-c"
+key = "notify"
+kind = "idle"

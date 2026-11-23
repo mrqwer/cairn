@@ -189,6 +189,7 @@ func (a Adapter) Validate() []FieldError {
 	default:
 		add("capabilities.hooks", fmt.Sprintf("must be none, settings-file or config-override, got %q", c.Hooks))
 	}
+	errs = append(errs, a.validateHooks()...)
 	switch c.Discovery {
 	case "none", "dir-diff", "list", "state-file":
 	case "":
@@ -221,6 +222,75 @@ func (a Adapter) Validate() []FieldError {
 			if err := checkElement(e, ctxFlag); err != nil {
 				add("profile_flags."+n, err.Error())
 			}
+		}
+	}
+	return errs
+}
+
+func validKind(k string) bool {
+	for _, x := range EventKinds {
+		if k == x {
+			return true
+		}
+	}
+	return false
+}
+
+func onlyChars(s, extra string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune(extra, r)
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// validateHooks checks the [hooks] section the hooks mode needs.
+func (a Adapter) validateHooks() []FieldError {
+	var errs []FieldError
+	add := func(f, m string) { errs = append(errs, FieldError{f, m}) }
+	h, mode := a.Hooks, a.Capabilities.Hooks
+	switch mode {
+	case "settings-file":
+		if h.Flag == "" {
+			add("hooks.flag", "required when capabilities.hooks is settings-file")
+		}
+		if h.Format != HookFormatClaudeSettings {
+			add("hooks.format", fmt.Sprintf("unknown settings format %q (known: %s)", h.Format, HookFormatClaudeSettings))
+		}
+		if len(h.Events) == 0 {
+			add("hooks.events", "required when capabilities.hooks is settings-file")
+		}
+		names := make([]string, 0, len(h.Events))
+		for n := range h.Events {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			if !onlyChars(n, "_") {
+				add("hooks.events", fmt.Sprintf("event name %q must be letters, digits and _", n))
+				continue
+			}
+			if !validKind(h.Events[n]) {
+				add("hooks.events."+n, fmt.Sprintf("unknown event kind %q", h.Events[n]))
+			}
+		}
+	case "config-override":
+		if h.Flag == "" {
+			add("hooks.flag", "required when capabilities.hooks is config-override")
+		}
+		switch {
+		case h.Key == "":
+			add("hooks.key", "required when capabilities.hooks is config-override")
+		case !onlyChars(h.Key, "_-."):
+			add("hooks.key", fmt.Sprintf("%q must be letters, digits, _, - and .", h.Key))
+		}
+		if !validKind(h.Kind) {
+			add("hooks.kind", fmt.Sprintf("unknown event kind %q", h.Kind))
 		}
 	}
 	return errs
