@@ -3,6 +3,9 @@ binary = "claude"
 version_check = ["claude", "--version"]
 # Help commands `cairn agents doctor` reads to check the flags used exist.
 probe_flags = [["claude", "--help"], ["claude", "agents", "--help"]]
+# Flags that skip permission checks: a profile or command using one is
+# allowed only in a project with i_understand_the_risk = true.
+risky_flags = ["--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--permission-mode bypassPermissions"]
 
 [capabilities]
 name_at_start = true

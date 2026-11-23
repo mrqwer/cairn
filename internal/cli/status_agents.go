@@ -20,6 +20,16 @@ type agentsStatus struct {
 	// running is counted as stopped: it is left over from a crash or reboot.
 	Counts  map[string]int      `json:"counts"`
 	Waiting []waitingConvStatus `json:"waiting"`
+	// Risky are the conversations launched with flags that skip the
+	// tool's permission checks (the "!" badge).
+	Risky []riskyConvStatus `json:"risky"`
+}
+
+type riskyConvStatus struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Project string `json:"project"`
+	State   string `json:"state"`
 }
 
 type waitingConvStatus struct {
@@ -50,7 +60,7 @@ func stateOf(c conv.Conversation) string {
 // it never calls tmux or a tool. liveOnly reads the overlays of records in
 // a live state only and counts nothing else (enough for the badge).
 func readAgentsStatus(s conv.Store, liveOnly bool) (agentsStatus, error) {
-	st := agentsStatus{Counts: map[string]int{}, Waiting: []waitingConvStatus{}}
+	st := agentsStatus{Counts: map[string]int{}, Waiting: []waitingConvStatus{}, Risky: []riskyConvStatus{}}
 	var cs []conv.Conversation
 	var err error
 	if liveOnly {
@@ -67,6 +77,9 @@ func readAgentsStatus(s conv.Store, liveOnly bool) (agentsStatus, error) {
 			state = conv.StateStopped
 		}
 		st.Counts[state]++
+		if c.Risk {
+			st.Risky = append(st.Risky, riskyConvStatus{ID: c.ID, Name: c.Name, Project: c.Project, State: state})
+		}
 		if state == conv.StateWaiting {
 			st.Waiting = append(st.Waiting, waitingConvStatus{ID: c.ID, Name: c.Name, Project: c.Project, Task: c.Task, Reason: c.WaitingReason})
 		}
@@ -107,6 +120,12 @@ func printStatusTmux(out, errOut io.Writer) {
 		return
 	}
 	if b := st.badge(); b != "" {
+		for _, r := range st.Risky {
+			if r.State == conv.StateWorking || r.State == conv.StateWaiting {
+				b = "! " + b
+				break
+			}
+		}
 		_, _ = fmt.Fprintln(out, b)
 	}
 }
@@ -128,6 +147,14 @@ func printAgentsStatus(w io.Writer, st agentsStatus) {
 			name = c.ID
 		}
 		_, _ = fmt.Fprintf(w, "  waiting  %s %s %s\n", ui.Pad(name, 24), ui.Pad(c.Project, 12), c.Reason)
+	}
+	for _, c := range st.Risky {
+		name := c.Name
+		if name == "" {
+			name = c.ID
+		}
+		_, _ = fmt.Fprintf(w, "  ! %s %s %s, launched with flags that skip permission checks\n",
+			ui.Pad(ui.SafeLine(name), 24), ui.Pad(ui.SafeLine(c.Project), 12), c.State)
 	}
 }
 

@@ -5,6 +5,9 @@ binary = "codex"
 version_check = ["codex", "--version"]
 # Help commands `cairn agents doctor` reads to check the flags used exist.
 probe_flags = [["codex", "--help"], ["codex", "resume", "--help"]]
+# Flags that skip approvals or the sandbox: allowed only in a project with
+# i_understand_the_risk = true.
+risky_flags = ["--dangerously-bypass-approvals-and-sandbox", "--yolo", "--sandbox danger-full-access"]
 
 [capabilities]
 resume_by_id = true
@@ -18,6 +21,11 @@ resume = ["codex", "resume", "{native_id}", "{profile_args...}"]
 [profile_flags]
 model = ["--model", "{value}"]
 permission_mode = ["--ask-for-approval", "{value}"]
+sandbox = ["--sandbox", "{value}"]
+
+# Sandbox is on by default; a profile may choose another mode.
+[profile_defaults]
+sandbox = "workspace-write"
 
 [history]
 locator = "~/.codex/sessions/*/*/*/*-{native_id}.jsonl"

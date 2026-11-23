@@ -35,18 +35,22 @@ type Usage struct {
 // Conversation is one agent conversation (spec §9.3). Pane is the @cairn_p
 // key of the owning pane, not a tmux id.
 type Conversation struct {
-	ID               string     `json:"id"`
-	Tool             string     `json:"tool,omitempty"`
-	NativeID         string     `json:"native_id,omitempty"`
-	Name             string     `json:"name,omitempty"`
-	Purpose          string     `json:"purpose,omitempty"`
-	Tags             []string   `json:"tags,omitempty"`
-	Project          string     `json:"project,omitempty"`
-	Task             string     `json:"task,omitempty"`
-	Cwd              string     `json:"cwd,omitempty"`
-	Worktree         string     `json:"worktree,omitempty"`
-	Branch           string     `json:"branch,omitempty"`
-	Profile          string     `json:"profile,omitempty"`
+	ID       string   `json:"id"`
+	Tool     string   `json:"tool,omitempty"`
+	NativeID string   `json:"native_id,omitempty"`
+	Name     string   `json:"name,omitempty"`
+	Purpose  string   `json:"purpose,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
+	Project  string   `json:"project,omitempty"`
+	Task     string   `json:"task,omitempty"`
+	Cwd      string   `json:"cwd,omitempty"`
+	Worktree string   `json:"worktree,omitempty"`
+	Branch   string   `json:"branch,omitempty"`
+	Profile  string   `json:"profile,omitempty"`
+	// Risk is set when the conversation was launched (or created) with
+	// flags that skip the tool's permission checks or sandbox, allowed by
+	// the project's i_understand_the_risk; it is shown as a "!" badge.
+	Risk             bool       `json:"risk,omitempty"`
 	LaunchArgv       []string   `json:"launch_argv,omitempty"`
 	State            string     `json:"state,omitempty"`
 	StateSource      string     `json:"state_source,omitempty"`

@@ -10,9 +10,16 @@ type Adapter struct {
 	Capabilities Capabilities        `toml:"capabilities"`
 	Commands     map[string][]string `toml:"commands"`
 	ProfileFlags map[string][]string `toml:"profile_flags"`
-	Env          Env                 `toml:"env"`
-	History      History             `toml:"history"`
-	Hooks        HookConfig          `toml:"hooks"`
+	// ProfileDefaults are profile settings used when the profile does not
+	// set them: sandbox is on by default for a tool that has a sandbox flag.
+	ProfileDefaults map[string]string `toml:"profile_defaults"`
+	// RiskyFlags are arguments that skip the tool's permission checks or
+	// sandbox, as "--flag" or "--flag value"; a profile or command using one
+	// needs i_understand_the_risk in the project.
+	RiskyFlags []string   `toml:"risky_flags"`
+	Env        Env        `toml:"env"`
+	History    History    `toml:"history"`
+	Hooks      HookConfig `toml:"hooks"`
 	// ProbeFlags are help commands (each must contain --help, -h or help)
 	// whose output `cairn agents doctor` searches for the flags and
 	// subcommands the commands use; the first is the top-level help, where

@@ -1,5 +1,23 @@
 # Agents guide
 
+## Quickstart
+
+1. Check the tools: `cairn agents doctor` (a tool that is not installed is a skip, not a failure).
+2. Optionally define profiles in `~/.config/cairn/profiles.toml` and pick a project default:
+   `cairn agents profile default careful --project api`.
+3. Start a conversation: `cairn agents new claude --project api --name "fix login" [--profile careful]`.
+4. Open it: `cairn open api` (the tool starts on first attach), or later `cairn agents resume "fix login"`.
+5. See who needs you: `cairn agents ls`, `cairn status` (`!` marks a conversation with risky flags).
+6. Work in a task: `cairn task new "Fix login" --worktree`, then `cairn task review fix-login`.
+7. Finish it: `cairn task finish fix-login --merge` (or `--pr`, `--abandon`), then
+   `cairn task record fix-login --edit`.
+8. Find old work: `cairn agents import`, then `cairn agents find login retry`.
+9. See what it cost: `cairn agents usage --by project` (estimates; needs the optional `ccusage`).
+
+Tools are described by adapters (`claude`, `codex`, `agy` built in; your own or overrides in
+`~/.config/cairn/tools/<name>.toml`). Records are an append-only file,
+`~/.local/state/cairn/agents/conversations.jsonl` (no database); the last line per id wins.
+
 ## Conversations in panes
 
 ```
@@ -224,3 +242,45 @@ index, it says so and waits up to 30 s, then searches the index as it stands.
   that is not a transcript, a symlink, or over 256 MiB is listed under "skipped" with the reason. A tool
   whose parser cairn does not know (codex for now) is reported once and skipped; a tool without
   `history.locator` (agy) is not indexed. None of these is an error exit.
+
+## Profiles and safety
+
+```toml
+# ~/.config/cairn/profiles.toml
+[profiles.careful]
+model = "opus"
+permission_mode = "plan"
+sandbox = "read-only"
+```
+
+- Keys: `model`, `effort`, `permission_mode`, `sandbox`, `mcp_set`. Values are passed as given; each
+  adapter maps a key to its tool's flags (`[profile_flags]`). A key a tool cannot express is reported
+  and left out. An unknown key, a non-string value or a value starting with `-` keeps that profile from
+  loading (`cairn agents profile ls` and `cairn agents doctor` show why).
+- The profile of a launch is the conversation's `--profile`, else its task's (`task new --profile`),
+  else the project's `default_profile` (`cairn agents profile default <name> --project p`, undoable;
+  `--clear` removes it). It is resolved again at each launch.
+- Sandbox is on by default where the tool has a sandbox flag (codex: `--sandbox workspace-write`); a
+  profile may pick another mode.
+- Flags that skip permission checks or the sandbox (`risky_flags` of the adapter, plus the known ones:
+  `--dangerously-skip-permissions`, `--permission-mode bypassPermissions`,
+  `--dangerously-bypass-approvals-and-sandbox`, `--sandbox danger-full-access`, ...) are refused unless
+  the project file says so itself:
+
+  ```toml
+  [agents]
+  i_understand_the_risk = true
+  ```
+
+  There is no global switch and no command sets it (edit the file: `cairn project edit api`). Removing it
+  stops the next launch. Such conversations carry `!` in `agents ls` and `status` (and `status --tmux`
+  while one works or waits), and
+  `agents doctor` lists every project that allows them.
+
+## Usage
+
+`cairn agents usage [--by tool|project|task] [--json]` sums tokens and cost over all conversations.
+Figures come from the tool's own record when it has one, else from `ccusage` (optional; run as
+`ccusage session --json --offline`, no shell, stopped after 30 s, matched by the tool's session id).
+Without `ccusage` it says `unavailable` and exits 0; output it cannot read is a warning. Every dollar
+figure is an estimate, not a bill. Quota and limit status is not shown yet.

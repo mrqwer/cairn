@@ -120,3 +120,16 @@ func TestTaskEncodeDecode(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskProfileValidated(t *testing.T) {
+	tk := Task{ID: "01JTEST0000000000000000000", Title: "x", Slug: "x", Project: "demo", Profile: "careful",
+		Repos:     []Repo{{Repo: "/home/u/src/demo", Branch: "task/x"}},
+		Isolation: IsolationHere, Status: StatusOpen}
+	if err := tk.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	tk.Profile = "-x"
+	if err := tk.Validate(); err == nil || !strings.Contains(err.Error(), "profile") {
+		t.Fatalf("a bad profile name must be refused: %v", err)
+	}
+}

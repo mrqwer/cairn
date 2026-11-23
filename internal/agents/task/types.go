@@ -70,6 +70,9 @@ type Task struct {
 	Isolation string    `toml:"isolation"`
 	Status    string    `toml:"status"`
 	CreatedAt time.Time `toml:"created_at"`
+	// Profile is the agent profile of the task's conversations unless a
+	// conversation names its own.
+	Profile string `toml:"profile,omitempty"`
 }
 
 // Window is the key of the tmux window of a task in its project.
@@ -172,6 +175,9 @@ func (t Task) Validate() error {
 	}
 	if strings.ContainsFunc(t.Title, func(c rune) bool { return c < ' ' || c == 0x7f }) {
 		add("title contains control characters")
+	}
+	if t.Profile != "" && !projectRe.MatchString(t.Profile) {
+		add("profile %q is not a valid profile name", t.Profile)
 	}
 	switch t.Status {
 	case StatusOpen, StatusReview, StatusDone, StatusAbandoned:

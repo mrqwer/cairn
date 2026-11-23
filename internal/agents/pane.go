@@ -25,8 +25,9 @@ type PaneEnv struct {
 	Store   conv.Store
 	Adapter func(name string) (adapter.Adapter, bool)
 	// ProfileArgs returns the tool flags of the conversation's profile (nil
-	// is no flags).
-	ProfileArgs func(conv.Conversation, adapter.Adapter) []string
+	// is no flags); an error (an unknown profile, risky flags the project
+	// has not acknowledged) is printed and the tool is not started.
+	ProfileArgs func(conv.Conversation, adapter.Adapter) ([]string, error)
 	// Attached reports whether the pane's tmux session has a client (R9).
 	Attached func(ctx context.Context) (bool, error)
 	// Run runs the tool in the pane's terminal and returns its exit status.
@@ -236,7 +237,10 @@ func launch(ctx context.Context, env PaneEnv, a adapter.Adapter, id string) conv
 
 	var profile []string
 	if env.ProfileArgs != nil {
-		profile = env.ProfileArgs(c, a)
+		if profile, err = env.ProfileArgs(c, a); err != nil {
+			env.printf("%s: not started: %v\n", title(c), err)
+			return c
+		}
 	}
 	var argv []string
 	var disc *Discovery

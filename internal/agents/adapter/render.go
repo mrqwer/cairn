@@ -231,6 +231,36 @@ func (a Adapter) Validate() []FieldError {
 			}
 		}
 	}
+	return append(errs, a.validateProfile()...)
+}
+
+// validateProfile checks profile_defaults and risky_flags: a default needs
+// a flag to map it, is not a flag itself, and a tool with a sandbox flag
+// must say what "on" is (sandbox is on by default, spec §9.7).
+func (a Adapter) validateProfile() []FieldError {
+	var errs []FieldError
+	keys := make([]string, 0, len(a.ProfileDefaults))
+	for k := range a.ProfileDefaults {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := a.ProfileDefaults[k]
+		switch {
+		case len(a.ProfileFlags[k]) == 0:
+			errs = append(errs, FieldError{"profile_defaults." + k, "needs profile_flags." + k})
+		case v == "" || strings.HasPrefix(v, "-") || strings.ContainsAny(v, "\x00\n\r\t"):
+			errs = append(errs, FieldError{"profile_defaults." + k, fmt.Sprintf("%q must be a value, not empty or starting with \"-\"", v)})
+		}
+	}
+	if len(a.ProfileFlags["sandbox"]) > 0 && a.ProfileDefaults["sandbox"] == "" {
+		errs = append(errs, FieldError{"profile_defaults.sandbox", "required when profile_flags.sandbox is set (sandbox is on by default)"})
+	}
+	for i, f := range a.RiskyFlags {
+		if !strings.HasPrefix(f, "-") || strings.Count(f, " ") > 1 {
+			errs = append(errs, FieldError{fmt.Sprintf("risky_flags[%d]", i), fmt.Sprintf("must be \"--flag\" or \"--flag value\", got %q", f)})
+		}
+	}
 	return errs
 }
 

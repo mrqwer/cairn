@@ -47,6 +47,9 @@ func (p Project) Validate() []FieldError {
 	default:
 		add("status", "%q must be active, paused or archived", p.Status)
 	}
+	if d := p.Agents.DefaultProfile; d != "" && !slugRe.MatchString(d) {
+		add("agents.default_profile", "%q must be a profile name matching [a-z0-9][a-z0-9_-]{0,62}", d)
+	}
 	if len(p.Windows) == 0 {
 		add("windows", "at least one window is required")
 	}

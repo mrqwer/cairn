@@ -347,7 +347,7 @@ func quoteArgv(argv []string) string {
 }
 
 func newTaskNewCmd() *cobra.Command {
-	var project, tool, from string
+	var project, tool, from, profileName string
 	var approveSetup string
 	var worktree, here bool
 	cmd := &cobra.Command{
@@ -389,6 +389,15 @@ func newTaskNewCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// The profile is checked before any git work: an unknown one,
+			// or risky flags the project has not acknowledged, stop here.
+			if err := checkProfileFlag(profileName); err != nil {
+				return err
+			}
+			setup, err := e.launchProfile(a, p, "", profileName)
+			if err != nil {
+				return err
+			}
 			if from != "" {
 				if err := task.CheckRef(from); err != nil {
 					return fmt.Errorf("--from: %w", err)
@@ -408,13 +417,16 @@ func newTaskNewCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return createTask(cmd, e, a.Name, a.Capabilities.PreassignID, t, approveSetup, out, unlock)
+			t.Profile = profileName
+			setup.report(out, a.Name, p.ID)
+			return createTask(cmd, e, a.Name, a.Capabilities.PreassignID, len(setup.risky) > 0, t, approveSetup, out, unlock)
 		},
 	}
 	f := cmd.Flags()
 	f.StringVar(&project, "project", "", "project (default: the one containing the current directory)")
 	f.StringVar(&tool, "tool", defaultTaskTool, "agent tool")
 	f.StringVar(&from, "from", "", "start the branch here (default: the checkout's current branch)")
+	f.StringVar(&profileName, "profile", "", "agent profile of the task's conversations (default: the project's default_profile)")
 	f.BoolVar(&worktree, "worktree", false, "work in a new git worktree")
 	f.BoolVar(&here, "here", false, "work in the project's main checkout")
 	f.StringVar(&approveSetup, "approve-setup", "", "approve the repo's setup command whose shown hash starts with this (at least 8 digits)")
@@ -535,7 +547,7 @@ func planTask(ctx context.Context, e *agentsEnv, st taskSettings, p workspace.Pr
 // setup, conversation, then the task file and the window binding as one
 // history event. A failure before that event compensates every git change
 // (journalled, so a crash is cleaned up by the next task command).
-func createTask(cmd *cobra.Command, e *agentsEnv, tool string, preassign bool, t task.Task, approveSetup string, out io.Writer, unlock func()) (err error) {
+func createTask(cmd *cobra.Command, e *agentsEnv, tool string, preassign, risk bool, t task.Task, approveSetup string, out io.Writer, unlock func()) (err error) {
 	ctx := ctxOf(cmd)
 	r := t.Repos[0]
 	g := newGit(ctx, r.Repo)
@@ -653,7 +665,7 @@ func createTask(cmd *cobra.Command, e *agentsEnv, tool string, preassign bool, t
 
 	now := time.Now().UTC()
 	c := conv.Conversation{ID: conv.NewID(now, nil), Tool: tool, Name: t.Slug, Purpose: t.Title, Project: t.Project, Task: t.ID,
-		Cwd: workdir, Worktree: r.Worktree, Branch: r.Branch, State: conv.StateStarting, CreatedAt: now, LastActivityAt: now}
+		Cwd: workdir, Worktree: r.Worktree, Branch: r.Branch, Risk: risk, State: conv.StateStarting, CreatedAt: now, LastActivityAt: now}
 	if preassign {
 		c.NativeID = agents.NewNativeID()
 	}

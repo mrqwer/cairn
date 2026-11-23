@@ -23,6 +23,7 @@ import (
 	"github.com/mrqwer/cairn/internal/agents/adapter"
 	"github.com/mrqwer/cairn/internal/agents/conv"
 	"github.com/mrqwer/cairn/internal/agents/hooks"
+	"github.com/mrqwer/cairn/internal/agents/profile"
 	"github.com/mrqwer/cairn/internal/agents/task"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/history"
@@ -543,11 +544,11 @@ func jumpToPane(cmd *cobra.Command, project, key string) error {
 func newAgentsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "agents",
-		Short: "AI agent conversations: start, resume, list, find, import, name, tag, archive, remove",
+		Short: "AI agent conversations: start, resume, list, find, import, name, tag, archive, remove, profiles, usage",
 	}
 	cmd.AddCommand(newAgentsNewCmd(), newAgentsResumeCmd(), newAgentsLsCmd(), newAgentsNameCmd(),
 		newAgentsTagCmd(), newAgentsArchiveCmd(), newAgentsRmCmd(), newAgentsPaneCmd(), newAgentsDoctorCmd(),
-		newAgentsImportCmd(), newAgentsFindCmd(), newAgentsIndexCmd())
+		newAgentsImportCmd(), newAgentsFindCmd(), newAgentsIndexCmd(), newAgentsProfileCmd(), newAgentsUsageCmd())
 	return cmd
 }
 
@@ -568,7 +569,7 @@ func projectOfDir(ws *wsState, dir string) (workspace.Project, bool) {
 }
 
 func newAgentsNewCmd() *cobra.Command {
-	var name, project, taskRef, profile, cwd string
+	var name, project, taskRef, profileName, cwd string
 	var now bool
 	cmd := &cobra.Command{
 		Use:   "new <tool>",
@@ -634,9 +635,16 @@ func newAgentsNewCmd() *cobra.Command {
 			if err := checkConvName(name, true); err != nil {
 				return err
 			}
+			if err := checkProfileFlag(profileName); err != nil {
+				return err
+			}
+			setup, err := e.launchProfile(a, p, profileName, tk.Profile)
+			if err != nil {
+				return err
+			}
 			t := time.Now().UTC()
 			c := conv.Conversation{ID: conv.NewID(t, nil), Tool: a.Name, Name: name, Project: p.ID, Task: tk.ID,
-				Cwd: cwd, Profile: profile, State: conv.StateStarting, CreatedAt: t, LastActivityAt: t}
+				Cwd: cwd, Profile: profileName, Risk: len(setup.risky) > 0, State: conv.StateStarting, CreatedAt: t, LastActivityAt: t}
 			if tk.ID != "" {
 				c.Worktree, c.Branch = tk.Repos[0].Worktree, tk.Repos[0].Branch
 			}
@@ -663,10 +671,8 @@ func newAgentsNewCmd() *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			_, _ = fmt.Fprintf(out, "created agent %s (%s, %s) in %s, pane %s\n", c.Name, c.ID, a.Name, p.ID, key)
+			setup.report(out, a.Name, p.ID)
 			e.admitNew(out, cmd.ErrOrStderr(), c)
-			if profile != "" {
-				_, _ = fmt.Fprintf(out, "note: profile %s is recorded; profiles are not applied to the tool yet\n", profile)
-			}
 			running, err := applyProject(cmd, p.ID, false)
 			if err != nil {
 				return err
@@ -683,7 +689,7 @@ func newAgentsNewCmd() *cobra.Command {
 	f.StringVar(&name, "name", "", "conversation name (default: <tool>-<id suffix>)")
 	f.StringVar(&project, "project", "", "project (default: the one containing the current directory)")
 	f.StringVar(&taskRef, "task", "", "task (id or slug): its project, worktree and window")
-	f.StringVar(&profile, "profile", "", "profile name")
+	f.StringVar(&profileName, "profile", "", "profile (default: the task's, else the project's default_profile; see: cairn agents profile ls)")
 	f.StringVar(&cwd, "cwd", "", "working directory of the tool (default: the project root)")
 	f.BoolVar(&now, "now", false, "start the tool at once instead of on first attach")
 	return cmd
@@ -778,6 +784,8 @@ type lsJSON struct {
 	State          string    `json:"state"`
 	Tags           []string  `json:"tags"`
 	Pane           string    `json:"pane"`
+	Profile        string    `json:"profile"`
+	Risk           bool      `json:"risk"`
 	Archived       bool      `json:"archived"`
 	CreatedAt      time.Time `json:"created_at"`
 	LastActivityAt time.Time `json:"last_activity_at"`
@@ -818,7 +826,7 @@ func newAgentsLsCmd() *cobra.Command {
 						tags = []string{}
 					}
 					rows = append(rows, lsJSON{ID: c.ID, Name: c.Name, Purpose: c.Purpose, Tool: c.Tool, NativeID: c.NativeID,
-						Project: c.Project, Task: c.Task, State: c.State, Tags: tags, Pane: c.Pane,
+						Project: c.Project, Task: c.Task, State: c.State, Tags: tags, Pane: c.Pane, Profile: c.Profile, Risk: c.Risk,
 						Archived: c.ArchivedAt != nil || c.State == conv.StateArchived, CreatedAt: c.CreatedAt, LastActivityAt: c.LastActivityAt})
 				}
 				return writeJSON(out, rows)
@@ -828,7 +836,7 @@ func newAgentsLsCmd() *cobra.Command {
 				return nil
 			}
 			st, styled := styleFor(out)
-			head := fmt.Sprintf("%s %s %s %s %s %s", ui.Pad("ID", 26), ui.Pad("NAME", 28), ui.Pad("TOOL", 8),
+			head := fmt.Sprintf("  %s %s %s %s %s %s", ui.Pad("ID", 26), ui.Pad("NAME", 28), ui.Pad("TOOL", 8),
 				ui.Pad("PROJECT", 14), ui.Pad("STATE", 9), "TAGS")
 			if styled {
 				head = st.Dim(head)
@@ -839,7 +847,11 @@ func newAgentsLsCmd() *cobra.Command {
 				if c.ArchivedAt != nil {
 					state = conv.StateArchived
 				}
-				_, _ = fmt.Fprintf(out, "%s %s %s %s %s %s\n", ui.Pad(c.ID, 26), ui.Pad(ui.SafeLine(c.Name), 28), ui.Pad(ui.SafeLine(c.Tool), 8),
+				badge := ui.Pad(profile.Badge(c.Risk), 1)
+				if styled && c.Risk {
+					badge = st.Yellow(badge)
+				}
+				_, _ = fmt.Fprintf(out, "%s %s %s %s %s %s %s\n", badge, ui.Pad(c.ID, 26), ui.Pad(ui.SafeLine(c.Name), 28), ui.Pad(ui.SafeLine(c.Tool), 8),
 					ui.Pad(ui.SafeLine(c.Project), 14), ui.Pad(state, 9), ui.SafeLine(strings.Join(c.Tags, ",")))
 			}
 			return nil
@@ -1209,7 +1221,8 @@ func newAgentsPaneCmd() *cobra.Command {
 				Hooks: func(a adapter.Adapter, c conv.Conversation) ([]string, error) {
 					return hooks.Inject(a, c.ID, agentSelf(), e.dirs, wsRoot)
 				},
-				Activity: terminalActivity(cmd.InOrStdin()),
+				Activity:    terminalActivity(cmd.InOrStdin()),
+				ProfileArgs: e.paneProfileArgs(cmd.OutOrStdout()),
 				Close: func(c conv.Conversation) error {
 					return e.unbind(cmd, c, nil, "agents.close", "close agent pane of "+convTitle(c), drv)
 				},

@@ -60,13 +60,23 @@ type Window struct {
 
 // Project is the config of one managed tmux session.
 type Project struct {
-	ID      string   `toml:"id"`
-	Name    string   `toml:"name"`
-	Root    string   `toml:"root"`
-	Session string   `toml:"session"`
-	Status  string   `toml:"status"`
-	Tags    []string `toml:"tags"`
-	Windows []Window `toml:"windows"`
+	ID      string        `toml:"id"`
+	Name    string        `toml:"name"`
+	Root    string        `toml:"root"`
+	Session string        `toml:"session"`
+	Status  string        `toml:"status"`
+	Tags    []string      `toml:"tags"`
+	Windows []Window      `toml:"windows"`
+	Agents  ProjectAgents `toml:"agents"`
+}
+
+// ProjectAgents are the agent settings of a project ([agents]): the
+// profile used when neither the conversation nor its task names one, and
+// the acknowledgement that lets profiles pass flags that skip a tool's
+// permission checks (only per project, never global; spec §9.7).
+type ProjectAgents struct {
+	DefaultProfile     string `toml:"default_profile"`
+	IUnderstandTheRisk bool   `toml:"i_understand_the_risk"`
 }
 
 var (

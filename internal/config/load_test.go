@@ -343,3 +343,13 @@ func TestRecordKeys(t *testing.T) {
 		t.Fatalf("no error: %v", got)
 	}
 }
+
+// The acknowledgement of risky agent flags exists per project only; the
+// global config must refuse it (spec §9.7).
+func TestGlobalRiskAcknowledgementRefused(t *testing.T) {
+	root := fsx.Root{Dir: t.TempDir()}
+	write(t, root, filepath.Join(testDirs.Config, "cairn.toml"), "[agents]\ni_understand_the_risk = true\n")
+	if _, _, err := config.Load(root, testDirs, env(nil)); err == nil || !strings.Contains(err.Error(), "i_understand_the_risk") {
+		t.Fatalf("a global i_understand_the_risk must be an error, got %v", err)
+	}
+}

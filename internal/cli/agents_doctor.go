@@ -55,6 +55,9 @@ func probeAgents(ctx context.Context, tool string) ([]agentsdoctor.Finding, erro
 	for _, n := range names {
 		out = append(out, agentsdoctor.Probe(ctx, e.adapters[n], run, agentLookPath)...)
 	}
+	if tool == "" {
+		out = append(out, e.profileFindings()...)
+	}
 	return out, nil
 }
 
@@ -126,6 +129,12 @@ var agentsChecks = func(ctx context.Context) ([]doctor.Check, error) {
 		switch f.Level {
 		case agentsdoctor.LevelWarn:
 			r.Status, r.Fix = doctor.Warn, "check the adapter against this tool version: cairn agents doctor --tool "+f.Tool
+			switch {
+			case f.Tool == "profiles" && f.Check == "risk":
+				r.Fix = "remove i_understand_the_risk from the project file unless you mean it (cairn project edit <id>)"
+			case f.Tool == "profiles":
+				r.Fix = "fix profiles.toml in the config dir (see: cairn agents profile ls)"
+			}
 		case agentsdoctor.LevelFail:
 			r.Status, r.Fix = doctor.Crit, "cairn agents doctor --tool "+f.Tool
 			if f.Check == "load" {
