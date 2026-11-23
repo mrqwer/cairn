@@ -2,12 +2,13 @@ package doctor_test
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -15,8 +16,6 @@ import (
 	"github.com/mrqwer/cairn/internal/agents/doctor"
 	"github.com/mrqwer/cairn/internal/agents/testtool"
 	"github.com/mrqwer/cairn/internal/execx"
-	"github.com/mrqwer/cairn/internal/fsx"
-	"github.com/mrqwer/cairn/internal/xdg"
 )
 
 const fullHelp = `Usage: fake [options] [command]
@@ -232,7 +231,7 @@ func TestProbeListNotRunWhenSubcommandMissing(t *testing.T) {
 	help := strings.Replace(fullHelp, "  agents [options]   --json --all\n", "", 1)
 	bin, log := fakeTool(t, testtool.Spec{Version: "fake 3", Help: help, ListJSON: `[]`})
 	fs := doctor.Probe(context.Background(), fakeAdapter(bin), execx.OSRunner{}, exec.LookPath)
-	if f := one(t, fs, "list"); f.Level != "warn" || !strings.Contains(f.Detail, "not run") {
+	if f := one(t, fs, "list"); f.Level != "skip" || !strings.Contains(f.Detail, "not run") {
 		t.Fatalf("list %+v", f)
 	}
 	if f := one(t, fs, "subcommand"); f.Level != "warn" || f.Detail != "subcommand agents not in help of fake 3" {
@@ -355,74 +354,155 @@ func TestProbeHelpUnreadableWarns(t *testing.T) {
 	}
 }
 
-func TestConformanceBuiltins(t *testing.T) {
+// listCalls are the logged calls of the list subcommand.
+func listCalls(t *testing.T, log string) [][]string {
+	t.Helper()
+	data, _ := os.ReadFile(log)
+	var out [][]string
+	for _, c := range parseCalls(string(data)) {
+		if len(c) > 0 && c[0] == "agents" && !slices.Contains(c, "--help") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// Without help to check the list subcommand against, list is not run.
+func TestProbeListNotRunWithoutProbeFlags(t *testing.T) {
 	isolate(t)
-	as, lerrs, err := adapter.Load(fsx.Root{Dir: t.TempDir()}, xdg.Dirs{Config: "/cfg"})
-	if err != nil || len(lerrs) != 0 {
-		t.Fatalf("Load: %v %v", err, lerrs)
+	bin, log := fakeTool(t, testtool.Spec{Help: fullHelp, ListJSON: `[]`})
+	a := fakeAdapter(bin)
+	a.ProbeFlags = nil
+	fs := doctor.Probe(context.Background(), a, doctor.Runner{}, exec.LookPath)
+	if f := one(t, fs, "list"); f.Level != "skip" || !strings.Contains(f.Detail, "not run") {
+		t.Fatalf("list %+v", f)
 	}
-	seen := map[string]bool{}
-	for _, a := range as {
-		t.Run(a.Name, func(t *testing.T) {
-			fake, _ := fakeTool(t, testtool.Spec{Name: a.Name, ListJSON: `[{"id":"x"}]`})
-			doctor.Conformance(t, a, fake)
-		})
-		seen[a.Name] = true
+	if c := listCalls(t, log); len(c) != 0 {
+		t.Fatalf("list ran: %v", c)
 	}
-	for _, n := range []string{"claude", "codex", "agy"} {
-		if !seen[n] {
-			t.Errorf("built-in %s not covered", n)
+}
+
+func TestProbeListNotRunWhenHelpUnreadable(t *testing.T) {
+	isolate(t)
+	bin, log := fakeTool(t, testtool.Spec{Help: "", ListJSON: `[]`})
+	fs := doctor.Probe(context.Background(), fakeAdapter(bin), doctor.Runner{}, exec.LookPath)
+	if f := one(t, fs, "list"); f.Level != "skip" || !strings.Contains(f.Detail, "not run") {
+		t.Fatalf("list %+v", f)
+	}
+	if c := listCalls(t, log); len(c) != 0 {
+		t.Fatalf("list ran: %v", c)
+	}
+}
+
+// A subcommand mentioned only in prose (or in a wrapped description) is
+// not listed: list is not run.
+func TestProbeSubcommandInProseIsNotListed(t *testing.T) {
+	isolate(t)
+	help := strings.Replace(fullHelp, "  agents [options]   --json --all\n",
+		"Run fake agents to see sessions.\n                    agents, styles and more\n  --json --all\n", 1)
+	bin, log := fakeTool(t, testtool.Spec{Version: "fake 5", Help: help, ListJSON: `[]`})
+	fs := doctor.Probe(context.Background(), fakeAdapter(bin), doctor.Runner{}, exec.LookPath)
+	if f := one(t, fs, "subcommand"); f.Level != "warn" {
+		t.Fatalf("subcommand %+v", f)
+	}
+	if c := listCalls(t, log); len(c) != 0 {
+		t.Fatalf("list ran: %v", c)
+	}
+}
+
+// A version_check that does not look like a version query is not run.
+func TestProbeVersionCheckMustLookLikeVersion(t *testing.T) {
+	isolate(t)
+	bin, log := fakeTool(t, testtool.Spec{Help: fullHelp, ListJSON: `[]`})
+	a := fakeAdapter(bin)
+	a.VersionCheck = []string{bin, "chat"}
+	fs := doctor.Probe(context.Background(), a, doctor.Runner{}, exec.LookPath)
+	if f := one(t, fs, "version"); f.Level != "skip" || !strings.Contains(f.Detail, "not run") {
+		t.Fatalf("version %+v", f)
+	}
+	data, _ := os.ReadFile(log)
+	for _, c := range parseCalls(string(data)) {
+		if slices.Contains(c, "chat") {
+			t.Fatalf("version_check ran: %v", c)
 		}
 	}
 }
 
-// recorder captures Conformance failures so the suite itself is tested.
-type recorder struct {
-	testing.TB
-	msgs []string
-}
-
-func (r *recorder) Errorf(format string, args ...any) {
-	r.msgs = append(r.msgs, strings.TrimSpace(strings.ReplaceAll(fmt.Sprintf(format, args...), "\n", " ")))
-}
-func (r *recorder) Fatalf(format string, args ...any) {
-	r.Errorf(format, args...)
-	panic(errStop)
-}
-func (r *recorder) Helper() {}
-
-var errStop = errors.New("stop")
-
-func runRecorded(t *testing.T, a adapter.Adapter, fake string) []string {
-	t.Helper()
-	r := &recorder{TB: t}
-	func() {
-		defer func() {
-			if p := recover(); p != nil && p != errStop {
-				panic(p)
-			}
-		}()
-		doctor.Conformance(r, a, fake)
-	}()
-	return r.msgs
-}
-
-// The suite catches an adapter whose argv loses a placeholder value.
-func TestConformanceCatchesBrokenAdapter(t *testing.T) {
+// A wrapper that leaves a grandchild holding the output pipe is killed
+// with its whole process group, within the timeout plus a small bound.
+func TestProbeTimeoutKillsGrandchildren(t *testing.T) {
 	isolate(t)
-	fake, _ := fakeTool(t, testtool.Spec{ListJSON: `[]`})
-	a := fakeAdapter("fake")
-	for k, v := range a.Commands {
-		v = append([]string(nil), v...)
-		v[0] = "fake"
-		a.Commands[k] = v
+	old := doctor.Timeout
+	t.Cleanup(func() { doctor.Timeout = old })
+	doctor.Timeout = 200 * time.Millisecond
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	bin := filepath.Join(dir, "wrapper")
+	script := "#!/bin/sh\nsleep 30 &\necho $! > '" + pidFile + "'\nwait\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil { //nolint:gosec // test executable
+		t.Fatal(err)
 	}
-	if msgs := runRecorded(t, a, fake); len(msgs) != 0 {
-		t.Fatalf("a good adapter must pass: %v", msgs)
+	a := adapter.Adapter{Name: "wrap", Binary: bin, VersionCheck: []string{bin, "--version"},
+		Capabilities: adapter.Capabilities{Discovery: "none"}, Commands: map[string][]string{"start": {bin}}}
+	start := time.Now()
+	fs := doctor.Probe(context.Background(), a, doctor.Runner{}, exec.LookPath)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("probe took %v (a grandchild kept the pipe open)", d)
 	}
-	a.Commands["resume"] = []string{"fake", "--resume", "{name}"}
-	msgs := runRecorded(t, a, fake)
-	if len(msgs) == 0 || !strings.Contains(strings.Join(msgs, "|"), "resume") {
-		t.Fatalf("a resume without the id must fail: %v", msgs)
+	if f := one(t, fs, "version"); f.Level != "fail" || !strings.Contains(f.Detail, "timed out") {
+		t.Fatalf("version %+v", f)
+	}
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	deadline := time.Now().Add(2 * time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("grandchild %d survived the timeout", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestMinimalEnv(t *testing.T) {
+	env := map[string]string{"PATH": "/usr/bin", "HOME": "/home/u", "LANG": "C.UTF-8", "API_TOKEN": "x", "XDG_CONFIG_HOME": "/c"}
+	got := doctor.MinimalEnv(func(k string) string { return env[k] }, "/tmp/p")
+	want := []string{"PATH=/usr/bin", "HOME=/home/u", "LANG=C.UTF-8"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("env %q, want %q", got, want)
+	}
+	delete(env, "HOME")
+	delete(env, "LANG")
+	got = doctor.MinimalEnv(func(k string) string { return env[k] }, "/tmp/p")
+	if want := []string{"PATH=/usr/bin", "HOME=/tmp/p"}; !slices.Equal(got, want) {
+		t.Fatalf("env %q, want %q", got, want)
+	}
+}
+
+// Failure output can echo secrets: the detail is redacted and short.
+func TestProbeFailureDetailRedacted(t *testing.T) {
+	isolate(t)
+	bin := filepath.Join(t.TempDir(), "leaky")
+	secret := "sk-ant-abcdefghijklmnopqrstuvwxyz0123456789"
+	script := "#!/bin/sh\necho 'error: bad api_key=hunter2hunter2 token " + secret + " at https://user:pw@example.com/x " + strings.Repeat("y", 400) + "'\nexit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil { //nolint:gosec // test executable
+		t.Fatal(err)
+	}
+	a := adapter.Adapter{Name: "leaky", Binary: bin, VersionCheck: []string{bin, "--version"},
+		Capabilities: adapter.Capabilities{Discovery: "none"}, Commands: map[string][]string{"start": {bin}}}
+	f := one(t, doctor.Probe(context.Background(), a, doctor.Runner{}, exec.LookPath), "version")
+	if f.Level != "fail" {
+		t.Fatalf("version %+v", f)
+	}
+	for _, leak := range []string{"hunter2", secret, "user:pw", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"} {
+		if strings.Contains(f.Detail, leak) {
+			t.Fatalf("detail leaks %q: %s", leak, f.Detail)
+		}
+	}
+	if !strings.Contains(f.Detail, "[redacted]") {
+		t.Fatalf("detail %s", f.Detail)
 	}
 }

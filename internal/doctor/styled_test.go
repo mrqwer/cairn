@@ -34,3 +34,17 @@ func TestRenderStyledGroupsAndSummarises(t *testing.T) {
 		t.Errorf("groups not in first-seen order")
 	}
 }
+
+func TestRenderStyledSkip(t *testing.T) {
+	var b bytes.Buffer
+	RenderStyled(&b, []Result{
+		{ID: "agents.claude.binary", Title: "Agent tool claude binary", Status: Skip, Evidence: "not installed"},
+		{ID: "agents.codex.version", Title: "Agent tool codex version", Status: OK, Evidence: "1.0"},
+	}, ui.Style{Width: 100}, "cairn doctor")
+	out := b.String()
+	for _, want := range []string{"AGENT TOOLS", "–  Agent tool claude binary", "1 skipped · 1 ok"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}

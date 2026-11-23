@@ -12,7 +12,6 @@ import (
 
 	agentsdoctor "github.com/mrqwer/cairn/internal/agents/doctor"
 	"github.com/mrqwer/cairn/internal/doctor"
-	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/ui"
 )
 
@@ -51,7 +50,8 @@ func probeAgents(ctx context.Context, tool string) ([]agentsdoctor.Finding, erro
 		return nil, err
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
-	run := execx.OSRunner{Dir: tmp}
+	// Own process group (killed whole on timeout), minimal environment.
+	run := agentsdoctor.Runner{Dir: tmp, Env: agentsdoctor.MinimalEnv(os.Getenv, tmp)}
 	for _, n := range names {
 		out = append(out, agentsdoctor.Probe(ctx, e.adapters[n], run, agentLookPath)...)
 	}
@@ -114,7 +114,7 @@ func newAgentsDoctorCmd() *cobra.Command {
 }
 
 // agentsChecks are the agents section of `cairn doctor`: the probe
-// findings as results (fail is critical; skip is ok, "skipped: …").
+// findings as results (fail is critical, skip is skip).
 var agentsChecks = func(ctx context.Context) ([]doctor.Check, error) {
 	fs, err := probeAgents(ctx, "")
 	if err != nil {
@@ -132,7 +132,7 @@ var agentsChecks = func(ctx context.Context) ([]doctor.Check, error) {
 				r.Fix = "fix the adapter file " + f.Tool + " in the tools config dir"
 			}
 		case agentsdoctor.LevelSkip:
-			r.Evidence = "skipped: " + f.Detail
+			r.Status = doctor.Skip
 		}
 		id, title := "agents."+f.Tool+"."+f.Check, "Agent tool "+f.Tool+" "+f.Check
 		checks = append(checks, check{id, title, func(context.Context) doctor.Result { return r }})

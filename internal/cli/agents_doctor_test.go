@@ -170,7 +170,7 @@ func TestDoctorAgentsScope(t *testing.T) {
 	if r := got["agents.probe.list"]; r.Status != "CRIT" {
 		t.Fatalf("list %+v", r)
 	}
-	if r := got["agents.claude.binary"]; r.Status != "ok" || r.Evidence != "skipped: not installed" {
+	if r := got["agents.claude.binary"]; r.Status != "skip" || r.Evidence != "not installed" {
 		t.Fatalf("claude %+v", r)
 	}
 	for id := range got {
@@ -198,5 +198,26 @@ func TestDoctorScopesRunAgentsOnlyWhenAsked(t *testing.T) {
 	}
 	if out, _ := runDoctor(t, "doctor", "--json"); !strings.Contains(out, `"id": "agents.x.binary"`) || calls != 1 {
 		t.Fatalf("doctor without a scope must include agents:\n%s", out)
+	}
+}
+
+// Probe commands get a minimal environment: nothing else of the caller's
+// (tokens, keys) reaches the tool.
+func TestAgentsDoctorProbeEnvIsMinimal(t *testing.T) {
+	dir, _ := wsTestEnv(t)
+	t.Setenv("CAIRN_PROBE_SECRET", "s3cret")
+	bin := writeProbeAdapter(t, dir, testtool.Spec{Version: "probe 1.0", Help: doctorHelp, ListJSON: `[]`})
+	if out, _, err := runSplit(t, "agents", "doctor", "--tool", "probe"); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	data, err := os.ReadFile(bin + ".log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "ENV:") || strings.Contains(string(data), "CAIRN_PROBE_SECRET") {
+		t.Fatalf("probe env leaked:\n%s", data)
+	}
+	if !strings.Contains(string(data), "HOME="+dir+"\n") {
+		t.Fatalf("HOME must be kept:\n%s", data)
 	}
 }

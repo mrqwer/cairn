@@ -157,19 +157,27 @@ starts. `cairn agents archive`/`rm` take a waiting pane out of the queue.
 ## Checking the installed tools
 
 `cairn agents doctor [--tool <name>] [--json]` checks each tool against its adapter without starting a
-conversation. It runs only the version check, the help commands listed in `probe_flags` (each must
-contain `--help`, `-h` or `help`) and the `list` command, each with a 5 s limit in an empty temp dir.
+conversation. It runs only three kinds of command:
+
+- the version check, and only if it has a `--version`, `-v`, `-V` or `version` argument;
+- the help commands listed in `probe_flags` (each must contain `--help`, `-h` or `help`);
+- the `list` command, and only when the top-level help was read and lists its subcommand (an indented
+  line starting with it, not a word in prose). Otherwise `list` is a `skip` naming the reason.
+
+Each command runs directly (no shell) in an empty temp dir, in its own process group, which is killed
+whole after 5 s. Its environment is only `PATH`, `HOME` and `LANG`. Tool output quoted in a finding is
+cut short and secret-looking text (keys, tokens, URL credentials) is masked.
+
 It reports:
 
 - the binary and its version (a tool that is not installed is `skip`, not a failure);
 - that every declared capability has its command;
 - each flag and subcommand the commands use that is missing from the help of that version (`warn`).
   The hooks flag must be in the top-level help, because cairn passes it before any subcommand;
-- that the `list` output parses as JSON (empty output is accepted). `list` is not run when its
-  subcommand is missing from the help;
+- that the `list` output parses as JSON (empty output is accepted);
 - that the generated hook file (or `-c` override) is valid, in a temp dir that is removed;
 - what it cannot check without a running conversation (`hooks.delivery`: whether the tool merges the
   settings file and which events fire) as `skip`.
 
-The exit code is 1 only on a `fail`. `cairn doctor agents` shows the same findings, and `cairn doctor`
-includes them.
+The exit code is 1 only on a `fail`. `cairn doctor agents` shows the same findings (a skip is marked `–`
+and never fails), and `cairn doctor` includes them.

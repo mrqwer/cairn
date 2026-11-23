@@ -12,9 +12,10 @@ import (
 // groupTitles maps a check ID prefix (the part before the first dot) to the
 // section heading it is shown under.
 var groupTitles = map[string]string{
-	"host":  "Policy",
-	"sleep": "Sleep and hibernation",
-	"gpu":   "Graphics",
+	"host":   "Policy",
+	"sleep":  "Sleep and hibernation",
+	"gpu":    "Graphics",
+	"agents": "Agent tools",
 }
 
 func groupOf(id string) string {
@@ -33,6 +34,8 @@ func symbol(st ui.Style, s Status) string {
 		return st.Yellow("!")
 	case Crit:
 		return st.Red("✗")
+	case Skip:
+		return st.Dim("–")
 	default:
 		return st.Dim("?")
 	}
@@ -76,7 +79,7 @@ func RenderStyled(w io.Writer, rs []Result, st ui.Style, heading string) {
 			for _, l := range lines[min(1, len(lines)):] {
 				_, _ = fmt.Fprintf(w, "     %s   %s\n", strings.Repeat(" ", titleW), st.Dim(l))
 			}
-			if r.Status != OK && r.Fix != "" {
+			if r.Status != OK && r.Status != Skip && r.Fix != "" {
 				for i, l := range ui.Wrap(r.Fix, st.Width-10) {
 					arrow := "→"
 					if i > 0 {
@@ -97,6 +100,9 @@ func RenderStyled(w io.Writer, rs []Result, st ui.Style, heading string) {
 	}
 	if n := counts[Unknown]; n > 0 {
 		parts = append(parts, st.Dim(ui.Plural(n, "not checked", "not checked")))
+	}
+	if n := counts[Skip]; n > 0 {
+		parts = append(parts, st.Dim(fmt.Sprintf("%d skipped", n)))
 	}
 	parts = append(parts, st.Green(fmt.Sprintf("%d ok", counts[OK])))
 	_, _ = fmt.Fprintf(w, "\n %s\n\n", strings.Join(parts, st.Dim(" · ")))

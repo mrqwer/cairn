@@ -1,4 +1,7 @@
-package doctor
+// Package doctortest is the adapter conformance suite: it drives an adapter
+// against a fake tool (internal/agents/testtool). It is a separate package
+// so that the cairn binary does not link the testing package.
+package doctortest
 
 import (
 	"context"
@@ -6,12 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/mrqwer/cairn/internal/agents"
 	"github.com/mrqwer/cairn/internal/agents/adapter"
 	"github.com/mrqwer/cairn/internal/agents/conv"
+	"github.com/mrqwer/cairn/internal/agents/doctor"
 	"github.com/mrqwer/cairn/internal/agents/hooks"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/fsx"
@@ -280,17 +285,16 @@ func (cf *conformance) hooks() (args []string, selfLog string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := checkSettingsDoc(data, a.Hooks.Events); err != nil {
+		cmds, err := doctor.SettingsCommands(data, a.Hooks.Events)
+		if err != nil {
 			t.Fatalf("%s: hook file %v", a.Name, err)
 		}
-		var doc settingsDoc
-		_ = json.Unmarshal(data, &doc)
 		for _, e := range sortedKeys(a.Hooks.Events) {
 			cf.hookKinds = append(cf.hookKinds, a.Hooks.Events[e])
-			cf.hookCmds = append(cf.hookCmds, doc.Hooks[e][0].Hooks[0].Command)
+			cf.hookCmds = append(cf.hookCmds, cmds[e])
 		}
 	case "config-override":
-		key, argv, err := parseOverride(args[1])
+		key, argv, err := doctor.ParseOverride(args[1])
 		if err != nil || key != a.Hooks.Key {
 			t.Fatalf("%s: hook override %q: key %q, %v", a.Name, args[1], key, err)
 		}
@@ -343,3 +347,12 @@ func (cf *conformance) runHook(selfLog string) {
 }
 
 func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}

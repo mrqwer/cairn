@@ -87,8 +87,8 @@ func Probe(ctx context.Context, a adapter.Adapter, run execx.Runner, lookPath fu
 	p.checkCapabilities()
 	p.checkDiscovery()
 	p.checkHooks()
-	missing := p.checkHelp()
-	p.checkList(missing)
+	top := p.checkHelp()
+	p.checkList(top)
 	return p.out
 }
 
@@ -105,11 +105,35 @@ func (p *prober) exec(argv []string) (string, error) {
 	return string(out), err
 }
 
+// maxDetail bounds the tool output quoted in a finding, in runes.
+const maxDetail = 120
+
+// Patterns of secrets a tool may echo in an error: key=value pairs with a
+// secret-sounding key, URL credentials, bearer tokens and long opaque
+// tokens.
+var (
+	secretKV    = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*(?:key|token|secret|passw(?:or)?d|auth[A-Za-z]*|credential|cookie|session)[A-Za-z0-9_.-]*)(\s*[:=]\s*|\s+)("[^"]*"|'[^']*'|[^\s"',;]+)`)
+	urlUserinfo = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@`)
+	bearer      = regexp.MustCompile(`(?i)\b(bearer)\s+\S+`)
+	opaque      = regexp.MustCompile(`\b(?:sk|pk|ghp|gho|ghs|xox[abp]|glpat)[-_][A-Za-z0-9_-]{8,}|[A-Za-z0-9_+=-]{32,}`)
+)
+
+// redact masks secret-looking text in tool output.
+func redact(s string) string {
+	s = urlUserinfo.ReplaceAllString(s, "${1}[redacted]@")
+	s = bearer.ReplaceAllString(s, "$1 [redacted]")
+	s = secretKV.ReplaceAllString(s, "$1$2[redacted]")
+	return opaque.ReplaceAllString(s, "[redacted]")
+}
+
+// firstLine is the first non-empty line of tool output, redacted and cut
+// to maxDetail runes, for quoting in a finding.
 func firstLine(s string) string {
 	for _, l := range strings.Split(s, "\n") {
 		if l = strings.TrimSpace(l); l != "" {
-			if r := []rune(l); len(r) > 200 {
-				l = string(r[:200]) + "…"
+			l = redact(l)
+			if r := []rune(l); len(r) > maxDetail {
+				l = string(r[:maxDetail]) + "…"
 			}
 			return l
 		}
@@ -117,10 +141,26 @@ func firstLine(s string) string {
 	return ""
 }
 
+// versionQuery reports whether argv asks for a version, so running it
+// cannot start a conversation.
+func versionQuery(argv []string) bool {
+	for _, e := range argv[1:] {
+		switch e {
+		case "--version", "-v", "-V", "version":
+			return true
+		}
+	}
+	return false
+}
+
 func (p *prober) checkVersion() {
 	vc := p.a.VersionCheck
 	if len(vc) == 0 {
 		p.add("version", LevelSkip, "no version_check declared")
+		return
+	}
+	if !versionQuery(vc) {
+		p.add("version", LevelSkip, "not run: version_check %q has no --version, -v, -V or version argument", vc)
 		return
 	}
 	out, err := p.exec(vc)
@@ -227,7 +267,7 @@ func (p *prober) checkSettingsFile() {
 		p.add("hooks", LevelFail, "cannot read the generated hook file: %v", err)
 		return
 	}
-	if err := checkSettingsDoc(data, p.a.Hooks.Events); err != nil {
+	if _, err := SettingsCommands(data, p.a.Hooks.Events); err != nil {
 		p.add("hooks", LevelFail, "the generated hook file %v", err)
 		return
 	}
@@ -243,23 +283,25 @@ type settingsDoc struct {
 	} `json:"hooks"`
 }
 
-// checkSettingsDoc checks a claude-settings@1 file has exactly the events,
-// each with one command hook.
-func checkSettingsDoc(data []byte, events map[string]string) error {
+// SettingsCommands checks a claude-settings@1 file has exactly the events,
+// each with one command hook, and returns the command of each event.
+func SettingsCommands(data []byte, events map[string]string) (map[string]string, error) {
 	var doc settingsDoc
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return fmt.Errorf("is not valid JSON: %v", err)
+		return nil, fmt.Errorf("is not valid JSON: %v", err)
 	}
+	cmds := map[string]string{}
 	for e := range events {
 		g := doc.Hooks[e]
 		if len(g) != 1 || len(g[0].Hooks) != 1 || g[0].Hooks[0].Type != "command" || g[0].Hooks[0].Command == "" {
-			return fmt.Errorf("has no command hook for %s", e)
+			return nil, fmt.Errorf("has no command hook for %s", e)
 		}
+		cmds[e] = g[0].Hooks[0].Command
 	}
 	if len(doc.Hooks) != len(events) {
-		return fmt.Errorf("has %d events, want %d", len(doc.Hooks), len(events))
+		return nil, fmt.Errorf("has %d events, want %d", len(doc.Hooks), len(events))
 	}
-	return nil
+	return cmds, nil
 }
 
 // checkOverride checks the config override value parses as a TOML array.
@@ -273,7 +315,7 @@ func (p *prober) checkOverride() {
 		p.add("hooks", LevelFail, "hook arguments %q are not [flag, key=value]", args)
 		return
 	}
-	key, _, err := parseOverride(args[1])
+	key, _, err := ParseOverride(args[1])
 	if err != nil {
 		p.add("hooks", LevelFail, "the hook override %s %v", args[1], err)
 		return
@@ -281,8 +323,8 @@ func (p *prober) checkOverride() {
 	p.add("hooks", LevelOK, "the hook override %s=[…] parses as a TOML array", key)
 }
 
-// parseOverride splits key=<TOML array of strings>.
-func parseOverride(kv string) (string, []string, error) {
+// ParseOverride splits key=<TOML array of strings>.
+func ParseOverride(kv string) (string, []string, error) {
 	key, val, ok := strings.Cut(kv, "=")
 	if !ok {
 		return "", nil, errors.New("has no '='")
@@ -306,10 +348,48 @@ func sortedKeys[V any](m map[string]V) []string {
 	return out
 }
 
+func wordChar(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_' || b == '-'
+}
+
 // hasWord reports whether text mentions w as a whole word (--name is not
 // found in --names or --session-name).
 func hasWord(text, w string) bool {
-	return regexp.MustCompile(`(^|[^A-Za-z0-9_-])` + regexp.QuoteMeta(w) + `($|[^A-Za-z0-9_-])`).MatchString(text)
+	if w == "" {
+		return false
+	}
+	for i := 0; ; {
+		j := strings.Index(text[i:], w)
+		if j < 0 {
+			return false
+		}
+		start, end := i+j, i+j+len(w)
+		if (start == 0 || !wordChar(text[start-1])) && (end == len(text) || !wordChar(text[end])) {
+			return true
+		}
+		i = start + 1
+	}
+}
+
+// listsSubcommand reports whether help lists w as a subcommand: an indented
+// line (at most 8 columns) starting with w followed by the end of the
+// line, a column gap of two spaces, or " [" / " <" of its usage. A word in
+// prose or in a wrapped description does not count.
+func listsSubcommand(help, w string) bool {
+	for _, l := range strings.Split(help, "\n") {
+		l = strings.TrimRight(l, " \t\r")
+		rest := strings.TrimLeft(l, " \t")
+		indent := len(l) - len(rest)
+		if indent == 0 || indent > 8 || !strings.HasPrefix(rest, w) {
+			continue
+		}
+		after := rest[len(w):]
+		if after == "" || strings.HasPrefix(after, "  ") || strings.HasPrefix(after, "\t") ||
+			strings.HasPrefix(after, " [") || strings.HasPrefix(after, " <") {
+			return true
+		}
+	}
+	return false
 }
 
 // usedFlags lists the flags of the command and profile flag templates in a
@@ -360,12 +440,12 @@ func (p *prober) subcommands() []string {
 }
 
 // checkHelp reads the help commands and reports the flags and subcommands
-// the commands use that the help does not mention. It returns the missing
-// subcommands.
-func (p *prober) checkHelp() map[string]bool {
+// the commands use that the help does not mention. It returns the
+// top-level help, "" when there is none.
+func (p *prober) checkHelp() string {
 	if len(p.a.ProbeFlags) == 0 {
 		p.add("help", LevelSkip, "no probe_flags declared: flags are not checked")
-		return nil
+		return ""
 	}
 	texts := make([]string, len(p.a.ProbeFlags))
 	readAll := true
@@ -375,7 +455,7 @@ func (p *prober) checkHelp() map[string]bool {
 		if strings.TrimSpace(out) == "" || errors.Is(err, errTimeout) {
 			reason := "it printed nothing"
 			if err != nil {
-				reason = err.Error()
+				reason = redact(err.Error())
 			}
 			p.add("help", LevelWarn, "cannot read %s of %s: %s", strings.Join(argv, " "), p.version, reason)
 			readAll = false
@@ -384,7 +464,7 @@ func (p *prober) checkHelp() map[string]bool {
 		texts[i] = out
 	}
 	if texts[0] == "" {
-		return nil
+		return ""
 	}
 	all := strings.Join(texts, "\n")
 	hookFlag := ""
@@ -399,23 +479,22 @@ func (p *prober) checkHelp() map[string]bool {
 	if hookFlag != "" && !hasWord(texts[0], hookFlag) {
 		p.add("flag", LevelWarn, "flag %s not in top-level help of %s (cairn passes it before any subcommand)", hookFlag, p.version)
 	}
-	missing := map[string]bool{}
 	for _, s := range p.subcommands() {
-		if !hasWord(texts[0], s) {
-			missing[s] = true
+		if !listsSubcommand(texts[0], s) {
 			p.add("subcommand", LevelWarn, "subcommand %s not in help of %s", s, p.version)
 		}
 	}
 	if readAll {
 		p.add("help", LevelOK, "read the help of %s", p.version)
 	}
-	return missing
+	return texts[0]
 }
 
 // checkList runs the list command and checks its output parses as JSON (an
-// empty output is no conversations). It is not run when its subcommand is
-// missing from the help, where the word could be taken as a prompt.
-func (p *prober) checkList(missing map[string]bool) {
+// empty output is no conversations). It runs only when the top-level help
+// was read and lists its subcommand (or, without one, mentions its flags):
+// an unknown word could be taken as a prompt and start a conversation.
+func (p *prober) checkList(top string) {
 	if !p.a.Capabilities.ListJSON || len(p.a.Commands["list"]) == 0 {
 		return
 	}
@@ -424,9 +503,27 @@ func (p *prober) checkList(missing map[string]bool) {
 		p.add("list", LevelFail, "%v", err)
 		return
 	}
-	if len(argv) > 1 && missing[argv[1]] {
-		p.add("list", LevelWarn, "not run: subcommand %s not in help of %s", argv[1], p.version)
+	if top == "" {
+		p.add("list", LevelSkip, "not run: no readable top-level help (probe_flags) to check %s against", strings.Join(argv, " "))
 		return
+	}
+	if len(argv) > 1 && argv[1] != "" && argv[1][0] != '-' {
+		if !listsSubcommand(top, argv[1]) {
+			p.add("list", LevelSkip, "not run: subcommand %s not in help of %s", argv[1], p.version)
+			return
+		}
+	} else {
+		for _, f := range argv[1:] {
+			f, _, _ = strings.Cut(f, "=")
+			if strings.HasPrefix(f, "-") && !hasWord(top, f) {
+				p.add("list", LevelSkip, "not run: flag %s not in help of %s", f, p.version)
+				return
+			}
+		}
+		if len(argv) == 1 {
+			p.add("list", LevelSkip, "not run: %s has no subcommand or flag to check against the help", argv[0])
+			return
+		}
 	}
 	out, err := p.exec(argv)
 	if err != nil {
