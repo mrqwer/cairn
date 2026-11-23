@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/mrqwer/cairn/internal/agents/adapter"
 	"github.com/mrqwer/cairn/internal/agents/conv"
@@ -413,6 +416,24 @@ func TestPurgeProject(t *testing.T) {
 	if err := e.ix.Purge(""); err == nil {
 		t.Fatal("empty project purged")
 	}
+	// A purged project stays out of the index until it is included again.
+	rep, err := e.ix.Update(context.Background(), convs, index.Parsers(), []adapter.Adapter{claudeAdapter()})
+	if err != nil || rep.Indexed != 0 || rep.Unchanged != 1 {
+		t.Fatalf("after purge %+v %v", rep, err)
+	}
+	if hits, _ := e.ix.Search("alpha", conv.Filter{}, 10); len(hits) != 1 {
+		t.Fatalf("purged project indexed again: %+v", hits)
+	}
+	if ex, err := e.ix.Excluded(); err != nil || len(ex) != 1 || ex[0] != "demo" {
+		t.Fatalf("excluded %v %v", ex, err)
+	}
+	if err := e.ix.Include("demo"); err != nil {
+		t.Fatal(err)
+	}
+	rep, err = e.ix.Update(context.Background(), convs, index.Parsers(), []adapter.Adapter{claudeAdapter()})
+	if err != nil || rep.Indexed != 1 {
+		t.Fatalf("after include %+v %v", rep, err)
+	}
 }
 
 func TestIndexFilesMode0600(t *testing.T) {
@@ -441,5 +462,152 @@ func TestIndexFilesMode0600(t *testing.T) {
 		if fi.Mode().Perm() != 0o600 {
 			t.Errorf("%s mode %v", de.Name(), fi.Mode())
 		}
+	}
+}
+
+func update(t *testing.T, e env, convs []conv.Conversation, ad ...adapter.Adapter) index.Report {
+	t.Helper()
+	if len(ad) == 0 {
+		ad = []adapter.Adapter{claudeAdapter()}
+	}
+	rep, err := e.ix.Update(context.Background(), convs, index.Parsers(), ad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rep
+}
+
+// Review I2: terminal control sequences in a transcript never reach the
+// index or a snippet.
+func TestIndexStripsControlSequences(t *testing.T) {
+	e := newEnv(t)
+	e.writeClaude(t, uuid(1), "/w", t0, "clip \x1b]52;c;ZXZpbA==\x07 here \x1b[31mred\x1b[0m \u009b2J done")
+	update(t, e, []conv.Conversation{convFor("C1", "claude", uuid(1), "demo")})
+	for name, body := range indexFiles(t, e.ix.Dir) {
+		if strings.ContainsAny(body, "\x1b\x07\u009b") {
+			t.Fatalf("%s holds control characters: %q", name, body)
+		}
+	}
+	hits, _ := e.ix.Search("clip", conv.Filter{}, 10)
+	if len(hits) != 1 || strings.ContainsAny(hits[0].Snippet, "\x1b\x07") || !strings.Contains(hits[0].Snippet, "red done") {
+		t.Fatalf("hits %+v", hits)
+	}
+}
+
+// Review I3: entries written under other redaction rules (an older
+// redactor, other secret_fields) are redacted again without a file change.
+func TestRedactionChangeReindexes(t *testing.T) {
+	e := newEnv(t)
+	e.writeClaude(t, uuid(1), "/w", t0, "vault_otp: plainvalue")
+	convs := []conv.Conversation{convFor("C1", "claude", uuid(1), "demo")}
+	update(t, e, convs)
+	if !strings.Contains(indexFiles(t, e.ix.Dir)["C1.txt"], "plainvalue") {
+		t.Fatal("setup: value expected before the field is declared")
+	}
+	a := claudeAdapter()
+	a.History.SecretFields = []string{"vault_otp"}
+	if rep := update(t, e, convs, a); rep.Indexed != 1 {
+		t.Fatalf("new secret_fields did not reindex: %+v", rep)
+	}
+	if strings.Contains(indexFiles(t, e.ix.Dir)["C1.txt"], "plainvalue") {
+		t.Fatal("declared field still in the index")
+	}
+	if rep := update(t, e, convs, a); rep.Unchanged != 1 {
+		t.Fatalf("same rules should not reindex: %+v", rep)
+	}
+	// An entry from an older redactor version is redone.
+	mp := filepath.Join(e.ix.Dir, "manifest.json")
+	b, _ := os.ReadFile(mp)
+	var m map[string]map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["C1"]["redaction"] = "1:old"
+	b, _ = json.Marshal(m)
+	if err := os.WriteFile(mp, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rep := update(t, e, convs, a); rep.Indexed != 1 {
+		t.Fatalf("old redactor version did not reindex: %+v", rep)
+	}
+}
+
+// Review M5: role labels are not searchable text.
+func TestSearchIgnoresRoleLabels(t *testing.T) {
+	e := newEnv(t)
+	e.writeClaude(t, uuid(1), "/w", t0, "hello there", "general kenobi")
+	update(t, e, []conv.Conversation{convFor("C1", "claude", uuid(1), "demo")})
+	for _, q := range []string{"user", "assistant"} {
+		if hits, _ := e.ix.Search(q, conv.Filter{}, 10); len(hits) != 0 {
+			t.Errorf("%q matched a role label: %+v", q, hits)
+		}
+	}
+}
+
+// Review M6: case-folded search and snippets over Cyrillic text.
+func TestSearchCyrillic(t *testing.T) {
+	e := newEnv(t)
+	long := strings.Repeat("длинный текст перед словом ", 20) + "Исправить ВХОД в систему" + strings.Repeat(" и ещё текст после", 20)
+	e.writeClaude(t, uuid(1), "/w", t0, long)
+	update(t, e, []conv.Conversation{convFor("C1", "claude", uuid(1), "demo")})
+	hits, err := e.ix.Search("вход СИСТЕМУ", conv.Filter{}, 10)
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("hits %+v %v", hits, err)
+	}
+	if !utf8.ValidString(hits[0].Snippet) || !strings.Contains(hits[0].Snippet, "Исправить ВХОД") {
+		t.Fatalf("snippet %q", hits[0].Snippet)
+	}
+}
+
+// Review M8: temp files left by a crash are removed.
+func TestUpdateRemovesStaleTempFiles(t *testing.T) {
+	e := newEnv(t)
+	e.writeClaude(t, uuid(1), "/w", t0, "words")
+	if err := os.MkdirAll(e.ix.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := []string{".C9.txt.tmp123", ".manifest.json.tmp456"}
+	for _, n := range stale {
+		if err := os.WriteFile(filepath.Join(e.ix.Dir, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	update(t, e, []conv.Conversation{convFor("C1", "claude", uuid(1), "demo")})
+	for _, n := range stale {
+		if _, err := os.Stat(filepath.Join(e.ix.Dir, n)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s left: %v", n, err)
+		}
+	}
+}
+
+// Review M4: a busy index is waited for with a limit, reported once and
+// gives up on ctx.
+func TestUpdateLockBusy(t *testing.T) {
+	e := newEnv(t)
+	if err := os.MkdirAll(e.ix.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(e.ix.Dir, ".lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	busy := 0
+	e.ix.LockWait = 150 * time.Millisecond
+	e.ix.OnBusy = func() { busy++ }
+	start := time.Now()
+	_, err = e.ix.Update(context.Background(), nil, index.Parsers(), nil)
+	if !errors.Is(err, index.ErrBusy) || busy != 1 || time.Since(start) > 2*time.Second {
+		t.Fatalf("err %v busy %d after %v", err, busy, time.Since(start))
+	}
+	e.ix.LockWait = time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start = time.Now()
+	if _, err := e.ix.Update(ctx, nil, index.Parsers(), nil); !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+		t.Fatalf("ctx not honoured: %v after %v", err, time.Since(start))
 	}
 }

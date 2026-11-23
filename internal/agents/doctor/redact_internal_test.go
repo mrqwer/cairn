@@ -7,8 +7,10 @@ import (
 )
 
 // Probe details go through the index redactor, the one set of secret
-// patterns, and keep ordinary text.
-func TestFirstLineUsesIndexRedactor(t *testing.T) {
+// patterns, and keep ordinary text. The rows are the doctor's earlier
+// regression cases (TestRedactKeepsOrdinaryText) plus the keys its own
+// patterns used to cover: auth*, session, and "password value".
+func TestRedactKeepsOrdinaryText(t *testing.T) {
 	for in, want := range map[string]string{
 		"2.1.330 (Claude Code)": "2.1.330 (Claude Code)",
 		"error: no such file /usr/lib/node_modules/codex/bin/run.js": "error: no such file /usr/lib/node_modules/codex/bin/run.js",
@@ -17,6 +19,10 @@ func TestFirstLineUsesIndexRedactor(t *testing.T) {
 		"https://user:pw@example.com/x":                              "https://[redacted]@example.com/x",
 		"token sk-ant-abcdefghijk":                                   "token [redacted]",
 		"denied for AKIAIOSFODNN7EXAMPLE":                            "denied for [redacted]",
+		"error: auth=hunter2x failed":                                "error: auth=[redacted] failed",
+		"session=s3ssion99 expired":                                  "session=[redacted] expired",
+		"AUTHORIZATION=abc123def":                                    "AUTHORIZATION=[redacted]",
+		"login failed: password hunter2":                             "login failed: password [redacted]",
 	} {
 		if got := firstLine(in); got != want {
 			t.Errorf("firstLine(%q) = %q, want %q", in, got, want)

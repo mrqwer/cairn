@@ -235,3 +235,25 @@ func TestImportedRecordResumes(t *testing.T) {
 		t.Fatalf("imported record would start a new conversation: %+v", c)
 	}
 }
+
+// Review I4: a conversation that opens with a pasted screenshot over the
+// import head is still imported.
+func TestImportLongFirstLine(t *testing.T) {
+	e, st, opt := importEnv(t)
+	p := filepath.Join(e.home, ".claude/projects/-w", uuid(1)+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"user","sessionId":"` + uuid(1) + `","cwd":"/home/u/projects/demo","timestamp":"2026-10-01T09:00:00Z","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` +
+		strings.Repeat("QUFB", 512<<10) + `"}},{"type":"text","text":"see screenshot"}]}}` + "\n"
+	if err := os.WriteFile(p, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := index.Import(context.Background(), fsx.Root{Dir: "/"}, []adapter.Adapter{claudeAdapter()}, st, opt)
+	if err != nil || len(rep.Created) != 1 || len(rep.Skipped) != 0 {
+		t.Fatalf("report %+v %v", rep, err)
+	}
+	if c := rep.Created[0]; c.Project != "demo" || !c.CreatedAt.Equal(t0) {
+		t.Fatalf("record %+v", c)
+	}
+}

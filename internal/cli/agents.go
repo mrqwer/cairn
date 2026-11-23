@@ -547,7 +547,7 @@ func newAgentsCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newAgentsNewCmd(), newAgentsResumeCmd(), newAgentsLsCmd(), newAgentsNameCmd(),
 		newAgentsTagCmd(), newAgentsArchiveCmd(), newAgentsRmCmd(), newAgentsPaneCmd(), newAgentsDoctorCmd(),
-		newAgentsImportCmd(), newAgentsFindCmd())
+		newAgentsImportCmd(), newAgentsFindCmd(), newAgentsIndexCmd())
 	return cmd
 }
 
@@ -839,8 +839,8 @@ func newAgentsLsCmd() *cobra.Command {
 				if c.ArchivedAt != nil {
 					state = conv.StateArchived
 				}
-				_, _ = fmt.Fprintf(out, "%s %s %s %s %s %s\n", ui.Pad(c.ID, 26), ui.Pad(c.Name, 28), ui.Pad(c.Tool, 8),
-					ui.Pad(c.Project, 14), ui.Pad(state, 9), strings.Join(c.Tags, ","))
+				_, _ = fmt.Fprintf(out, "%s %s %s %s %s %s\n", ui.Pad(c.ID, 26), ui.Pad(ui.SafeLine(c.Name), 28), ui.Pad(ui.SafeLine(c.Tool), 8),
+					ui.Pad(ui.SafeLine(c.Project), 14), ui.Pad(state, 9), ui.SafeLine(strings.Join(c.Tags, ",")))
 			}
 			return nil
 		},
@@ -907,9 +907,11 @@ func newAgentsNameCmd() *cobra.Command {
 				}
 				prompt, err := agents.FirstPrompt(path)
 				if err != nil {
-					return fmt.Errorf("%s: %w", path, err)
+					return fmt.Errorf("%s: %w", ui.SafeLine(path), err)
 				}
-				sname, spurpose := agents.SuggestName(prompt)
+				// The prompt is untrusted transcript text: no control
+				// sequences reach the terminal or the record.
+				sname, spurpose := agents.SuggestName(ui.SafeLine(prompt))
 				if sname == "" {
 					return errors.New("no name could be suggested from the first prompt")
 				}

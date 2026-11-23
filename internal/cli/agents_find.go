@@ -17,9 +17,12 @@ import (
 	"github.com/mrqwer/cairn/internal/ui"
 )
 
+// findLockWait bounds how long find waits for a busy index (tests shorten it).
+var findLockWait = index.DefaultLockWait
+
 // agentIndex is the transcript index in <State>/agents/index.
 func (e *agentsEnv) agentIndex() index.Index {
-	return index.Index{Dir: filepath.Join(e.dirs.State, "agents", "index"), Root: wsRoot, Home: e.dirs.Home}
+	return index.Index{Dir: filepath.Join(e.dirs.State, "agents", "index"), Root: wsRoot, Home: e.dirs.Home, LockWait: findLockWait}
 }
 
 func (e *agentsEnv) adapterList() []adapter.Adapter {
@@ -37,7 +40,7 @@ func printSkips(w io.Writer, skips []index.Skip) {
 	}
 	_, _ = fmt.Fprintf(w, "%d skipped:\n", len(skips))
 	for _, s := range skips {
-		_, _ = fmt.Fprintf(w, "  %s: %s\n", s.Path, s.Reason)
+		_, _ = fmt.Fprintf(w, "  %s: %s\n", ui.SafeLine(s.Path), ui.SafeLine(s.Reason))
 	}
 }
 
@@ -85,7 +88,8 @@ func newAgentsImportCmd() *cobra.Command {
 				if project == "" {
 					project = "-"
 				}
-				_, _ = fmt.Fprintf(out, "  %s %s %s %s\n", ui.Pad(c.ID, 26), ui.Pad(c.Tool, 8), ui.Pad(project, 14), c.Cwd)
+				_, _ = fmt.Fprintf(out, "  %s %s %s %s\n", ui.Pad(c.ID, 26), ui.Pad(ui.SafeLine(c.Tool), 8),
+					ui.Pad(ui.SafeLine(project), 14), ui.SafeLine(c.Cwd))
 			}
 			printSkips(out, rep.Skipped)
 			if len(rep.Created) > 0 && !dryRun {
@@ -133,6 +137,10 @@ func newAgentsFindCmd() *cobra.Command {
 				return err
 			}
 			ix := e.agentIndex()
+			errOut := cmd.ErrOrStderr()
+			ix.OnBusy = func() {
+				_, _ = fmt.Fprintln(errOut, "the index is busy (another find or index command is updating it); waiting…")
+			}
 			if reindex {
 				if err := ix.Reset(); err != nil {
 					return err
@@ -143,7 +151,10 @@ func newAgentsFindCmd() *cobra.Command {
 				return err
 			}
 			rep, err := ix.Update(cmd.Context(), all, index.Parsers(), e.adapterList())
-			if err != nil {
+			if errors.Is(err, index.ErrBusy) {
+				// Writes are atomic: the index as it stands can be searched.
+				_, _ = fmt.Fprintln(errOut, "index still busy: searching it as it is (not updated)")
+			} else if err != nil {
 				return err
 			}
 			hits, err := ix.Search(q, f, limit)
@@ -166,17 +177,17 @@ func newAgentsFindCmd() *cobra.Command {
 				_, _ = fmt.Fprintln(out, "no matches")
 			}
 			for _, h := range hits {
-				name := h.Name
+				name := ui.SafeLine(h.Name)
 				if name == "" {
 					name = "(unnamed)"
 				}
-				project := h.Project
+				project := ui.SafeLine(h.Project)
 				if project == "" {
 					project = "-"
 				}
-				_, _ = fmt.Fprintf(out, "%s %s %s %s %s\n", ui.Pad(h.ID, 26), ui.Pad(name, 28), ui.Pad(h.Tool, 8),
+				_, _ = fmt.Fprintf(out, "%s %s %s %s %s\n", ui.Pad(h.ID, 26), ui.Pad(name, 28), ui.Pad(ui.SafeLine(h.Tool), 8),
 					ui.Pad(project, 14), h.At.Local().Format("2006-01-02 15:04"))
-				snip := "    " + h.Snippet
+				snip := "    " + ui.SafeLine(h.Snippet)
 				if styled {
 					snip = st.Dim(snip)
 				}
@@ -216,4 +227,62 @@ func parseSince(s string, now time.Time) (time.Time, error) {
 		return now.Add(-d), nil
 	}
 	return time.Time{}, fmt.Errorf("--since %q: want an age like 7d, 36h, 90m or a date like 2006-01-02", s)
+}
+
+func newAgentsIndexCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "index",
+		Short: "Manage the transcript search index",
+	}
+	edit := func(use, short string, purge bool) *cobra.Command {
+		var project string
+		c := &cobra.Command{
+			Use:   use,
+			Short: short,
+			Args:  cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, _ []string) error {
+				if project == "" {
+					return errors.New("--project is required")
+				}
+				e, err := loadAgents()
+				if err != nil {
+					return err
+				}
+				ix := e.agentIndex()
+				if purge {
+					err = ix.Purge(project)
+				} else {
+					err = ix.Include(project)
+				}
+				if err != nil {
+					return err
+				}
+				ex, err := ix.Excluded()
+				if err != nil {
+					return err
+				}
+				out := cmd.OutOrStdout()
+				if purge {
+					_, _ = fmt.Fprintf(out, "purged %s from the index; it stays out until: cairn agents index include --project %s\n",
+						ui.SafeLine(project), ui.SafeLine(project))
+				} else {
+					_, _ = fmt.Fprintf(out, "%s is indexed again on the next find\n", ui.SafeLine(project))
+				}
+				if len(ex) > 0 {
+					for i := range ex {
+						ex[i] = ui.SafeLine(ex[i])
+					}
+					_, _ = fmt.Fprintf(out, "excluded projects: %s\n", strings.Join(ex, ", "))
+				}
+				return nil
+			},
+		}
+		c.Flags().StringVar(&project, "project", "", "the project")
+		return c
+	}
+	cmd.AddCommand(
+		edit("purge", "Delete a project's indexed text and keep it out of the index", true),
+		edit("include", "Index a purged project again", false),
+	)
+	return cmd
 }

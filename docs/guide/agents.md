@@ -187,6 +187,8 @@ and never fails), and `cairn doctor` includes them.
 ```
 cairn agents import [--tool claude] [--dry-run]
 cairn agents find login retry [--project api --tool claude --tag x --since 7d --archived --json] [--reindex]
+cairn agents index purge --project api      # delete its indexed text and keep it out
+cairn agents index include --project api    # index it again
 ```
 
 `import` adopts the conversations a tool already has on disk (found through the adapter's
@@ -196,18 +198,29 @@ unnamed, in state `stopped`, under the project whose root holds their working di
 names them and `agents resume` opens them with the tool's resume command.
 
 `find` brings the index up to date (only transcripts whose size or time changed are read again), then
-shows the conversations whose name or text contains every word, most recently active first. Open a hit
-with `cairn agents resume <id>`.
+shows the conversations whose name or text contains every word (case-insensitive, any script), most
+recently active first. Open a hit with `cairn agents resume <id>`. When another `find` is updating the
+index, it says so and waits up to 30 s, then searches the index as it stands.
 
 - **Index:** `<State>/agents/index/`, directory 0700, one text file per conversation plus
-  `manifest.json`, all 0600. Only user and assistant text is indexed: not tool calls, tool output or
-  file contents. `--reindex` reads every transcript again.
-- **Redaction** runs before anything is written: private key blocks, URL credentials, bearer/basic
-  credentials, known token formats (`sk-`, `ghp_`, `AKIA`, `xoxb-` ...), values of assignments whose
-  key names a secret (`API_KEY=...`, `"token": ...`), long random-looking strings, and the fields an
-  adapter lists in `history.secret_fields`. Git SHAs, UUIDs and paths are kept.
-- **Tolerant parsing:** parsers are versioned (`claude-jsonl@1`). A malformed line is left out, a line
-  over 4 MiB is skipped without being held in memory, and a file that is not a transcript, a symlink,
-  or over 256 MiB is listed under "skipped" with the reason. A tool whose parser cairn does not know
-  (codex for now) is reported once and skipped; a tool without `history.locator` (agy) is not indexed.
-  None of these is an error exit.
+  `manifest.json` and `excluded.json`, all 0600. Only user and assistant text is indexed: not tool calls,
+  tool output, file contents or pasted images. `--reindex` reads every transcript again.
+- **Purge:** `index purge` deletes a project's indexed text and records the project as excluded, so
+  later updates leave it out until `index include`. The transcripts themselves are the tool's and are not
+  touched.
+- **Redaction** runs before anything is written: private key blocks, URL credentials (to the last `@`),
+  bearer/basic credentials, `curl -u` and `mysql -p` passwords, known token formats (`sk-`, `sk_live_`,
+  `ghp_`, `AKIA`, `xoxb-`, `hf_`, `npm_` ...), values of assignments, flags and JSON/YAML members whose
+  key names a secret (`API_KEY=...`, `--password ...`, `"token": ...`, escaped JSON, a YAML value on the
+  next line), long random-looking strings, and the fields an adapter lists in `history.secret_fields`.
+  Key names stay visible; git SHAs, UUIDs, paths, identifiers and prose ("basic setup", `max_tokens=4096`)
+  are kept. Every entry records the redaction rules it was written under; when the rules or an adapter's
+  `secret_fields` change, it is redacted again on the next `find`.
+- **Terminal safety:** escape sequences and other control characters from transcripts, file names and
+  records are removed from the index and from everything `find`, `import`, `ls` and `name` print.
+- **Tolerant parsing:** parsers are versioned (`claude-jsonl@1`). A malformed line is left out; image data
+  is dropped while reading, so a pasted screenshot does not make a line too long; a line still over 4 MiB
+  is skipped without being held in memory (its session id, directory and time are still read). A file
+  that is not a transcript, a symlink, or over 256 MiB is listed under "skipped" with the reason. A tool
+  whose parser cairn does not know (codex for now) is reported once and skipped; a tool without
+  `history.locator` (agy) is not indexed. None of these is an error exit.

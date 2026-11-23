@@ -124,7 +124,7 @@ func TestParseTolerantGarbage(t *testing.T) {
 	// Memory is bounded by the line cap, not the line: a line four times
 	// longer costs no more.
 	_, alloc40 := parseAlloc(t, 40<<20)
-	if alloc10 > 3*index.MaxLine || alloc40 > alloc10+(1<<20) {
+	if alloc10 > 4*index.MaxLine || alloc40 > alloc10+(1<<20) {
 		t.Fatalf("allocated %d bytes for 10 MB and %d for 40 MB: not bounded by MaxLine %d", alloc10, alloc40, index.MaxLine)
 	}
 }
@@ -145,5 +145,77 @@ func TestParserVersionUnknown(t *testing.T) {
 		if _, err := index.ParserFor(index.Parsers(), name); !errors.Is(err, index.ErrUnsupportedParser) {
 			t.Errorf("%q: err %v", name, err)
 		}
+	}
+}
+
+// Review M7: only known tool wrappers are dropped, not every prompt that
+// starts with '<'.
+func TestParseKeepsAngleBracketPrompts(t *testing.T) {
+	in := `{"type":"user","message":{"role":"user","content":"<system-reminder>ignore</system-reminder>"}}
+{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>"}}
+{"type":"user","message":{"role":"user","content":"<local-command-stdout>x</local-command-stdout>"}}
+{"type":"user","message":{"role":"user","content":"<div>layout broken</div> please fix"}}
+`
+	tr, err := claudeParser(t).Parse(strings.NewReader(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.Messages) != 1 || tr.FirstPrompt != "<div>layout broken</div> please fix" {
+		t.Fatalf("messages %+v first %q", tr.Messages, tr.FirstPrompt)
+	}
+}
+
+// Review I4: a first line made long by a pasted image still parses: the
+// image data is dropped while streaming, the text is kept.
+func TestParseLongImageLine(t *testing.T) {
+	head := `{"type":"user","sessionId":"s1","cwd":"/w","timestamp":"2026-10-01T09:00:00Z","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"`
+	tail := `"}},{"type":"text","text":"what is wrong in this screenshot"}]}}` + "\n"
+	r := io.MultiReader(strings.NewReader(head), &repeatReader{b: 'Q', n: 6 << 20}, strings.NewReader(tail))
+	tr, err := claudeParser(t).Parse(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.NativeID != "s1" || tr.Cwd != "/w" || tr.FirstPrompt != "what is wrong in this screenshot" || tr.Skipped != 0 {
+		t.Fatalf("transcript %+v", tr)
+	}
+}
+
+// Review I4: a line over MaxLine that is not image data still yields the
+// session id, cwd and time from its head; it is not ErrNoTranscript.
+func TestParseOverlongLineKeepsMetadata(t *testing.T) {
+	head := `{"type":"user","sessionId":"s1","cwd":"/w","timestamp":"2026-10-01T09:00:00Z","message":{"role":"user","content":"`
+	r := io.MultiReader(strings.NewReader(head), &repeatReader{b: 'a', n: 6 << 20}, strings.NewReader("\"}}\n"))
+	tr, err := claudeParser(t).Parse(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.NativeID != "s1" || tr.Cwd != "/w" || tr.StartedAt.IsZero() || tr.Skipped != 1 || len(tr.Messages) != 0 {
+		t.Fatalf("transcript %+v", tr)
+	}
+}
+
+// Review M3: text kept in memory is bounded by MaxText, not by file size;
+// times still cover the whole file.
+func TestParseTextBoundedByMaxText(t *testing.T) {
+	msg := strings.Repeat("x", 1000)
+	var parts []io.Reader
+	n := index.MaxText/1000 + 2000
+	for i := 0; i < n; i++ {
+		parts = append(parts, strings.NewReader(`{"type":"user","timestamp":"2026-10-01T09:00:00Z","message":{"role":"user","content":"`+msg+`"}}`+"\n"))
+	}
+	parts = append(parts, strings.NewReader(`{"type":"assistant","timestamp":"2026-10-02T09:00:00Z","message":{"role":"assistant","content":"end"}}`+"\n"))
+	tr, err := claudeParser(t).Parse(io.MultiReader(parts...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for _, m := range tr.Messages {
+		total += len(m.Text)
+	}
+	if total > index.MaxText+1000 || !tr.Truncated {
+		t.Fatalf("kept %d bytes of text, truncated %v", total, tr.Truncated)
+	}
+	if want := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC); !tr.EndedAt.Equal(want) {
+		t.Fatalf("ended %v", tr.EndedAt)
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/mrqwer/cairn/internal/agents/conv"
 )
 
@@ -175,5 +177,88 @@ func TestParseSince(t *testing.T) {
 		if _, err := parseSince(in, now); err == nil {
 			t.Errorf("parseSince(%q) accepted", in)
 		}
+	}
+}
+
+// Review I2: nothing read from transcripts, file names or records reaches
+// the terminal with control sequences.
+func TestAgentsOutputStripsControlSequences(t *testing.T) {
+	dir, _, _ := agentsTestEnv(t)
+	writeClaudeTranscript(t, dir, nativeUUID(1), dir, findT0, "evil \x1b]52;c;ZXZpbA==\x07 clip \x1b[2J here")
+	bad := filepath.Join(dir, ".claude/projects/-w", "x\x1b]0;pwned\x07.jsonl")
+	if err := os.WriteFile(bad, []byte("junk\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := mustRun(t, "", "agents", "import")
+	if strings.ContainsAny(out, "\x1b\x07") || !strings.Contains(out, "x.jsonl: file name holds no usable native id") {
+		t.Fatalf("import output:\n%q", out)
+	}
+	c := onlyConv(t, dir)
+	if _, err := testStore(dir).Update(c.ID, func(c *conv.Conversation) error { c.Name = "n\x1b[31mred"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"agents", "find", "clip"}, {"agents", "ls"}} {
+		out := mustRun(t, "", args...)
+		if strings.ContainsAny(out, "\x1b\x07") || !strings.Contains(out, "nred") {
+			t.Fatalf("%v output:\n%q", args, out)
+		}
+	}
+}
+
+func TestAgentsIndexPurgeAndInclude(t *testing.T) {
+	dir, _, _ := agentsTestEnv(t)
+	writeClaudeTranscript(t, dir, nativeUUID(1), dir, findT0, "purge me please")
+	mustRun(t, "", "agents", "import")
+	if out := mustRun(t, "", "agents", "find", "purge"); !strings.Contains(out, "purge me") {
+		t.Fatalf("setup:\n%s", out)
+	}
+	out := mustRun(t, "", "agents", "index", "purge", "--project", "demo")
+	if !strings.Contains(out, "demo") {
+		t.Fatalf("purge output:\n%s", out)
+	}
+	if out := mustRun(t, "", "agents", "find", "purge"); !strings.Contains(out, "no matches") {
+		t.Fatalf("purged project still found:\n%s", out)
+	}
+	mustRun(t, "", "agents", "index", "include", "--project", "demo")
+	if out := mustRun(t, "", "agents", "find", "purge"); !strings.Contains(out, "purge me") {
+		t.Fatalf("included project not found:\n%s", out)
+	}
+	if _, err := runHost(t, "", "agents", "index", "purge"); err == nil {
+		t.Fatal("purge without --project accepted")
+	}
+}
+
+// Review M4: a busy index is reported and the existing index is searched.
+func TestAgentsFindBusyIndex(t *testing.T) {
+	dir, _, _ := agentsTestEnv(t)
+	writeClaudeTranscript(t, dir, nativeUUID(1), dir, findT0, "busy words")
+	mustRun(t, "", "agents", "import")
+	mustRun(t, "", "agents", "find", "busy")
+	old := findLockWait
+	t.Cleanup(func() { findLockWait = old })
+	findLockWait = 100 * time.Millisecond
+	f, err := os.OpenFile(filepath.Join(dir, "state/cairn/agents/index/.lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	out := mustRun(t, "", "agents", "find", "busy")
+	if !strings.Contains(out, "busy") || !strings.Contains(out, "busy words") || !strings.Contains(out, "not updated") {
+		t.Fatalf("output:\n%s", out)
+	}
+}
+
+// The name suggestion comes from the transcript's first prompt.
+func TestAgentsNameSuggestionStripsControlSequences(t *testing.T) {
+	dir, _, _ := agentsTestEnv(t)
+	writeClaudeTranscript(t, dir, nativeUUID(1), dir, findT0, "fix \x1b]52;c;ZXZpbA==\x07the \x1b[31mlogin\x1b[0m form")
+	mustRun(t, "", "agents", "import")
+	c := onlyConv(t, dir)
+	out := mustRun(t, "", "agents", "name", c.ID)
+	if strings.ContainsAny(out, "\x1b\x07") || !strings.Contains(out, "login") {
+		t.Fatalf("output %q", out)
 	}
 }

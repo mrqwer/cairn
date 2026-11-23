@@ -3,6 +3,8 @@ package index
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +23,7 @@ import (
 	"github.com/mrqwer/cairn/internal/agents/adapter"
 	"github.com/mrqwer/cairn/internal/agents/conv"
 	"github.com/mrqwer/cairn/internal/fsx"
+	"github.com/mrqwer/cairn/internal/ui"
 )
 
 const (
@@ -45,6 +48,31 @@ type Index struct {
 	Home string
 	// MaxFileSize overrides DefaultMaxFileSize when positive.
 	MaxFileSize int64
+	// LockWait bounds the wait for another process updating the index
+	// (DefaultLockWait when zero); OnBusy, when set, is called once when
+	// the wait starts, so the caller can say why it is waiting.
+	LockWait time.Duration
+	OnBusy   func()
+}
+
+// DefaultLockWait is how long Update, Purge and Include wait for the index
+// lock before giving up with ErrBusy.
+const DefaultLockWait = 30 * time.Second
+
+// ErrBusy is returned when another process kept the index locked for
+// longer than LockWait.
+var ErrBusy = errors.New("the index is busy (another find or index command is updating it)")
+
+const excludedFile = "excluded.json"
+
+// redactionKey identifies the rules an entry was redacted under: the
+// redactor version and the adapter's secret_fields. An entry under other
+// rules is redacted again.
+func redactionKey(fields []string) string {
+	fs := append([]string(nil), fields...)
+	sort.Strings(fs)
+	sum := sha256.Sum256([]byte(strings.Join(fs, "\x00")))
+	return RedactorVersion + ":" + hex.EncodeToString(sum[:6])
 }
 
 // Entry is the manifest record of one indexed conversation: the transcript
@@ -68,6 +96,8 @@ type Entry struct {
 	Tags         []string   `json:"tags,omitempty"`
 	ArchivedAt   *time.Time `json:"archivedAt,omitempty"`
 	LastActivity time.Time  `json:"lastActivity"`
+	// Redaction is the redactionKey the text was written under.
+	Redaction string `json:"redaction,omitempty"`
 }
 
 // Skip is a transcript (or a whole tool, Path "tool <name>") that was not
@@ -127,7 +157,7 @@ func (ix Index) ensureDir() error {
 
 // withLock runs fn holding the index lock, so concurrent updates do not
 // lose each other's manifest entries.
-func (ix Index) withLock(fn func() error) error {
+func (ix Index) withLock(ctx context.Context, fn func() error) error {
 	if err := ix.ensureDir(); err != nil {
 		return err
 	}
@@ -136,14 +166,32 @@ func (ix Index) withLock(fn func() error) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
+	wait := ix.LockWait
+	if wait <= 0 {
+		wait = DefaultLockWait
+	}
+	deadline := time.Now().Add(wait)
+	told := false
 	for {
-		err = unix.Flock(int(f.Fd()), unix.LOCK_EX)
-		if !errors.Is(err, unix.EINTR) {
+		err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
 			break
 		}
-	}
-	if err != nil {
-		return err
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
+			return err
+		}
+		if !told && ix.OnBusy != nil {
+			ix.OnBusy()
+		}
+		told = true
+		if time.Now().After(deadline) {
+			return ErrBusy
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
 	return fn()
@@ -195,8 +243,13 @@ func (e Entry) conv(id string) conv.Conversation {
 // done so far is kept and ctx's error returned.
 func (ix Index) Update(ctx context.Context, convs []conv.Conversation, parsers map[string]Parser, adapters []adapter.Adapter) (Report, error) {
 	rep := Report{Skipped: []Skip{}}
-	err := ix.withLock(func() error {
+	err := ix.withLock(ctx, func() error {
+		ix.removeStaleTemps()
 		m := ix.load()
+		excluded, err := ix.excluded()
+		if err != nil {
+			return err
+		}
 		byTool := map[string]adapter.Adapter{}
 		for _, a := range adapters {
 			byTool[a.Name] = a
@@ -213,6 +266,9 @@ func (ix Index) Update(ctx context.Context, convs []conv.Conversation, parsers m
 			a, ok := byTool[c.Tool]
 			if c.NativeID == "" || !ok || a.History.Locator == "" {
 				continue // nothing on disk to index
+			}
+			if c.Project != "" && excluded[c.Project] {
+				continue // purged: stays out until included again
 			}
 			if !conv.ValidID(c.ID) {
 				rep.Skipped = append(rep.Skipped, Skip{Path: c.ID, Reason: "conversation id is not usable"})
@@ -308,8 +364,9 @@ func (ix Index) indexOne(c conv.Conversation, path string, p Parser, fields []st
 		setMeta(&e, c)
 		return fail(e, err.Error())
 	}
+	rkey := redactionKey(fields)
 	if old.Path == path && old.Size == fi.Size() && old.MTime.Equal(fi.ModTime()) && old.Parser == p.Name() &&
-		(old.Error != "" || ix.Root.Exists(ix.file(c.ID+textExt))) {
+		old.Redaction == rkey && (old.Error != "" || ix.Root.Exists(ix.file(c.ID+textExt))) {
 		e = old
 		setMeta(&e, c)
 		if old.Error != "" {
@@ -317,7 +374,7 @@ func (ix Index) indexOne(c conv.Conversation, path string, p Parser, fields []st
 		}
 		return e, false, nil, nil
 	}
-	e = Entry{Path: path, Size: fi.Size(), MTime: fi.ModTime(), Parser: p.Name()}
+	e = Entry{Path: path, Size: fi.Size(), MTime: fi.ModTime(), Parser: p.Name(), Redaction: rkey}
 	setMeta(&e, c)
 	if !fi.Mode().IsRegular() {
 		return fail(e, "not a regular file")
@@ -340,15 +397,15 @@ func (ix Index) indexOne(c conv.Conversation, path string, p Parser, fields []st
 	return e, true, nil, warn
 }
 
-// plainText is the redacted text of tr, at most MaxText bytes. Each message
-// is redacted on its own before the cut, so no cut can expose part of a
+// plainText is the redacted text of tr, at most MaxText bytes, one
+// message per paragraph without role labels (they would match every
+// search). Terminal control sequences are removed and each message is
+// redacted on its own before the cut, so no cut can expose part of a
 // secret.
 func plainText(tr Transcript, fields []string) []byte {
 	var b bytes.Buffer
 	for _, m := range tr.Messages {
-		b.WriteString(m.Role)
-		b.WriteString(": ")
-		b.WriteString(RedactFields(m.Text, fields))
+		b.WriteString(RedactFields(ui.SafeText(m.Text), fields))
 		b.WriteString("\n\n")
 		if b.Len() > MaxText {
 			break
@@ -382,19 +439,111 @@ func (ix Index) removeOrphans(m map[string]Entry) error {
 	return nil
 }
 
+// removeStaleTemps deletes temp files a crashed write left behind
+// (".<name>.tmp*"). Every write runs under the index lock, which the
+// caller holds, so none is in progress.
+func (ix Index) removeStaleTemps() {
+	ents, err := os.ReadDir(ix.Root.Path(ix.Dir))
+	if err != nil {
+		return
+	}
+	for _, de := range ents {
+		if n := de.Name(); strings.HasPrefix(n, ".") && strings.Contains(n, ".tmp") && de.Type().IsRegular() {
+			_ = ix.Root.Remove(ix.file(n))
+		}
+	}
+}
+
 // Reset forgets what was indexed, so the next Update reads every
 // transcript again.
 func (ix Index) Reset() error {
-	return ix.withLock(func() error { return ix.Root.Remove(ix.file(manifestFile)) })
+	return ix.withLock(context.Background(), func() error { return ix.Root.Remove(ix.file(manifestFile)) })
 }
 
-// Purge removes the index data of every conversation of project. The next
-// Update indexes them again from their transcripts.
-func (ix Index) Purge(project string) error {
-	if project == "" {
-		return errors.New("purge needs a project")
+// excluded is the set of purged projects.
+func (ix Index) excluded() (map[string]bool, error) {
+	b, err := ix.Root.ReadFile(ix.file(excludedFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return map[string]bool{}, nil
 	}
-	return ix.withLock(func() error {
+	if err != nil {
+		return nil, err
+	}
+	var list []string
+	if err := json.Unmarshal(b, &list); err != nil {
+		return nil, fmt.Errorf("%s: %w", excludedFile, err)
+	}
+	out := map[string]bool{}
+	for _, p := range list {
+		out[p] = true
+	}
+	return out, nil
+}
+
+func (ix Index) saveExcluded(set map[string]bool) error {
+	list := make([]string, 0, len(set))
+	for p := range set {
+		list = append(list, p)
+	}
+	sort.Strings(list)
+	b, err := json.Marshal(list)
+	if err != nil {
+		return err
+	}
+	return ix.Root.WriteAtomic(ix.file(excludedFile), append(b, '\n'), 0o600)
+}
+
+// Excluded lists the purged projects, sorted.
+func (ix Index) Excluded() ([]string, error) {
+	set, err := ix.excluded()
+	if err != nil {
+		return nil, err
+	}
+	list := make([]string, 0, len(set))
+	for p := range set {
+		list = append(list, p)
+	}
+	sort.Strings(list)
+	return list, nil
+}
+
+func checkProject(project string) error {
+	if project == "" || len(project) > 128 || ui.SafeLine(project) != project {
+		return fmt.Errorf("project %q is not usable", project)
+	}
+	return nil
+}
+
+// Include takes a purged project back: the next Update indexes it again.
+func (ix Index) Include(project string) error {
+	if err := checkProject(project); err != nil {
+		return err
+	}
+	return ix.withLock(context.Background(), func() error {
+		set, err := ix.excluded()
+		if err != nil {
+			return err
+		}
+		delete(set, project)
+		return ix.saveExcluded(set)
+	})
+}
+
+// Purge removes the index data of every conversation of project and keeps
+// the project out of later updates until Include.
+func (ix Index) Purge(project string) error {
+	if err := checkProject(project); err != nil {
+		return err
+	}
+	return ix.withLock(context.Background(), func() error {
+		set, err := ix.excluded()
+		if err != nil {
+			return err
+		}
+		set[project] = true
+		if err := ix.saveExcluded(set); err != nil {
+			return err
+		}
 		m := ix.load()
 		for id, e := range m {
 			if e.Project == project {

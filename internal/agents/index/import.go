@@ -19,9 +19,17 @@ import (
 	"github.com/mrqwer/cairn/internal/fsx"
 )
 
-// importHead bounds how much of a transcript import reads: the session id,
-// cwd and start time are on the first lines.
+// importHead is about how much of a transcript import reads: the session
+// id, cwd and start time are on the first lines. A parser with ParseHead
+// finishes the line it is in (a long first line is still read, bounded per
+// line), others are cut at this size.
 const importHead = 1 << 20
+
+// headParser is a Parser that can stop once it has read limit bytes and
+// knows the conversation's identity.
+type headParser interface {
+	ParseHead(r io.Reader, limit int64) (Transcript, error)
+}
 
 // ImportOptions tune Import. Home expands "~/" in locators; Tool limits the
 // import to one tool; DryRun records nothing; ProjectOf maps a transcript's
@@ -138,7 +146,12 @@ func importOne(a adapter.Adapter, p Parser, path, nativeID string, opt ImportOpt
 	if !fi.Mode().IsRegular() {
 		return conv.Conversation{}, errors.New("not a regular file")
 	}
-	tr, err := p.Parse(io.LimitReader(f, importHead))
+	var tr Transcript
+	if hp, ok := p.(headParser); ok {
+		tr, err = hp.ParseHead(f, importHead)
+	} else {
+		tr, err = p.Parse(io.LimitReader(f, importHead))
+	}
 	if err != nil {
 		return conv.Conversation{}, fmt.Errorf("%s: %w", p.Name(), err)
 	}
