@@ -16,6 +16,9 @@ import (
 type ErrLocked struct{ Holder string }
 
 func (e ErrLocked) Error() string {
+	if e.Holder == "" {
+		return "conversation is in use by another cairn process"
+	}
 	return "conversation is in use by another cairn process (pid " + e.Holder + ")"
 }
 
@@ -59,9 +62,10 @@ func (s Store) AcquireLock(tool, nativeID string) (release func(), err error) {
 		}
 		return nil, err
 	}
-	if err := f.Truncate(0); err == nil {
-		_, err = f.WriteAt([]byte(strconv.Itoa(os.Getpid())), 0)
-		_ = err
+	if err := writePid(f); err != nil {
+		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		_ = f.Close()
+		return nil, fmt.Errorf("record lock holder: %w", err)
 	}
 	var once sync.Once
 	return func() {
@@ -70,4 +74,15 @@ func (s Store) AcquireLock(tool, nativeID string) (release func(), err error) {
 			_ = f.Close()
 		})
 	}, nil
+}
+
+// writePid replaces the lock file content with this process id. A contender
+// that reads between flock and this write sees an empty or old holder; the
+// ErrLocked message copes with an empty one.
+func writePid(f *os.File) error {
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	_, err := f.WriteAt([]byte(strconv.Itoa(os.Getpid())), 0)
+	return err
 }

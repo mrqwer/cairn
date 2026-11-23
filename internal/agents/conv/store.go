@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -91,6 +92,9 @@ func (s Store) load() ([]Conversation, error) {
 }
 
 // appendLocked writes one record with a single write call. Caller holds the lock.
+// Only the final byte is read, to heal a truncated tail left by a crash; a
+// read error is returned rather than skipping that guard. Creating the file
+// fsyncs the parent directory so the new entry survives a power loss.
 func (s Store) appendLocked(c Conversation) error {
 	b, err := json.Marshal(c)
 	if err != nil {
@@ -98,23 +102,49 @@ func (s Store) appendLocked(c Conversation) error {
 	}
 	b = append(b, '\n')
 	p := s.path(dataFile)
-	// A crash can leave a truncated line without newline; start on a fresh line.
-	if data, err := os.ReadFile(p); err == nil && len(data) > 0 && data[len(data)-1] != '\n' {
-		b = append([]byte{'\n'}, b...)
-	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	_, statErr := os.Stat(p)
+	created := errors.Is(statErr, os.ErrNotExist)
+	f, err := os.OpenFile(p, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
+	fail := func(err error) error { _ = f.Close(); return err }
+	st, err := f.Stat()
+	if err != nil {
+		return fail(err)
+	}
+	if st.Size() > 0 {
+		var last [1]byte
+		if _, err := f.ReadAt(last[:], st.Size()-1); err != nil {
+			return fail(fmt.Errorf("read tail of %s: %w", dataFile, err))
+		}
+		// A crash can leave a truncated line without newline; start on a fresh line.
+		if last[0] != '\n' {
+			b = append([]byte{'\n'}, b...)
+		}
+	}
 	if _, err := f.Write(b); err != nil {
-		_ = f.Close()
-		return err
+		return fail(err)
 	}
 	if err := f.Sync(); err != nil {
-		_ = f.Close()
+		return fail(err)
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
-	return f.Close()
+	if created {
+		return syncDir(filepath.Dir(p))
+	}
+	return nil
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	return d.Sync()
 }
 
 // Put appends c as the newest record for its id.
@@ -156,7 +186,9 @@ func (s Store) List(f Filter) ([]Conversation, error) {
 }
 
 // Update applies fn to the latest record under the store lock and appends the
-// result. If fn fails nothing is written.
+// result. If fn fails nothing is written and the zero Conversation is
+// returned. fn runs while the store lock is held and must not call any Store
+// method: the flock is not reentrant and that would deadlock.
 func (s Store) Update(id string, fn func(*Conversation) error) (Conversation, error) {
 	var res Conversation
 	err := s.withLock(func() error {
@@ -180,7 +212,10 @@ func (s Store) Update(id string, fn func(*Conversation) error) (Conversation, er
 		res.ID = id
 		return s.appendLocked(res)
 	})
-	return res, err
+	if err != nil {
+		return Conversation{}, err
+	}
+	return res, nil
 }
 
 // Compact atomically rewrites the file keeping the last record per id.

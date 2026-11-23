@@ -349,3 +349,63 @@ func TestFilePerm0600(t *testing.T) {
 		t.Errorf("dir perm %v", fi.Mode().Perm())
 	}
 }
+
+func TestUpdateErrorReturnsZero(t *testing.T) {
+	s, _ := newStore(t)
+	_ = s.Put(conv.Conversation{ID: "a", Name: "x"})
+	got, err := s.Update("a", func(c *conv.Conversation) error { c.Name = "y"; return errors.New("boom") })
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got.ID != "" || got.Name != "" {
+		t.Fatalf("want zero value on error, got %+v", got)
+	}
+}
+
+func TestPutSurfacesDataFileError(t *testing.T) {
+	s, root := newStore(t)
+	// The data file path is a directory: reading its tail must fail loudly.
+	if err := os.MkdirAll(filepath.Join(root, "state/agents/conversations.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put(conv.Conversation{ID: "a"}); err == nil {
+		t.Fatal("expected error")
+	}
+	if _, err := s.Update("a", func(*conv.Conversation) error { return nil }); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestPutHealsTailAfterManyRecords(t *testing.T) {
+	s, root := newStore(t)
+	for i := 0; i < 50; i++ {
+		if err := s.Put(conv.Conversation{ID: fmt.Sprintf("id%02d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := filepath.Join(root, "state/agents/conversations.jsonl")
+	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o600)
+	_, _ = f.WriteString(`{"id":"half`)
+	_ = f.Close()
+	if err := s.Put(conv.Conversation{ID: "z", Name: "after"}); err != nil {
+		t.Fatal(err)
+	}
+	c, ok, _ := s.Get("z")
+	if !ok || c.Name != "after" {
+		t.Fatalf("got %+v %v", c, ok)
+	}
+	all, _ := s.List(conv.Filter{})
+	if len(all) != 51 {
+		t.Fatalf("len=%d", len(all))
+	}
+}
+
+func TestErrLockedEmptyHolderMessage(t *testing.T) {
+	msg := conv.ErrLocked{}.Error()
+	if strings.Contains(msg, "pid )") || strings.Contains(msg, "pid  ") {
+		t.Fatalf("empty pid printed: %q", msg)
+	}
+	if !strings.Contains(conv.ErrLocked{Holder: "42"}.Error(), "pid 42") {
+		t.Fatal("holder missing")
+	}
+}
