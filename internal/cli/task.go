@@ -174,7 +174,7 @@ func (e *agentsEnv) windowFor(c conv.Conversation) (key, name string) {
 		if ts, _, err := task.Load(wsRoot, e.dirs); err == nil {
 			for _, t := range ts {
 				if t.ID == c.Task {
-					return t.Window(), t.Slug
+					return t.Window(), windowName(t)
 				}
 			}
 		}
@@ -182,21 +182,23 @@ func (e *agentsEnv) windowFor(c conv.Conversation) (key, name string) {
 	return workspace.AgentWindow, workspace.AgentWindow
 }
 
-// recoverIdle runs recoverTasks when no task creation is starting (it
-// never waits for one).
-func (e *agentsEnv) recoverIdle(ctx context.Context, w io.Writer) {
-	unlock, err := lockTasks(ctx, e.dirs, 0)
-	if err != nil {
+// reportPending tells about task creations that died midway, for read
+// commands: they never change git themselves.
+func (e *agentsEnv) reportPending(w io.Writer) {
+	ps, err := taskJournal(e.dirs).Pending()
+	if err != nil || len(ps) == 0 {
 		return
 	}
-	defer unlock()
-	e.recoverTasks(ctx, w)
+	for _, t := range ps {
+		_, _ = fmt.Fprintf(w, "an interrupted task new %q (%s) left changes behind\n", t.Title, t.Slug)
+	}
+	_, _ = fmt.Fprintln(w, "clean them up with: cairn task recover")
 }
 
 // recoverTasks undoes the git changes of task creations whose process died
 // before writing the task file (see task.Journal) and reports them. The
 // caller holds lockTasks.
-func (e *agentsEnv) recoverTasks(ctx context.Context, w io.Writer) {
+func (e *agentsEnv) recoverTasks(ctx context.Context, w io.Writer, force bool) {
 	rs, err := taskJournal(e.dirs).Recover(func(t task.Task) bool {
 		return wsRoot.Exists(task.Path(e.dirs, t.ID))
 	}, func(t task.Task) []string {
@@ -214,7 +216,11 @@ func (e *agentsEnv) recoverTasks(ctx context.Context, w io.Writer) {
 				}
 			}
 		}
-		return task.Compensate(newGit(ctx, t.Repos[0].Repo), t)
+		left, lost := task.Compensate(newGit(ctx, t.Repos[0].Repo), t, force)
+		for _, l := range lost {
+			left = append(left, "lost (forced): "+l)
+		}
+		return left
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "note: interrupted task creations could not be checked: %v\n", err)
@@ -223,7 +229,7 @@ func (e *agentsEnv) recoverTasks(ctx context.Context, w io.Writer) {
 		if r.Committed {
 			continue
 		}
-		_, _ = fmt.Fprintf(w, "cleaned up an interrupted task new %q (%s)\n", r.Task.Title, r.Task.Slug)
+		_, _ = fmt.Fprintf(w, "cleaned up the interrupted task new %q (%s)\n", r.Task.Title, r.Task.Slug)
 		for _, l := range r.Left {
 			_, _ = fmt.Fprintf(w, "  remains: %s\n", l)
 		}
@@ -249,7 +255,7 @@ func newTaskCmd() *cobra.Command {
 		Use:   "task",
 		Short: "Tasks: a branch (and worktree) with its agent window",
 	}
-	cmd.AddCommand(newTaskNewCmd(), newTaskLsCmd(), newTaskOpenCmd())
+	cmd.AddCommand(newTaskNewCmd(), newTaskLsCmd(), newTaskOpenCmd(), newTaskRecoverCmd())
 	return cmd
 }
 
@@ -330,7 +336,8 @@ func quoteArgv(argv []string) string {
 
 func newTaskNewCmd() *cobra.Command {
 	var project, tool, from string
-	var worktree, here, approveSetup bool
+	var approveSetup string
+	var worktree, here bool
 	cmd := &cobra.Command{
 		Use:   "new <title>",
 		Short: "Start a task: a branch, optionally a worktree, and a window with an agent",
@@ -384,7 +391,7 @@ func newTaskNewCmd() *cobra.Command {
 				return err
 			}
 			defer unlock()
-			e.recoverTasks(ctx, errOut)
+			e.recoverTasks(ctx, errOut, false)
 			t, err := planTask(ctx, e, st, p, title, iso, from)
 			if err != nil {
 				return err
@@ -398,7 +405,7 @@ func newTaskNewCmd() *cobra.Command {
 	f.StringVar(&from, "from", "", "start the branch here (default: the checkout's current branch)")
 	f.BoolVar(&worktree, "worktree", false, "work in a new git worktree")
 	f.BoolVar(&here, "here", false, "work in the project's main checkout")
-	f.BoolVar(&approveSetup, "approve-setup", false, "approve the repo's setup command after showing it")
+	f.StringVar(&approveSetup, "approve-setup", "", "approve the repo's setup command whose shown hash starts with this (at least 8 digits)")
 	return cmd
 }
 
@@ -489,6 +496,17 @@ func planTask(ctx context.Context, e *agentsEnv, st taskSettings, p workspace.Pr
 		return task.Task{}, probe
 	}
 	r := task.Repo{Repo: repo, Base: base, BaseCommit: baseCommit, Branch: branch}
+	if iso == task.IsolationHere {
+		// What to switch back to when the task is undone.
+		if r.Return, err = g.CurrentBranch(); err != nil {
+			return task.Task{}, err
+		}
+		if r.Return == "" {
+			if r.Return, err = g.ResolveCommit("HEAD"); err != nil {
+				return task.Task{}, err
+			}
+		}
+	}
 	if iso == task.IsolationWorktree {
 		r.Worktree = filepath.Join(wtDir, slug)
 	}
@@ -505,7 +523,7 @@ func planTask(ctx context.Context, e *agentsEnv, st taskSettings, p workspace.Pr
 // setup, conversation, then the task file and the window binding as one
 // history event. A failure before that event compensates every git change
 // (journalled, so a crash is cleaned up by the next task command).
-func createTask(cmd *cobra.Command, e *agentsEnv, tool string, preassign bool, t task.Task, approveSetup bool, out io.Writer, unlock func()) (err error) {
+func createTask(cmd *cobra.Command, e *agentsEnv, tool string, preassign bool, t task.Task, approveSetup string, out io.Writer, unlock func()) (err error) {
 	ctx := ctxOf(cmd)
 	r := t.Repos[0]
 	g := newGit(ctx, r.Repo)
@@ -516,9 +534,10 @@ func createTask(cmd *cobra.Command, e *agentsEnv, tool string, preassign bool, t
 	// made is what this run created, and all a failure undoes: never a
 	// branch or worktree that was there before.
 	var made *task.Repo
-	var convID string
+	var convID, madeDir string
+	committed := false
 	defer func() {
-		if err == nil {
+		if err == nil || committed {
 			end()
 			return
 		}
@@ -527,7 +546,10 @@ func createTask(cmd *cobra.Command, e *agentsEnv, tool string, preassign bool, t
 		}
 		var left []string
 		if made != nil {
-			left = task.Compensate(g, task.Task{Isolation: t.Isolation, Repos: []task.Repo{*made}})
+			left, _ = task.Compensate(g, task.Task{Isolation: t.Isolation, Repos: []task.Repo{*made}}, false)
+		}
+		if madeDir != "" {
+			_ = os.Remove(madeDir) // only when still empty
 		}
 		end()
 		_, _ = fmt.Fprintf(out, "task new failed; cleaned up the branch and worktree it made\n")
@@ -545,7 +567,11 @@ func createTask(cmd *cobra.Command, e *agentsEnv, tool string, preassign bool, t
 	workdir := r.Repo
 	if t.Isolation == task.IsolationWorktree {
 		workdir = r.Worktree
-		if err := os.MkdirAll(filepath.Dir(r.Worktree), 0o755); err != nil {
+		parent := filepath.Dir(r.Worktree)
+		if _, err := os.Lstat(parent); errors.Is(err, fs.ErrNotExist) {
+			madeDir = parent
+		}
+		if err := os.MkdirAll(parent, 0o755); err != nil {
 			return err
 		}
 		if err := g.CreateBranch(r.Branch, r.BaseCommit); err != nil {
@@ -581,11 +607,16 @@ func createTask(cmd *cobra.Command, e *agentsEnv, tool string, preassign bool, t
 	repoFile := filepath.Join(workdir, task.RepoFile)
 	in := cmd.InOrStdin()
 	notApproved := false
-	err = task.Setup(ctx, taskRunner(), trustStore(e.dirs), t.Project, repoFile, func(argv []string) bool {
-		_, _ = fmt.Fprintf(out, "the setup command of %s (from %s, not yet approved):\n  %s\n", t.Project, repoFile, quoteArgv(argv))
+	shown := ""
+	err = task.Setup(ctx, taskRunner(), trustStore(e.dirs), t.Project, repoFile, func(argv []string, hash string) bool {
+		shown = hash[:setupHashLen]
+		_, _ = fmt.Fprintf(out, "the setup command of %s (from %s, not yet approved; hash %s):\n  %s\n", t.Project, repoFile, shown, quoteArgv(argv))
 		switch {
-		case approveSetup:
-			return true
+		case approveSetup != "":
+			if len(approveSetup) >= minSetupHashLen && strings.HasPrefix(hash, strings.ToLower(approveSetup)) {
+				return true
+			}
+			_, _ = fmt.Fprintf(out, "--approve-setup=%s is not the hash of this file\n", approveSetup)
 		case interactive(in):
 			ok, _ := ask(ctx, in, out, "Run it now and whenever this file is unchanged?")
 			return ok
@@ -596,7 +627,7 @@ func createTask(cmd *cobra.Command, e *agentsEnv, tool string, preassign bool, t
 	switch {
 	case errors.Is(err, task.ErrSetupNotApproved):
 		if notApproved {
-			_, _ = fmt.Fprintln(out, "not run: approve it with --approve-setup, or run task new on a terminal")
+			_, _ = fmt.Fprintf(out, "not run: after reviewing it, approve it with --approve-setup=%s, or run task new on a terminal\n", shown)
 		} else {
 			_, _ = fmt.Fprintln(out, "setup not run")
 		}
@@ -626,9 +657,19 @@ func createTask(cmd *cobra.Command, e *agentsEnv, tool string, preassign bool, t
 		return err
 	}
 	tf := fileEdit{path: task.Path(e.dirs, t.ID), after: data, afterExists: true, perm: 0o644}
-	key, err := e.bindIn(cmd, c, t.Window(), t.Slug, []fileEdit{tf}, "task.new",
+	key, err := e.bindIn(cmd, c, t.Window(), windowName(t), []fileEdit{tf}, "task.new",
 		fmt.Sprintf("new task %s in %s (%s)", t.Slug, t.Project, r.Branch))
+	if wsRoot.Exists(task.Path(e.dirs, t.ID)) {
+		// The task is recorded: from here on nothing is undone; errors
+		// are reported and cairn task open retries.
+		committed = true
+		made, convID, madeDir = nil, "", ""
+		end()
+	}
 	if err != nil {
+		if committed {
+			_, _ = fmt.Fprintf(out, "task %s is recorded; open it with: cairn task open %s\n", t.Slug, t.Slug)
+		}
 		return err
 	}
 	_, _ = fmt.Fprintf(out, "created task %s (%s) in %s: branch %s", t.Slug, t.ID, t.Project, r.Branch)
@@ -637,7 +678,28 @@ func createTask(cmd *cobra.Command, e *agentsEnv, tool string, preassign bool, t
 	}
 	_, _ = fmt.Fprintf(out, "\nagent %s (%s) in window %s, pane %s\n", c.Name, tool, t.Window(), key)
 	e.admitNew(out, cmd.ErrOrStderr(), c)
-	return openTaskWindow(cmd, e, t, c, key, false)
+	if err := openTaskWindow(cmd, e, t, c, key, false); err != nil {
+		_, _ = fmt.Fprintf(out, "task %s is recorded; open it with: cairn task open %s\n", t.Slug, t.Slug)
+		return err
+	}
+	return nil
+}
+
+// setupHashLen is how much of a setup hash is shown; --approve-setup
+// takes at least minSetupHashLen hex digits of it.
+const (
+	setupHashLen    = 12
+	minSetupHashLen = 8
+)
+
+// windowName is the tmux window name of a task: its title (cut short),
+// which stays readable when the slug is a hash.
+func windowName(t task.Task) string {
+	r := []rune(t.Title)
+	if len(r) > 40 {
+		r = r[:40]
+	}
+	return strings.TrimSpace(string(r))
 }
 
 // openTaskWindow applies the project and, when the user is at a terminal
@@ -693,7 +755,7 @@ func newTaskLsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			e.recoverIdle(ctxOf(cmd), cmd.ErrOrStderr())
+			e.reportPending(cmd.ErrOrStderr())
 			ts, err := loadTasks(e.dirs, cmd.ErrOrStderr())
 			if err != nil {
 				return err
@@ -754,7 +816,7 @@ func newTaskOpenCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			e.recoverIdle(ctxOf(cmd), cmd.ErrOrStderr())
+			e.reportPending(cmd.ErrOrStderr())
 			ts, err := loadTasks(e.dirs, cmd.ErrOrStderr())
 			if err != nil {
 				return err
@@ -801,7 +863,7 @@ func newTaskOpenCmd() *cobra.Command {
 					}
 					extra = append(extra, ce)
 				}
-				if key, err = e.bindIn(cmd, c, t.Window(), t.Slug, extra, "task.open", "open task "+t.Slug); err != nil {
+				if key, err = e.bindIn(cmd, c, t.Window(), windowName(t), extra, "task.open", "open task "+t.Slug); err != nil {
 					return err
 				}
 				e.admitNew(cmd.OutOrStdout(), cmd.ErrOrStderr(), c)
@@ -811,10 +873,43 @@ func newTaskOpenCmd() *cobra.Command {
 	}
 }
 
+func newTaskRecoverCmd() *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "recover",
+		Short: "Clean up after a task new that was interrupted (crash, kill)",
+		Long: "Removes the branch and worktree an interrupted task new made, under the usual rules: a\n" +
+			"worktree only when nothing in it is work, a branch only without new commits. --force also lets\n" +
+			"ignored files in the worktree go (they are listed). What remains is reported.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			e, err := loadAgents()
+			if err != nil {
+				return err
+			}
+			ctx := ctxOf(cmd)
+			unlock, err := lockTasks(ctx, e.dirs, taskLockWait)
+			if err != nil {
+				return err
+			}
+			defer unlock()
+			out := cmd.OutOrStdout()
+			if ps, _ := taskJournal(e.dirs).Pending(); len(ps) == 0 {
+				_, _ = fmt.Fprintln(out, "nothing to recover")
+				return nil
+			}
+			e.recoverTasks(ctx, out, force)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "also remove ignored files in the worktree (listed as lost)")
+	return cmd
+}
+
 // afterTaskUndo compensates the git side of an undone task new: each
 // worktree is removed if clean and no agent runs in it, each branch
 // deleted if it has no new commits; what remains is reported.
-func afterTaskUndo(cmd *cobra.Command, ev history.Event) {
+func afterTaskUndo(cmd *cobra.Command, ev history.Event, force bool) {
 	out := cmd.OutOrStdout()
 	e, err := loadAgents()
 	if err != nil {
@@ -831,18 +926,34 @@ func afterTaskUndo(cmd *cobra.Command, ev history.Event) {
 			continue
 		}
 		cs, _ := e.store.List(conv.Filter{Task: t.ID, Archived: true})
+		// Hold every conversation's lock while git changes, so no agent
+		// starts in the worktree meanwhile.
+		var rels []func()
 		var live []string
 		for _, c := range cs {
-			if e.store.LockLive(c.Tool, "cairn-"+c.ID) {
+			rel, err := agents.AcquireConvLocks(e.store, c)
+			if err != nil {
 				live = append(live, convTitle(c))
+				continue
 			}
+			rels = append(rels, rel)
 		}
+		e.archiveTaskConvs(cs, out)
 		if len(live) > 0 {
-			_, _ = fmt.Fprintf(out, "task %s: worktree and branch remain: agent %s runs in it (exit it, then remove them with git)\n",
-				t.Slug, strings.Join(live, ", "))
+			for _, r := range rels {
+				r()
+			}
+			_, _ = fmt.Fprintf(out, "task %s: worktree and branch remain: agent %s runs in it (exit it, then: cairn undo --force %s)\n",
+				t.Slug, strings.Join(live, ", "), ev.ID)
 			continue
 		}
-		left := task.Compensate(newGit(ctxOf(cmd), t.Repos[0].Repo), t)
+		left, lost := task.Compensate(newGit(ctxOf(cmd), t.Repos[0].Repo), t, force)
+		for _, r := range rels {
+			r()
+		}
+		for _, l := range lost {
+			_, _ = fmt.Fprintf(out, "lost (forced): %s\n", l)
+		}
 		if len(left) == 0 {
 			_, _ = fmt.Fprintf(out, "task %s: removed its branch %s", t.Slug, t.Repos[0].Branch)
 			if t.Repos[0].Worktree != "" {
@@ -855,5 +966,26 @@ func afterTaskUndo(cmd *cobra.Command, ev history.Event) {
 		for _, l := range left {
 			_, _ = fmt.Fprintf(out, "  remains: %s\n", l)
 		}
+		_, _ = fmt.Fprintf(out, "to let ignored files go as well (they are listed first): cairn undo --force %s\n", ev.ID)
+	}
+}
+
+// archiveTaskConvs archives the conversations of an undone task: the task
+// and its window are gone, and their working directory may be too.
+func (e *agentsEnv) archiveTaskConvs(cs []conv.Conversation, out io.Writer) {
+	now := time.Now().UTC()
+	n := 0
+	for _, c := range cs {
+		if c.ArchivedAt != nil {
+			continue
+		}
+		cu := conv.CuratedOf(c)
+		cu.ArchivedAt = &now
+		if e.store.WriteCurated(c.ID, cu) == nil {
+			n++
+		}
+	}
+	if n > 0 {
+		_, _ = fmt.Fprintf(out, "archived %d conversation(s) of the task (cairn agents resume brings one back)\n", n)
 	}
 }

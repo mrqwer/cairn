@@ -5,6 +5,8 @@ package task
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -51,6 +54,9 @@ type Repo struct {
 	BaseCommit string `toml:"base_commit"`
 	Branch     string `toml:"branch"`
 	Worktree   string `toml:"worktree,omitempty"`
+	// Return is what the main checkout had checked out before a task
+	// --here switched it (a branch, or a commit when detached).
+	Return string `toml:"return,omitempty"`
 }
 
 // Task is desired state at <Config>/tasks/<id>.toml, written through
@@ -79,16 +85,22 @@ var (
 
 // Slug makes a branch- and file-safe name of a title: lower case, runs of
 // anything outside [a-z0-9] become one "-", at most MaxSlug runes, no "-"
-// at either end. A title with nothing usable gives "task".
+// at either end. A title with no Latin letter or digit (Cyrillic, say)
+// gives "task-" and 8 hex digits of its sha256, stable per title; one
+// without any letter or digit gives "task". The title itself stays the display name.
 func Slug(title string) string {
 	s := strings.Trim(nonSlug.ReplaceAllString(strings.ToLower(title), "-"), "-")
 	if len(s) > MaxSlug {
 		s = strings.TrimRight(s[:MaxSlug], "-")
 	}
-	if s == "" {
-		return "task"
+	if s != "" {
+		return s
 	}
-	return s
+	if t := strings.TrimSpace(title); strings.IndexFunc(t, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) >= 0 {
+		sum := sha256.Sum256([]byte(t))
+		return "task-" + hex.EncodeToString(sum[:4])
+	}
+	return "task"
 }
 
 // ValidSlug reports whether s is a slug as Slug and UniqueBranch make them.
@@ -186,6 +198,9 @@ func (t Task) Validate() error {
 		}
 		if r.BaseCommit != "" && !shaRe.MatchString(r.BaseCommit) {
 			add("repos[%d].base_commit %q is not a commit id", i, r.BaseCommit)
+		}
+		if r.Return != "" && (CheckRef(r.Return) != nil || t.Isolation != IsolationHere) {
+			add("repos[%d].return %q is not usable here", i, r.Return)
 		}
 		switch {
 		case t.Isolation == IsolationHere && r.Worktree != "":

@@ -226,7 +226,7 @@ func mayBeMidApply(c *cobra.Command) bool {
 		"cairn history restore", "cairn host apply", "cairn host uninstall", "cairn host repair",
 		"cairn tmux service install", "cairn tmux service uninstall", "cairn init",
 		"cairn agents new", "cairn agents resume", "cairn agents archive", "cairn agents rm",
-		"cairn task new", "cairn task open":
+		"cairn task new", "cairn task open", "cairn task recover":
 		return true
 	case "cairn capture":
 		w, _ := c.Flags().GetBool("write")

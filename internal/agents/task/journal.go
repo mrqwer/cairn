@@ -69,6 +69,43 @@ func (j Journal) Begin(t Task) (end func(), err error) {
 	}, nil
 }
 
+// Pending lists the tasks of the entries no live process holds, without
+// acting on them (read commands report these; see Recover). A broken entry
+// is listed with only its file name as ID.
+func (j Journal) Pending() ([]Task, error) {
+	ms, err := filepath.Glob(filepath.Join(j.Dir, "*.toml"))
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(ms)
+	var out []Task
+	for _, m := range ms {
+		f, err := os.Open(m)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return out, err
+		}
+		if err := unix.Flock(int(f.Fd()), unix.LOCK_SH|unix.LOCK_NB); err != nil {
+			_ = f.Close()
+			continue // its process is still at work
+		}
+		data, rerr := os.ReadFile(m)
+		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		_ = f.Close()
+		if rerr != nil {
+			continue
+		}
+		t, err := Decode(data)
+		if err != nil {
+			t = Task{ID: filepath.Base(m)}
+		}
+		out = append(out, t)
+	}
+	return out, nil
+}
+
 func validID(id string) bool {
 	return id != "" && !strings.ContainsAny(id, "/\\.") && !strings.HasPrefix(id, "-") && len(id) <= 63
 }

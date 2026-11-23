@@ -124,7 +124,7 @@ func TestSetupRequiresApproval(t *testing.T) {
 	trust := trustStore(t)
 	run := &fakeSetup{}
 	var shown [][]string
-	deny := func(cmd []string) bool { shown = append(shown, cmd); return false }
+	deny := func(cmd []string, _ string) bool { shown = append(shown, cmd); return false }
 	if err := Setup(ctx, run, trust, "demo", file, deny); !errors.Is(err, ErrSetupNotApproved) {
 		t.Fatalf("denied: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestSetupRequiresApproval(t *testing.T) {
 	if len(shown) != 1 || !slices.Equal(shown[0], []string{"make", "deps; rm -rf /"}) {
 		t.Fatalf("shown %q", shown)
 	}
-	approve := func(cmd []string) bool { shown = append(shown, cmd); return true }
+	approve := func(cmd []string, _ string) bool { shown = append(shown, cmd); return true }
 	if err := Setup(ctx, run, trust, "demo", file, approve); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestSetupHashChangeAsksAgain(t *testing.T) {
 	trust := trustStore(t)
 	run := &fakeSetup{}
 	asked := 0
-	approve := func([]string) bool { asked++; return true }
+	approve := func([]string, string) bool { asked++; return true }
 	if err := Setup(ctx, run, trust, "demo", file, approve); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestSetupHashChangeAsksAgain(t *testing.T) {
 	}
 	// Any change of the file, even outside the command, asks again.
 	write(t, file, "# changed\n[task]\nsetup = [\"make\", \"deps\"]\n", 0o644)
-	deny := func([]string) bool { asked++; return false }
+	deny := func([]string, string) bool { asked++; return false }
 	if err := Setup(ctx, run, trust, "demo", file, deny); !errors.Is(err, ErrSetupNotApproved) || asked != 2 {
 		t.Fatalf("changed file: asked %d %v", asked, err)
 	}
@@ -209,7 +209,7 @@ func TestSetupRunsInRepoDir(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, ".cairn.toml")
 	write(t, file, "[task]\nsetup = [\"touch\", \"made-by-setup\"]\n", 0o644)
-	if err := Setup(context.Background(), execx.OSRunner{}, trustStore(t), "demo", file, func([]string) bool { return true }); err != nil {
+	if err := Setup(context.Background(), execx.OSRunner{}, trustStore(t), "demo", file, func([]string, string) bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "made-by-setup")); err != nil {
@@ -239,7 +239,7 @@ func TestSafeRemove(t *testing.T) {
 	}
 	// Clean apart from the unchanged include copy: removed.
 	wt := mk("clean")
-	if removed, why, err := SafeRemove(g, repo, wt); err != nil || !removed || len(why) != 0 {
+	if removed, why, _, err := SafeRemove(g, repo, wt, false); err != nil || !removed || len(why) != 0 {
 		t.Fatalf("clean: %v %q %v", removed, why, err)
 	}
 	if _, err := os.Stat(wt); !os.IsNotExist(err) {
@@ -248,7 +248,7 @@ func TestSafeRemove(t *testing.T) {
 	// A changed include copy is work: kept.
 	wt = mk("env")
 	write(t, filepath.Join(wt, ".env"), "TOKEN=mine\n", 0o600)
-	if removed, why, err := SafeRemove(g, repo, wt); err != nil || removed || len(why) == 0 {
+	if removed, why, _, err := SafeRemove(g, repo, wt, false); err != nil || removed || len(why) == 0 {
 		t.Fatalf("changed include: %v %q %v", removed, why, err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(wt, ".env")); string(b) != "TOKEN=mine\n" {
@@ -257,7 +257,7 @@ func TestSafeRemove(t *testing.T) {
 	// Untracked work: kept.
 	wt = mk("untracked")
 	write(t, filepath.Join(wt, "notes.md"), "n", 0o644)
-	if removed, why, _ := SafeRemove(g, repo, wt); removed || len(why) == 0 || !strings.Contains(strings.Join(why, " "), "notes.md") {
+	if removed, why, _, _ := SafeRemove(g, repo, wt, false); removed || len(why) == 0 || !strings.Contains(strings.Join(why, " "), "notes.md") {
 		t.Fatalf("untracked: %v %q", removed, why)
 	}
 	if _, err := os.Stat(filepath.Join(wt, ".env")); err != nil {
@@ -280,7 +280,7 @@ func TestCompensate(t *testing.T) {
 		return Repo{Repo: repo, Base: "main", BaseCommit: base, Branch: "task/" + name, Worktree: wt}
 	}
 	clean := mk("clean")
-	if left := Compensate(g, Task{Repos: []Repo{clean}}); len(left) != 0 {
+	if left, _ := Compensate(g, Task{Repos: []Repo{clean}}, false); len(left) != 0 {
 		t.Fatalf("clean left %q", left)
 	}
 	if ok, _ := g.BranchExists("task/clean"); ok {
@@ -290,7 +290,7 @@ func TestCompensate(t *testing.T) {
 	write(t, filepath.Join(work.Worktree, "f"), "x", 0o644)
 	run(t, work.Worktree, "add", "f")
 	run(t, work.Worktree, "commit", "-q", "-m", "work")
-	left := Compensate(g, Task{Repos: []Repo{work}})
+	left, _ := Compensate(g, Task{Repos: []Repo{work}}, false)
 	if ok, _ := g.BranchExists("task/work"); !ok {
 		t.Fatal("branch with commits deleted")
 	}
@@ -302,10 +302,137 @@ func TestCompensate(t *testing.T) {
 		t.Fatal(err)
 	}
 	here := Repo{Repo: repo, Base: "main", BaseCommit: base, Branch: "task/here"}
-	if left := Compensate(g, Task{Isolation: IsolationHere, Repos: []Repo{here}}); len(left) != 0 {
+	if left, _ := Compensate(g, Task{Isolation: IsolationHere, Repos: []Repo{here}}, false); len(left) != 0 {
 		t.Fatalf("here left %q", left)
 	}
 	if cur, _ := g.CurrentBranch(); cur != "main" {
 		t.Fatalf("checkout on %q", cur)
+	}
+}
+
+func TestSafeRemoveRefusesIgnoredWork(t *testing.T) {
+	repo := tempRepo(t)
+	write(t, filepath.Join(repo, ".gitignore"), ".env\n*.db\n", 0o644)
+	write(t, filepath.Join(repo, ".worktreeinclude"), ".env\n", 0o644)
+	run(t, repo, "add", ".")
+	run(t, repo, "commit", "-q", "-m", "ignore")
+	write(t, filepath.Join(repo, ".env"), "TOKEN=1\n", 0o600)
+	g := newGit(repo)
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := g.CreateBranch("task/db", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddWorktree(wt, "task/db"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CopyInclude(repo, wt); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(wt, "local.db"), "rows", 0o644)
+	removed, why, lost, err := SafeRemove(g, repo, wt, false)
+	if err != nil || removed || !strings.Contains(strings.Join(why, " "), "local.db") || len(lost) != 0 {
+		t.Fatalf("ignored work: %v %q %q %v", removed, why, lost, err)
+	}
+	if strings.Contains(strings.Join(why, " "), ".env") {
+		t.Fatalf("an unchanged include copy counted as work: %q", why)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "local.db")); err != nil {
+		t.Fatal("ignored file lost")
+	}
+	// Forced: removed, and what was lost is listed.
+	removed, _, lost, err = SafeRemove(g, repo, wt, true)
+	if err != nil || !removed || !slices.Equal(lost, []string{"local.db"}) {
+		t.Fatalf("forced: %v %q %v", removed, lost, err)
+	}
+	// Force never covers uncommitted (not ignored) work.
+	if err := g.AddWorktree(wt, "task/db"); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(wt, "notes.md"), "n", 0o644)
+	if removed, _, _, _ := SafeRemove(g, repo, wt, true); removed {
+		t.Fatal("forced removal lost untracked work")
+	}
+}
+
+func TestCompensateUnknownBaseKeepsBranch(t *testing.T) {
+	repo := tempRepo(t)
+	g := newGit(repo)
+	if err := g.CreateBranch("task/nobase", "main"); err != nil {
+		t.Fatal(err)
+	}
+	left, _ := Compensate(g, Task{Repos: []Repo{{Repo: repo, Branch: "task/nobase"}}}, false)
+	if ok, _ := g.BranchExists("task/nobase"); !ok {
+		t.Fatal("branch with unknown base deleted")
+	}
+	if len(left) == 0 || !strings.Contains(left[0], "base") {
+		t.Fatalf("left %q", left)
+	}
+}
+
+func TestCompensateHereReturnsToPreviousBranch(t *testing.T) {
+	repo := tempRepo(t)
+	g := newGit(repo)
+	base, _ := g.ResolveCommit("main")
+	if err := g.SwitchNew("feature", base); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SwitchNew("task/here", "main"); err != nil {
+		t.Fatal(err)
+	}
+	r := Repo{Repo: repo, Base: "origin/main", BaseCommit: base, Branch: "task/here", Return: "feature"}
+	if left, _ := Compensate(g, Task{Isolation: IsolationHere, Repos: []Repo{r}}, false); len(left) != 0 {
+		t.Fatalf("left %q", left)
+	}
+	if cur, _ := g.CurrentBranch(); cur != "feature" {
+		t.Fatalf("back on %q, want feature", cur)
+	}
+}
+
+func TestCopyIncludeStarSkipsGitDir(t *testing.T) {
+	repo, wt := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(repo, ".worktreeinclude"), "*\n", 0o644)
+	write(t, filepath.Join(repo, ".git/config"), "[core]\n", 0o644)
+	write(t, filepath.Join(repo, ".env"), "E", 0o600)
+	got, err := CopyInclude(repo, wt)
+	if err != nil || !slices.Contains(got, ".env") {
+		t.Fatalf("%q %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, ".git")); !os.IsNotExist(err) {
+		t.Fatal(".git copied")
+	}
+}
+
+func TestJournalPendingDoesNotTouch(t *testing.T) {
+	j := Journal{Dir: t.TempDir()}
+	tk := Task{ID: "01JPENDING0000000000000000", Title: "x", Slug: "x", Project: "demo", Isolation: IsolationHere,
+		Status: StatusOpen, Repos: []Repo{{Repo: "/home/u/src/demo", Base: "main", BaseCommit: strings.Repeat("a", 40), Branch: "task/x"}}}
+	end, err := j.Begin(tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := j.Pending(); len(p) != 0 {
+		t.Fatalf("live entry reported: %v", p)
+	}
+	// Simulate a dead creator: drop the lock but keep the file.
+	data, _ := os.ReadFile(filepath.Join(j.Dir, tk.ID+".toml"))
+	end()
+	write(t, filepath.Join(j.Dir, tk.ID+".toml"), string(data), 0o600)
+	p, err := j.Pending()
+	if err != nil || len(p) != 1 || p[0].ID != tk.ID {
+		t.Fatalf("pending %v %v", p, err)
+	}
+	if _, err := os.Stat(filepath.Join(j.Dir, tk.ID+".toml")); err != nil {
+		t.Fatal("Pending removed the entry")
+	}
+}
+
+func TestSetupApproverSeesHash(t *testing.T) {
+	file := filepath.Join(t.TempDir(), ".cairn.toml")
+	body := "[task]\nsetup = [\"make\"]\n"
+	write(t, file, body, 0o644)
+	var got string
+	_ = Setup(context.Background(), &fakeSetup{}, trustStore(t), "demo", file, func(_ []string, h string) bool { got = h; return false })
+	if got != SetupHash([]byte(body)) || len(got) != 64 {
+		t.Fatalf("hash %q", got)
 	}
 }

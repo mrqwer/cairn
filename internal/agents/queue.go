@@ -60,6 +60,9 @@ func AdmitNew(s conv.Store, q task.Queue, id string, now time.Time) (queued bool
 			queued, position = true, q.Position(all, id)
 			return nil, nil
 		}
+		if q.Live != nil && q.Live(self) {
+			return nil, nil // its pane holds the lock: the tool runs (or starts)
+		}
 		if ok, _ := q.Admit(others); ok {
 			return nil, nil
 		}
@@ -100,7 +103,12 @@ func AdmitLaunch(s conv.Store, q task.Queue, id string, now time.Time, waiting b
 			position = q.Position(all, id)
 			return nil, nil
 		}
-		if free, _ := q.Admit(others); free && !liveQueued(q, others) {
+		free, _ := q.Admit(others)
+		if waiting && self.State == conv.StateStarting && free {
+			ok = true // promoted: the slot was handed to this pane (FIFO)
+			return nil, nil
+		}
+		if free && !liveQueued(q, others) {
 			ok = true
 			if self.State == conv.StateStarting {
 				return nil, nil // promoted, or a fresh record: the slot is its

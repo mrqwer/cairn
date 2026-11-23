@@ -166,6 +166,26 @@ func (g Git) Dirty(path string) ([]string, error) {
 	return files, nil
 }
 
+// Ignored lists the ignored files and directories (a directory as one
+// entry ending in "/") of the checkout at path, relative to it, sorted.
+func (g Git) Ignored(path string) ([]string, error) {
+	if err := checkPath(path); err != nil {
+		return nil, err
+	}
+	out, err := g.in(path).run("status", "--porcelain=v1", "-z", "--ignored=matching", "--untracked-files=all")
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, r := range strings.Split(string(out), "\x00") {
+		if strings.HasPrefix(r, "!! ") {
+			files = append(files, r[3:])
+		}
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
 // Tracked lists the files git tracks in the checkout at path.
 func (g Git) Tracked(path string) (map[string]bool, error) {
 	if err := checkPath(path); err != nil {

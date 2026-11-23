@@ -189,3 +189,51 @@ func TestDequeueStopsWaitingPane(t *testing.T) {
 		t.Fatal("dequeued a conversation that was not queued")
 	}
 }
+
+func TestPromotedPaneKeepsItsTurn(t *testing.T) {
+	f := newPaneFixture(t, 0, "")
+	s := f.store
+	q := agents.NewQueue(s, 1)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rel := holdRunning(t, s, "R1")
+	// Two panes wait in the queue, each holding its lock: X first.
+	f.put(t, conv.Conversation{ID: "X", State: conv.StateQueued, LastActivityAt: now})
+	f.put(t, conv.Conversation{ID: "W", State: conv.StateQueued, LastActivityAt: now.Add(time.Second)})
+	for _, id := range []string{"X", "W"} {
+		r, err := s.AcquireLock("fake", "cairn-"+id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(r)
+	}
+	rel()
+	if _, err := s.Update("R1", func(c *conv.Conversation) error { c.State = conv.StateDone; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if p, ok, _ := agents.Promote(s, q, now.Add(time.Minute), -1); !ok || p.ID != "X" {
+		t.Fatalf("promoted %q %v", p.ID, ok)
+	}
+	if ok, pos, err := agents.AdmitLaunch(s, q, "X", now.Add(2*time.Minute), true); err != nil || !ok {
+		t.Fatalf("promoted X not admitted: %v %d %v (state %q)", ok, pos, err, get(t, s, "X").State)
+	}
+	if ok, _, _ := agents.AdmitLaunch(s, q, "W", now.Add(2*time.Minute), true); ok {
+		t.Fatal("W overtook X")
+	}
+}
+
+func TestAdmitNewLeavesLivePaneAlone(t *testing.T) {
+	f := newPaneFixture(t, 0, "")
+	s := f.store
+	q := agents.NewQueue(s, 1)
+	holdRunning(t, s, "R1")
+	// The pane of S1 was admitted and runs its tool (lock held, starting).
+	f.put(t, conv.Conversation{ID: "S1", State: conv.StateStarting})
+	r, err := s.AcquireLock("fake", "cairn-S1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r)
+	if queued, _, _ := agents.AdmitNew(s, q, "S1", time.Now()); queued || get(t, s, "S1").State != conv.StateStarting {
+		t.Fatalf("a running conversation was queued: %q", get(t, s, "S1").State)
+	}
+}

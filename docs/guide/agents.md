@@ -70,12 +70,21 @@ cairn agents new codex --task fix-login   # a second agent on the same task, in 
   line, `#` comments), e.g. `.env`. Absolute paths, `..`, `.git` and symlinks out of the repo are
   refused; file modes are kept.
 - A `.cairn.toml` in the repo may set `[task] setup = ["make", "deps"]` (an argv, not a shell
-  line). It is shown and runs only once approved (on a terminal, or `--approve-setup`); the
-  approval is remembered per project until the file changes.
-- If `task new` fails, it removes what it made (the worktree only when clean, the branch only
-  without new commits) and lists what remains. A crash in the middle is cleaned up by the next
-  `task` command. `cairn undo` of a task removes its window binding and task file, then its
-  worktree and branch under the same rules; a worktree an agent still runs in is kept.
+  line). It is shown with a hash of the file and runs only once approved: on a terminal, or with
+  `--approve-setup=<hash>` (at least 8 digits of the hash shown). The approval is remembered per
+  project until the file changes. Only the file is hashed: a script it runs (`./setup.sh`) can
+  change without a new question, so review what it calls.
+- A title without Latin letters or digits gets a slug `task-<hash>`; the window is named by the
+  title.
+- If `task new` fails before the task is recorded, it removes what it made (the worktree only when
+  nothing in it is work, the branch only without new commits) and lists what remains; once the
+  task is recorded, a later error (opening the window) leaves it for `cairn task open`. A crash in
+  the middle is reported by `task ls`/`task open` and cleaned up by `cairn task recover` (or the
+  next `task new`).
+- `cairn undo` of a task removes its window binding and task file, archives its conversations,
+  then removes its worktree and branch under the same rules. Ignored files (a local database,
+  notes) count as work: the worktree is kept and they are listed; `cairn undo --force <id>` lets
+  them go and lists them as lost. A worktree an agent still runs in is kept.
 
 ## Concurrency limit
 

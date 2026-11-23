@@ -244,7 +244,7 @@ func TestNewCompensatesOnSetupFailure(t *testing.T) {
 	dir, repo, _ := taskTestEnv(t)
 	setupRepo(t, repo, `["sh", "-c", "echo boom; exit 3"]`)
 	before := len(historyEvents(t))
-	out, err := runHost(t, "", "task", "new", "Fix login", "--project", "api", "--tool", "fake", "--worktree", "--approve-setup")
+	out, err := runHost(t, "", "task", "new", "Fix login", "--project", "api", "--tool", "fake", "--worktree", "--approve-setup="+setupHash(t, repo))
 	if err == nil {
 		t.Fatalf("setup failure not reported:\n%s", out)
 	}
@@ -254,8 +254,8 @@ func TestNewCompensatesOnSetupFailure(t *testing.T) {
 	if branchExists(t, repo, "task/fix-login") {
 		t.Fatal("branch left behind")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "state/cairn/worktrees/api/fix-login")); !os.IsNotExist(err) {
-		t.Fatalf("worktree left behind: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "state/cairn/worktrees/api")); !os.IsNotExist(err) {
+		t.Fatalf("worktree (or its project directory) left behind: %v", err)
 	}
 	if ts := loadTaskFiles(t); len(ts) != 0 {
 		t.Fatalf("task file written: %+v", ts)
@@ -274,21 +274,39 @@ func TestNewCompensatesOnSetupFailure(t *testing.T) {
 	}
 }
 
+func setupHash(t *testing.T, repo string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(repo, ".cairn.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task.SetupHash(b)[:12]
+}
+
 func TestNewSetupApproval(t *testing.T) {
 	dir, repo, _ := taskTestEnv(t)
 	setupRepo(t, repo, `["touch", "setup-ran"]`)
-	// On a pipe without --approve-setup: shown, not run, the task is made.
+	hash := setupHash(t, repo)
+	// On a pipe without approval: shown with its hash, not run, the task is made.
 	out := mustRun(t, "", "task", "new", "One", "--project", "api", "--tool", "fake", "--worktree")
-	wt1 := filepath.Join(dir, "state/cairn/worktrees/api/one")
-	if _, err := os.Stat(filepath.Join(wt1, "setup-ran")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "state/cairn/worktrees/api/one/setup-ran")); !os.IsNotExist(err) {
 		t.Fatal("setup ran without approval")
 	}
-	if !strings.Contains(out, "touch setup-ran") || !strings.Contains(out, "--approve-setup") {
-		t.Fatalf("setup not shown:\n%s", out)
+	if !strings.Contains(out, "touch setup-ran") || !strings.Contains(out, "--approve-setup="+hash) {
+		t.Fatalf("setup or its hash not shown:\n%s", out)
 	}
-	// Approved once for the project: it runs in the worktree, and the next
-	// task runs it without asking.
-	mustRun(t, "", "task", "new", "Two", "--project", "api", "--tool", "fake", "--worktree", "--approve-setup")
+	// A value that is not the shown hash neither runs nor trusts it.
+	out = mustRun(t, "", "task", "new", "Wrong", "--project", "api", "--tool", "fake", "--worktree", "--approve-setup=deadbeef0000")
+	if _, err := os.Stat(filepath.Join(dir, "state/cairn/worktrees/api/wrong/setup-ran")); !os.IsNotExist(err) {
+		t.Fatalf("setup ran with a wrong hash:\n%s", out)
+	}
+	mustRun(t, "", "task", "new", "After wrong", "--project", "api", "--tool", "fake", "--worktree")
+	if _, err := os.Stat(filepath.Join(dir, "state/cairn/worktrees/api/after-wrong/setup-ran")); !os.IsNotExist(err) {
+		t.Fatal("a wrong hash was trusted")
+	}
+	// The shown hash approves it once for the project: it runs in the
+	// worktree, and the next task runs it without asking.
+	mustRun(t, "", "task", "new", "Two", "--project", "api", "--tool", "fake", "--worktree", "--approve-setup="+hash)
 	if _, err := os.Stat(filepath.Join(dir, "state/cairn/worktrees/api/two/setup-ran")); err != nil {
 		t.Fatalf("approved setup did not run in the worktree: %v", err)
 	}
@@ -375,8 +393,16 @@ func TestNewRecoversInterruptedTask(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(dir, "state/cairn/agents/tasks-pending", tk.ID+".toml"), string(b))
 	out := mustRun(t, "", "task", "ls")
-	if !strings.Contains(out, "interrupted") {
-		t.Fatalf("recovery not reported:\n%s", out)
+	if !strings.Contains(out, "interrupted") || !strings.Contains(out, "cairn task recover") {
+		t.Fatalf("pending recovery not reported:\n%s", out)
+	}
+	// A read command changes nothing.
+	if _, err := os.Stat(wt); err != nil || !branchExists(t, repo, "task/crashed") {
+		t.Fatal("task ls cleaned up")
+	}
+	out = mustRun(t, "", "task", "recover")
+	if !strings.Contains(out, "crashed") {
+		t.Fatalf("recover:\n%s", out)
 	}
 	if _, err := os.Stat(wt); !os.IsNotExist(err) {
 		t.Fatal("orphan worktree kept")
@@ -588,5 +614,105 @@ func TestArchiveTakesWaitingPaneOutOfQueue(t *testing.T) {
 	defer rel2()
 	if _, err := runHost(t, "", "agents", "archive", busy.ID); err == nil || !strings.Contains(err.Error(), "in use") {
 		t.Fatalf("running tool archived: %v", err)
+	}
+}
+
+func TestNewFailureAfterCommitKeepsTask(t *testing.T) {
+	dir, repo, fd := taskTestEnv(t)
+	mustRun(t, "", "up")
+	fd.failNewWindow = true
+	out, err := runHost(t, "", "task", "new", "Fix login", "--project", "api", "--tool", "fake", "--worktree")
+	if err == nil {
+		t.Fatalf("apply failure not reported:\n%s", out)
+	}
+	if !branchExists(t, repo, "task/fix-login") {
+		t.Fatalf("branch of a committed task deleted:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state/cairn/worktrees/api/fix-login/README")); err != nil {
+		t.Fatalf("worktree of a committed task removed:\n%s", out)
+	}
+	if len(loadTaskFiles(t)) != 1 || len(listConvs(t, dir)) != 1 {
+		t.Fatal("task or conversation lost")
+	}
+	if !strings.Contains(out, "cairn task open fix-login") {
+		t.Fatalf("no retry hint:\n%s", out)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(dir, "state/cairn/agents/tasks-pending")); len(entries) > 1 {
+		t.Fatalf("journal entry left: %v", entries)
+	}
+}
+
+func TestTaskUndoKeepsIgnoredWorkUnlessForced(t *testing.T) {
+	dir, repo, _ := taskTestEnv(t)
+	writeFile(t, filepath.Join(repo, ".gitignore"), ".env\n*.db\n")
+	git(t, repo, "commit", "-q", "-am", "ignore db")
+	mustRun(t, "", "task", "new", "Data", "--project", "api", "--tool", "fake", "--worktree")
+	wt := filepath.Join(dir, "state/cairn/worktrees/api/data")
+	writeFile(t, filepath.Join(wt, "local.db"), "rows")
+	out := mustRun(t, "", "undo")
+	if _, err := os.Stat(filepath.Join(wt, "local.db")); err != nil {
+		t.Fatalf("ignored work lost on undo:\n%s", out)
+	}
+	if !strings.Contains(out, "local.db") || !strings.Contains(out, "--force") {
+		t.Fatalf("ignored file not reported:\n%s", out)
+	}
+	if c := listConvs(t, dir)[0]; c.ArchivedAt == nil {
+		t.Fatalf("conversation of the undone task not archived: %+v", c)
+	}
+	// The undone event again, forced: the loss is listed, then removed.
+	id := lastEventID(t, "task.new")
+	out = mustRun(t, "", "undo", "--force", id)
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Fatalf("forced undo kept the worktree:\n%s", out)
+	}
+	if !strings.Contains(out, "lost") || !strings.Contains(out, "local.db") {
+		t.Fatalf("loss not listed:\n%s", out)
+	}
+	if branchExists(t, repo, "task/data") {
+		t.Fatal("branch kept after forced removal")
+	}
+}
+
+func lastEventID(t *testing.T, kind string) string {
+	t.Helper()
+	s, err := openHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs, err := s.List(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range evs {
+		if e.Kind == kind {
+			return e.ID
+		}
+	}
+	t.Fatalf("no %s event", kind)
+	return ""
+}
+
+func TestTaskUndoHereReturnsToPreviousBranch(t *testing.T) {
+	_, repo, _ := taskTestEnv(t)
+	git(t, repo, "switch", "-q", "-c", "feature")
+	mustRun(t, "", "task", "new", "Side", "--project", "api", "--tool", "fake", "--here", "--from", "main")
+	if got := git(t, repo, "rev-parse", "--abbrev-ref", "HEAD"); got != "task/side" {
+		t.Fatalf("on %q", got)
+	}
+	mustRun(t, "", "undo")
+	if got := git(t, repo, "rev-parse", "--abbrev-ref", "HEAD"); got != "feature" {
+		t.Fatalf("undo returned to %q, want feature", got)
+	}
+}
+
+func TestNewNonLatinTitle(t *testing.T) {
+	dir, _, _ := taskTestEnv(t)
+	mustRun(t, "", "task", "new", "Починить логин", "--project", "api", "--tool", "fake", "--here")
+	tk := loadTaskFiles(t)[0]
+	if !strings.HasPrefix(tk.Slug, "task-") || tk.Slug == "task" || tk.Title != "Починить логин" {
+		t.Fatalf("task %+v", tk)
+	}
+	if txt := apiProjectText(t, dir); !strings.Contains(txt, `name = "Починить логин"`) {
+		t.Fatalf("window not named by the title:\n%s", txt)
 	}
 }

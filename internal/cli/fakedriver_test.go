@@ -31,6 +31,7 @@ type fakeDriver struct {
 	// UnsetOption; afterSet runs after every SetOption.
 	failOption, failUnset string
 	failKill              bool
+	failNewWindow         bool
 	afterSet              func()
 }
 
@@ -126,6 +127,9 @@ func (f *fakeDriver) NewSession(_ context.Context, name string, _, _ int, win tm
 
 func (f *fakeDriver) NewWindow(_ context.Context, sessionID string, win tmux.WindowSpec) (string, string, error) {
 	f.rec("NewWindow %s %s", sessionID, win.Key)
+	if f.failNewWindow {
+		return "", "", fmt.Errorf("tmux new-window: %s: simulated failure", win.Key)
+	}
 	for _, s := range f.sessions {
 		if s.id == sessionID {
 			p := f.newPane(win.PaneSpec)

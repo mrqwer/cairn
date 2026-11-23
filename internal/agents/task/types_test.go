@@ -12,7 +12,6 @@ func TestSlug(t *testing.T) {
 		{"Fix login bug", "fix-login-bug"},
 		{"  --Fix   the LOGIN!! bug--  ", "fix-the-login-bug"},
 		{"Fix Ünïcode — login", "fix-n-code-login"},
-		{"Починить логин", "task"},
 		{"", "task"},
 		{"!!!", "task"},
 		{"../../etc/passwd", "etc-passwd"},
@@ -30,6 +29,11 @@ func TestSlug(t *testing.T) {
 		if !ValidSlug(got) {
 			t.Errorf("Slug(%q) = %q is not a valid slug", c.in, got)
 		}
+	}
+	// A title with no Latin letters or digits gets a stable short hash.
+	ru := Slug("Починить логин")
+	if !strings.HasPrefix(ru, "task-") || len(ru) != len("task-")+8 || ru != Slug("Починить логин") || ru == Slug("Другое") || !ValidSlug(ru) {
+		t.Errorf("non-Latin slug %q", ru)
 	}
 	// A cut that ends on a separator does not leave a trailing "-".
 	if got := Slug(strings.Repeat("a", 39) + " b"); got != strings.Repeat("a", 39) {

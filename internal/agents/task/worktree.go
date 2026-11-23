@@ -111,7 +111,10 @@ func includeMatches(repo string) ([]string, error) {
 		}
 		for _, m := range ms {
 			rel, err := filepath.Rel(repo, m)
-			if err != nil || !within(repo, m) || firstElem(rel) == ".git" {
+			if err == nil && firstElem(rel) == ".git" {
+				continue // a glob such as "*" also matches .git: never copied
+			}
+			if err != nil || !within(repo, m) {
 				return nil, fmt.Errorf("%s line %d: %q matches %s outside the repository; refused", IncludeFile, n, line, m)
 			}
 			fi, err := os.Stat(m) // follows a symlink: add checks where it leads
@@ -246,28 +249,34 @@ func copyFile(src, dst string) error {
 }
 
 // SafeRemove removes the worktree only when nothing in it is work: no
-// modified, staged or untracked file, and no include copy that differs from
-// the repo's original. Unchanged include copies (e.g. an ignored .env) are
-// deleted first, so they neither block the removal nor count as work.
-// Otherwise it returns false and the reasons; nothing is changed. A
-// worktree directory that is already gone is pruned and counts as removed.
-func SafeRemove(g Git, repo, worktree string) (removed bool, reasons []string, err error) {
+// modified, staged or untracked file, no include copy that differs from the
+// repo's original, and no ignored file other than unchanged include copies
+// (a local database, notes, build output: git would delete them silently).
+// Unchanged include copies are deleted first. Otherwise it returns false
+// and the reasons; nothing is changed. force lets ignored files go (never
+// uncommitted or changed ones): they are returned as lost. A worktree
+// directory that is already gone is pruned and counts as removed.
+func SafeRemove(g Git, repo, worktree string, force bool) (removed bool, reasons, lost []string, err error) {
 	g = g.in(repo)
 	if _, err := os.Lstat(worktree); errors.Is(err, fs.ErrNotExist) {
 		_, err := g.run("worktree", "prune")
-		return err == nil, nil, err
+		return err == nil, nil, nil, err
 	}
 	dirty, err := g.Dirty(worktree)
 	if err != nil {
-		return false, nil, err
+		return false, nil, nil, err
+	}
+	ignored, err := g.Ignored(worktree)
+	if err != nil {
+		return false, nil, nil, err
 	}
 	tracked, err := g.Tracked(worktree)
 	if err != nil {
-		return false, nil, err
+		return false, nil, nil, err
 	}
 	rels, err := includeMatches(repo)
 	if err != nil {
-		return false, []string{"the include list cannot be checked: " + err.Error()}, nil
+		return false, []string{"the include list cannot be checked: " + err.Error()}, nil, nil
 	}
 	isCopy := map[string]bool{}
 	var copies []string
@@ -295,27 +304,39 @@ func SafeRemove(g Git, repo, worktree string) (removed bool, reasons []string, e
 		}
 	}
 	if len(reasons) > 0 {
-		return false, reasons, nil
+		return false, reasons, nil, nil
+	}
+	var extra []string
+	for _, f := range ignored {
+		if !isCopy[f] {
+			extra = append(extra, f)
+		}
+	}
+	if len(extra) > 0 && !force {
+		for _, f := range extra {
+			reasons = append(reasons, "ignored "+f)
+		}
+		return false, reasons, nil, nil
 	}
 	for _, rel := range copies {
 		if err := os.Remove(filepath.Join(worktree, rel)); err != nil {
-			return false, nil, err
+			return false, nil, nil, err
 		}
 	}
 	if err := g.RemoveWorktree(worktree); err != nil {
-		return false, nil, err
+		return false, nil, nil, err
 	}
-	return true, nil, nil
+	return true, nil, extra, nil
 }
 
 // Compensate undoes what creating t did in git, as far as no work is lost
-// (R3): each worktree is removed if SafeRemove allows it, a task branch
-// checked out in the main checkout is switched back to its base, and the
-// branch is deleted when it has no commits beyond its base and nothing has
-// it checked out. It returns what remains, one line each (empty when all is
-// gone).
-func Compensate(g Git, t Task) []string {
-	var left []string
+// (R3): each worktree is removed if SafeRemove allows it (force: see
+// there), a task branch checked out in the main checkout is switched back
+// to what was checked out before (Repo.Return), and the branch is deleted
+// when it has no commits beyond its known base and nothing has it checked
+// out. It returns what remains, one line each (empty when all is gone), and
+// the ignored files force removed.
+func Compensate(g Git, t Task, force bool) (left, lost []string) {
 	for _, r := range t.Repos {
 		gr := g.in(r.Repo)
 		base := r.BaseCommit
@@ -335,7 +356,10 @@ func Compensate(g Git, t Task) []string {
 			}
 		}
 		if r.Worktree != "" {
-			removed, why, err := SafeRemove(gr, r.Repo, r.Worktree)
+			removed, why, l, err := SafeRemove(gr, r.Repo, r.Worktree, force)
+			for _, f := range l {
+				lost = append(lost, filepath.Join(r.Worktree, f))
+			}
 			switch {
 			case err != nil:
 				left = append(left, fmt.Sprintf("worktree %s remains: %v", r.Worktree, err))
@@ -351,12 +375,20 @@ func Compensate(g Git, t Task) []string {
 		} else if exists {
 			cur, err := gr.CurrentBranch()
 			if err == nil && cur == r.Branch {
-				back := r.Base
+				back := r.Return
 				if back == "" {
-					back = r.BaseCommit
+					// A task recorded before Return existed: its base, if
+					// that is a local branch.
+					if ok, _ := gr.BranchExists(r.Base); ok && r.Base != "" {
+						back = r.Base
+					}
 				}
-				if len(commits) > 0 || back == "" {
+				switch {
+				case base == "" || len(commits) > 0:
 					left = append(left, fmt.Sprintf("branch %s remains checked out in %s (%d new commits)", r.Branch, r.Repo, len(commits)))
+					continue
+				case back == "":
+					left = append(left, fmt.Sprintf("branch %s remains checked out in %s: what was checked out before is unknown", r.Branch, r.Repo))
 					continue
 				}
 				if err := gr.Switch(back); err != nil {
@@ -365,18 +397,19 @@ func Compensate(g Git, t Task) []string {
 				}
 			}
 		}
-		if !exists {
-			continue
-		}
-		if len(commits) > 0 {
+		switch {
+		case !exists:
+		case base == "":
+			left = append(left, fmt.Sprintf("branch %s remains: its base is unknown, so its new commits cannot be counted", r.Branch))
+		case len(commits) > 0:
 			left = append(left, fmt.Sprintf("branch %s remains: %d new commits (%s)", r.Branch, len(commits), commits[0]))
-			continue
-		}
-		if err := gr.DeleteBranch(r.Branch); err != nil {
-			left = append(left, fmt.Sprintf("branch %s remains: %v", r.Branch, err))
+		default:
+			if err := gr.DeleteBranch(r.Branch); err != nil {
+				left = append(left, fmt.Sprintf("branch %s remains: %v", r.Branch, err))
+			}
 		}
 	}
-	return left
+	return left, lost
 }
 
 // ErrSetupNotApproved means the setup command was shown and not approved;
@@ -487,7 +520,10 @@ func SetupCommand(data []byte) ([]string, error) {
 // false) it returns ErrSetupNotApproved and runs nothing. No file or no
 // setup key is nothing to do. A failed command is an error with the end
 // of its output.
-func Setup(ctx context.Context, run execx.Runner, trust TrustStore, project, repoFile string, approve func(cmd []string) bool) error {
+// SetupHash is the approval key of a repo file: the sha256 of its bytes.
+func SetupHash(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
+
+func Setup(ctx context.Context, run execx.Runner, trust TrustStore, project, repoFile string, approve func(cmd []string, hash string) bool) error {
 	data, err := os.ReadFile(repoFile)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -509,7 +545,7 @@ func Setup(ctx context.Context, run execx.Runner, trust TrustStore, project, rep
 		return err
 	}
 	if !ok {
-		if approve == nil || !approve(argv) {
+		if approve == nil || !approve(argv, hash) {
 			return ErrSetupNotApproved
 		}
 		if err := trust.Trust(project, hash); err != nil {
