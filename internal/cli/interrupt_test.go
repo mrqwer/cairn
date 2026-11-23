@@ -104,6 +104,8 @@ func TestInterruptMessageOnlyForApplyingCommands(t *testing.T) {
 		"capture": false, // without --write
 		"plan":    false, "status": false, "doctor": false, "project ls": false, "config validate": false,
 		"history": false, "history show": false, "host plan": false,
+		"agents new": true, "agents resume": true, "agents archive": true, "agents rm": true,
+		"agents ls": false, "agents pane": false,
 	}
 	for path, want := range cases {
 		c, _, err := root.Find(strings.Fields(path))

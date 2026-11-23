@@ -48,6 +48,7 @@ type fPane struct {
 	pid     int
 	dead    bool
 	cmd     string
+	argv    []string
 }
 
 func (f *fakeDriver) next() int { f.seq++; return f.seq }
@@ -77,7 +78,7 @@ func (f *fakeDriver) newPane(p tmux.PaneSpec) *fPane {
 	if len(p.Argv) > 0 {
 		cmd = p.Argv[0]
 	}
-	return &fPane{id: fmt.Sprintf("%%%d", n), key: p.Key, pid: 100 + n, cmd: cmd}
+	return &fPane{id: fmt.Sprintf("%%%d", n), key: p.Key, pid: 100 + n, cmd: cmd, argv: slices.Clone(p.Argv)}
 }
 
 func (f *fakeDriver) Snapshot(context.Context) (tmux.Snapshot, error) {
@@ -166,6 +167,17 @@ func (f *fakeDriver) SetOption(_ context.Context, scope, target, name, value str
 	if k := f.liveKey(scope, target); k != nil {
 		*k = value
 	}
+	if scope == "pane" && name == "@cairn_p" {
+		for _, s := range f.sessions {
+			for _, w := range s.windows {
+				for _, p := range w.panes {
+					if p.id == target {
+						p.key = value
+					}
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -208,6 +220,25 @@ func (f *fakeDriver) liveKey(scope, target string) *string {
 
 func (f *fakeDriver) RespawnPane(_ context.Context, paneID string, argv []string) error {
 	f.rec("RespawnPane %s %v", paneID, argv)
+	return nil
+}
+
+func (f *fakeDriver) SelectPane(_ context.Context, id string) error {
+	f.rec("SelectPane %s", id)
+	return nil
+}
+
+// pane returns the fake pane marked key, or nil.
+func (f *fakeDriver) pane(key string) *fPane {
+	for _, s := range f.sessions {
+		for _, w := range s.windows {
+			for _, p := range w.panes {
+				if p.key == key {
+					return p
+				}
+			}
+		}
+	}
 	return nil
 }
 

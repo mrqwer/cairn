@@ -58,9 +58,33 @@ func (s Store) withLock(fn func() error) error {
 	return fn()
 }
 
-// load folds the file to the last record per id, in order of last write.
-// Unparseable lines (including a truncated trailing one) are skipped.
+// load is the visible view: the last record per id with its curated
+// overlay applied; removed conversations are left out.
 func (s Store) load() ([]Conversation, error) {
+	recs, err := s.loadRaw()
+	if err != nil {
+		return nil, err
+	}
+	overlays, err := s.overlays()
+	if err != nil {
+		return nil, err
+	}
+	out := recs[:0]
+	for _, c := range recs {
+		if cu, ok := overlays[safeName(c.ID)+".json"]; ok {
+			if cu.Removed {
+				continue
+			}
+			cu.apply(&c)
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// loadRaw folds the file to the last record per id, in order of last write.
+// Unparseable lines (including a truncated trailing one) are skipped.
+func (s Store) loadRaw() ([]Conversation, error) {
 	data, err := os.ReadFile(s.path(dataFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -219,9 +243,10 @@ func (s Store) Update(id string, fn func(*Conversation) error) (Conversation, er
 }
 
 // Compact atomically rewrites the file keeping the last record per id.
+// Records hidden by a removed overlay are kept so undo can restore them.
 func (s Store) Compact() error {
 	return s.withLock(func() error {
-		recs, err := s.load()
+		recs, err := s.loadRaw()
 		if err != nil {
 			return err
 		}

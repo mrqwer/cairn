@@ -3,7 +3,13 @@ package cli
 
 import (
 	"github.com/spf13/cobra"
+
+	"github.com/mrqwer/cairn/internal/reconcile"
 )
+
+// Agent panes run this executable (read on every plan, so test seams on
+// exePath apply).
+func init() { reconcile.AgentCommand = agentSelf }
 
 // Version is injected at build time with -ldflags -X.
 var Version = "dev"
@@ -36,6 +42,6 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newInitCmd())
 	root.PersistentFlags().String("socket", "", "tmux server socket name (tmux -L); default $CAIRN_TMUX_SOCKET, else tmux's default server")
 	root.AddCommand(newProjectCmd(), newWsPlanCmd(), newWsApplyCmd(), newWsUpCmd(), newWsOpenCmd(),
-		newWsStatusCmd(), newHistoryCmd(), newUndoCmd(), newCaptureCmd(), newAdoptCmd(), newTmuxCmd())
+		newWsStatusCmd(), newHistoryCmd(), newUndoCmd(), newCaptureCmd(), newAdoptCmd(), newTmuxCmd(), newAgentsCmd())
 	return root
 }

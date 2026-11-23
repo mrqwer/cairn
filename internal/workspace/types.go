@@ -14,6 +14,12 @@ const (
 	RoleEditor  = "editor"
 	RoleCommand = "command"
 	RoleService = "service"
+	// RoleAgent is a pane bound to an agent conversation; its command is
+	// implied ("cairn agents pane <agent>") and never written as run.
+	RoleAgent = "agent"
+
+	// AgentWindow is the window key agent panes are added to by default.
+	AgentWindow = "agents"
 
 	RestartNever     = "never"
 	RestartOnFailure = "on-failure"
@@ -39,6 +45,8 @@ type Pane struct {
 	From    int      `toml:"from"`
 	Size    int      `toml:"size"`
 	Title   string   `toml:"title"`
+	// Agent is the conversation id shown by a pane with role "agent".
+	Agent string `toml:"agent"`
 }
 
 // Window is one tmux window; panes are created by a split sequence.

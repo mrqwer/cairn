@@ -164,6 +164,9 @@ func Marshal(p Project) ([]byte, error) {
 			if pn.Title != "" {
 				kv("title", quote(pn.Title))
 			}
+			if pn.Agent != "" {
+				kv("agent", quote(pn.Agent))
+			}
 		}
 	}
 	return []byte(b.String()), nil

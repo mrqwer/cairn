@@ -540,28 +540,34 @@ func newWsOpenCmd() *cobra.Command {
 				_, _ = fmt.Fprintf(errOut, "the session of %s was not found after apply; see: cairn plan %s\n", id, id)
 				return &ExitError{Code: 1}
 			}
-			// Inside tmux: never nest (Review Focus 5). Switch the invoking
-			// client, identified by its own TMUX/TMUX_PANE, to the session id
-			// — only when it is a client of the target server; a client of
-			// another server is never touched.
-			if here := tmuxClientSocket(); here != "" {
-				target, err := drv.SocketPath(ctx)
-				if err != nil {
-					return err
-				}
-				if filepath.Clean(here) != filepath.Clean(target) {
-					attach := "tmux "
-					if socket != "" {
-						attach += "-L " + socket + " "
-					}
-					_, _ = fmt.Fprintf(errOut, "you are inside another tmux server (%s); run: %sattach -t =%s\n", here, attach, p.Session)
-					return &ExitError{Code: 1}
-				}
-				return drv.SwitchClientHere(ctx, sid, os.Getenv("TMUX"), os.Getenv("TMUX_PANE"))
-			}
-			return execProcess(tmux.AttachCommand(socket, sid))
+			return switchOrAttach(cmd, drv, socket, p.Session, sid)
 		},
 	}
+}
+
+// switchOrAttach brings the user to session sid. Inside tmux: never nest
+// (Review Focus 5). Switch the invoking client, identified by its own
+// TMUX/TMUX_PANE, to the session id — only when it is a client of the
+// target server; a client of another server is never touched. Outside tmux
+// the process is replaced by tmux attach.
+func switchOrAttach(cmd *cobra.Command, drv wsDriver, socket, session, sid string) error {
+	ctx := ctxOf(cmd)
+	if here := tmuxClientSocket(); here != "" {
+		target, err := drv.SocketPath(ctx)
+		if err != nil {
+			return err
+		}
+		if filepath.Clean(here) != filepath.Clean(target) {
+			attach := "tmux "
+			if socket != "" {
+				attach += "-L " + socket + " "
+			}
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "you are inside another tmux server (%s); run: %sattach -t =%s\n", here, attach, session)
+			return &ExitError{Code: 1}
+		}
+		return drv.SwitchClientHere(ctx, sid, os.Getenv("TMUX"), os.Getenv("TMUX_PANE"))
+	}
+	return execProcess(tmux.AttachCommand(socket, sid))
 }
 
 // statusJSON is the output of status --json.

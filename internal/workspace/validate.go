@@ -3,8 +3,13 @@ package workspace
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// agentIDRe is the slug rule for conversation ids in agent panes. Unlike
+// project ids it allows upper case: conversation ids are ULIDs.
+var agentIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`)
 
 // FieldError is one validation problem; Key is a dotted path into the config.
 type FieldError struct{ Key, Msg string }
@@ -65,6 +70,7 @@ func (p Project) Validate() []FieldError {
 			ctl(pk+".role", pn.Role)
 			ctl(pk+".cwd", pn.Cwd)
 			ctl(pk+".title", pn.Title)
+			ctl(pk+".agent", pn.Agent)
 			for j, r := range pn.Run {
 				ctl(fmt.Sprintf("%s.run[%d]", pk, j), r)
 			}
@@ -85,9 +91,20 @@ func isSpace(r rune) bool {
 func validatePane(wk string, i int, pn Pane, add func(string, string, ...any)) {
 	pk := fmt.Sprintf("%s.panes[%d]", wk, i)
 	switch pn.Role {
-	case RoleShell, RoleEditor, RoleCommand, RoleService:
+	case RoleShell, RoleEditor, RoleCommand, RoleService, RoleAgent:
 	default:
-		add(pk+".role", "%q must be shell, editor, command or service", pn.Role)
+		add(pk+".role", "%q must be shell, editor, command, service or agent", pn.Role)
+	}
+	switch {
+	case pn.Role == RoleAgent && pn.Agent == "":
+		add(pk+".agent", "a pane with role agent needs agent = \"<conversation id>\"")
+	case pn.Role == RoleAgent && !agentIDRe.MatchString(pn.Agent):
+		add(pk+".agent", "%q must match [A-Za-z0-9][A-Za-z0-9_-]{0,62}", pn.Agent)
+	case pn.Role != RoleAgent && pn.Agent != "":
+		add(pk+".agent", "only a pane with role agent may set agent")
+	}
+	if pn.Role == RoleAgent && len(pn.Run) > 0 {
+		add(pk+".run", "a pane with role agent runs its conversation; remove run")
 	}
 	switch pn.Restart {
 	case RestartNever, RestartOnFailure, RestartAlways:

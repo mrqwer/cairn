@@ -409,3 +409,85 @@ func TestErrLockedEmptyHolderMessage(t *testing.T) {
 		t.Fatal("holder missing")
 	}
 }
+
+func TestCuratedOverlayWins(t *testing.T) {
+	s, root := newStore(t)
+	_ = s.Put(conv.Conversation{ID: "a", Name: "machine", Tags: []string{"x"}, State: conv.StateWorking})
+	now := time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)
+	cu := conv.Curated{Name: "curated", Purpose: "p", Tags: []string{"y"}, ArchivedAt: &now}
+	p := filepath.Join(root, s.CuratedPath("a"))
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, cu.Encode(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, ok, err := s.Get("a")
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if c.Name != "curated" || c.Purpose != "p" || len(c.Tags) != 1 || c.Tags[0] != "y" || c.ArchivedAt == nil || c.State != conv.StateWorking {
+		t.Fatalf("got %+v", c)
+	}
+	if l, _ := s.List(conv.Filter{}); len(l) != 0 {
+		t.Fatalf("archived listed: %+v", l)
+	}
+	// An Update keeps the overlay authoritative.
+	if _, err := s.Update("a", func(c *conv.Conversation) error { c.State = conv.StateIdle; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, conv.Curated{Name: "back"}.Encode(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, _, _ = s.Get("a")
+	if c.Name != "back" || c.ArchivedAt != nil || len(c.Tags) != 0 || c.State != conv.StateIdle {
+		t.Fatalf("got %+v", c)
+	}
+}
+
+func TestCuratedRemovedHidden(t *testing.T) {
+	s, root := newStore(t)
+	_ = s.Put(conv.Conversation{ID: "a", Name: "n"})
+	_ = s.Put(conv.Conversation{ID: "b", Name: "m"})
+	if err := s.SeedCurated("a"); err != nil {
+		t.Fatal(err)
+	}
+	data, ok, err := s.ReadCurated("a")
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	var cu conv.Curated
+	if err := cu.Decode(data); err != nil || cu.Name != "n" {
+		t.Fatalf("seed %+v %v", cu, err)
+	}
+	fi, _ := os.Stat(filepath.Join(root, s.CuratedPath("a")))
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("perm %v", fi.Mode())
+	}
+	// seeding again keeps the existing overlay
+	cu.Removed = true
+	_ = os.WriteFile(filepath.Join(root, s.CuratedPath("a")), cu.Encode(), 0o600)
+	if err := s.SeedCurated("a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.Get("a"); ok {
+		t.Fatal("removed conversation visible")
+	}
+	if _, err := s.Update("a", func(*conv.Conversation) error { return nil }); !errors.Is(err, conv.ErrNotFound) {
+		t.Fatalf("update removed: %v", err)
+	}
+	if l, _ := s.List(conv.Filter{Archived: true}); len(l) != 1 || l[0].ID != "b" {
+		t.Fatalf("list %+v", l)
+	}
+	if err := s.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	// Compact keeps removed records so undo can bring them back.
+	_ = os.Remove(filepath.Join(root, s.CuratedPath("a")))
+	if _, ok, _ := s.Get("a"); !ok {
+		t.Fatal("compact dropped a removed record")
+	}
+}
