@@ -46,6 +46,10 @@ type Env struct {
 type History struct {
 	Locator string `toml:"locator"`
 	Parser  string `toml:"parser"`
+	// SecretFields are field names whose values the index always masks
+	// (as "name: value", "name=value" or a JSON member), on top of the
+	// built-in secret patterns.
+	SecretFields []string `toml:"secret_fields"`
 }
 
 // HookFormatClaudeSettings is the settings-file layout of a JSON file with

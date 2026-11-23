@@ -543,10 +543,11 @@ func jumpToPane(cmd *cobra.Command, project, key string) error {
 func newAgentsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "agents",
-		Short: "AI agent conversations: start, resume, list, name, tag, archive, remove",
+		Short: "AI agent conversations: start, resume, list, find, import, name, tag, archive, remove",
 	}
 	cmd.AddCommand(newAgentsNewCmd(), newAgentsResumeCmd(), newAgentsLsCmd(), newAgentsNameCmd(),
-		newAgentsTagCmd(), newAgentsArchiveCmd(), newAgentsRmCmd(), newAgentsPaneCmd(), newAgentsDoctorCmd())
+		newAgentsTagCmd(), newAgentsArchiveCmd(), newAgentsRmCmd(), newAgentsPaneCmd(), newAgentsDoctorCmd(),
+		newAgentsImportCmd(), newAgentsFindCmd())
 	return cmd
 }
 

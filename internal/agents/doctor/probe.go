@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/mrqwer/cairn/internal/agents/adapter"
 	"github.com/mrqwer/cairn/internal/agents/hooks"
+	"github.com/mrqwer/cairn/internal/agents/index"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/xdg"
@@ -108,30 +108,12 @@ func (p *prober) exec(argv []string) (string, error) {
 // maxDetail bounds the tool output quoted in a finding, in runes.
 const maxDetail = 120
 
-// Patterns of secrets a tool may echo in an error: key=value pairs with a
-// secret-sounding key, URL credentials, bearer tokens and long opaque
-// tokens.
-var (
-	secretKV    = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*(?:key|token|secret|passw(?:or)?d|auth[A-Za-z]*|credential|cookie|session)[A-Za-z0-9_.-]*)(\s*[:=]\s*|\s+)("[^"]*"|'[^']*'|[^\s"',;]+)`)
-	urlUserinfo = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@`)
-	bearer      = regexp.MustCompile(`(?i)\b(bearer)\s+\S+`)
-	opaque      = regexp.MustCompile(`\b(?:sk|pk|ghp|gho|ghs|xox[abp]|glpat)[-_][A-Za-z0-9_-]{8,}|[A-Za-z0-9_+=-]{32,}`)
-)
-
-// redact masks secret-looking text in tool output.
-func redact(s string) string {
-	s = urlUserinfo.ReplaceAllString(s, "${1}[redacted]@")
-	s = bearer.ReplaceAllString(s, "$1 [redacted]")
-	s = secretKV.ReplaceAllString(s, "$1$2[redacted]")
-	return opaque.ReplaceAllString(s, "[redacted]")
-}
-
 // firstLine is the first non-empty line of tool output, redacted and cut
 // to maxDetail runes, for quoting in a finding.
 func firstLine(s string) string {
 	for _, l := range strings.Split(s, "\n") {
 		if l = strings.TrimSpace(l); l != "" {
-			l = redact(l)
+			l = index.Redact(l)
 			if r := []rune(l); len(r) > maxDetail {
 				l = string(r[:maxDetail]) + "…"
 			}
@@ -455,7 +437,7 @@ func (p *prober) checkHelp() string {
 		if strings.TrimSpace(out) == "" || errors.Is(err, errTimeout) {
 			reason := "it printed nothing"
 			if err != nil {
-				reason = redact(err.Error())
+				reason = index.Redact(err.Error())
 			}
 			p.add("help", LevelWarn, "cannot read %s of %s: %s", strings.Join(argv, " "), p.version, reason)
 			readAll = false

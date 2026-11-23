@@ -764,3 +764,65 @@ func TestTxnSeesAllAndWritesChanged(t *testing.T) {
 		t.Fatalf("lost updates: %d", c.IgnoredEvents)
 	}
 }
+
+func TestInsertNewSkipsKnownNativeIDs(t *testing.T) {
+	s, root := newStore(t)
+	_ = s.Put(conv.Conversation{ID: "a", Tool: "claude", NativeID: "n1"})
+	_ = s.Put(conv.Conversation{ID: "b", Tool: "claude", NativeID: "n2"})
+	// b is removed: its native id still counts as known.
+	if err := os.MkdirAll(filepath.Join(root, s.CuratedDir()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, s.CuratedPath("b")), []byte(`{"removed":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	known, err := s.NativeIDs("claude")
+	if err != nil || !known["n1"] || !known["n2"] || len(known) != 2 {
+		t.Fatalf("known %v %v", known, err)
+	}
+	added, err := s.InsertNew([]conv.Conversation{
+		{ID: "c", Tool: "claude", NativeID: "n1"},
+		{ID: "d", Tool: "claude", NativeID: "n2"},
+		{ID: "e", Tool: "claude", NativeID: "n3"},
+		{ID: "f", Tool: "codex", NativeID: "n1"},
+		{ID: "g", Tool: "claude", NativeID: "n3"}, // duplicate within the batch
+		{ID: "h", Tool: "claude"},                 // no native id
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, c := range added {
+		ids = append(ids, c.ID)
+	}
+	if strings.Join(ids, ",") != "e,f" {
+		t.Fatalf("added %v", ids)
+	}
+	l, _ := s.List(conv.Filter{Archived: true})
+	if len(l) != 3 {
+		t.Fatalf("visible %+v", l)
+	}
+}
+
+func TestInsertNewConcurrentNoDuplicates(t *testing.T) {
+	s, _ := newStore(t)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _ = s.InsertNew([]conv.Conversation{{ID: fmt.Sprintf("id%d", i), Tool: "claude", NativeID: "same"}})
+		}(i)
+	}
+	wg.Wait()
+	if l, _ := s.List(conv.Filter{}); len(l) != 1 {
+		t.Fatalf("records %+v", l)
+	}
+}
+
+func TestFilterMatchExported(t *testing.T) {
+	c := conv.Conversation{Project: "demo", Tags: []string{"x"}}
+	if !(conv.Filter{Project: "demo", Tag: "x"}).Match(c) || (conv.Filter{Project: "api"}).Match(c) {
+		t.Fatal("Match disagrees with List")
+	}
+}

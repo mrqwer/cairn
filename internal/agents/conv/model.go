@@ -132,3 +132,6 @@ func ValidID(s string) bool {
 	}
 	return true
 }
+
+// Match reports whether c passes f, as List decides.
+func (f Filter) Match(c Conversation) bool { return f.match(c) }

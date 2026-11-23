@@ -184,6 +184,11 @@ func (a Adapter) Validate() []FieldError {
 	if a.History.Parser != "" && a.History.Locator == "" {
 		add("history.locator", "required when history.parser is set")
 	}
+	for i, f := range a.History.SecretFields {
+		if !fieldName(f) {
+			add(fmt.Sprintf("history.secret_fields[%d]", i), fmt.Sprintf("must be a field name of [A-Za-z0-9_.-], got %q", f))
+		}
+	}
 	switch c.Hooks {
 	case "", "none", "settings-file", "config-override":
 	default:
@@ -327,4 +332,20 @@ func (a Adapter) validateProbe() []FieldError {
 		}
 	}
 	return errs
+}
+
+// fieldName reports whether s is a non-empty name of [A-Za-z0-9_.-], safe to
+// quote into a pattern.
+func fieldName(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '-'
+		if !ok {
+			return false
+		}
+	}
+	return true
 }

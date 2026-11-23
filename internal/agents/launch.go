@@ -404,3 +404,12 @@ func epoch(n int64) time.Time {
 	}
 	return time.Unix(n, 0)
 }
+
+// LocatorGlob is the adapter's history.locator as a glob over every
+// conversation ("~/" is home, {native_id} matches anything).
+func LocatorGlob(a adapter.Adapter, home string) (string, error) { return locatorGlob(a, home) }
+
+// NativeIDFromPath extracts {native_id} from a path matched by the
+// adapter's locator; "" when the locator's base name has no {native_id}.
+// The result is not validated: check it with ValidNativeID.
+func NativeIDFromPath(a adapter.Adapter, p string) string { return idFromPath(a, p) }

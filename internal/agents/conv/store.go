@@ -416,3 +416,59 @@ func (s Store) TxnWait(wait time.Duration, fn func(all []Conversation) ([]Conver
 		return nil
 	})
 }
+
+// NativeIDs returns the native ids recorded for tool, including those of
+// removed conversations (so an import never brings them back).
+func (s Store) NativeIDs(tool string) (map[string]bool, error) {
+	recs, err := s.loadRaw()
+	if err != nil {
+		return nil, err
+	}
+	return nativeIDs(recs, tool), nil
+}
+
+func nativeIDs(recs []Conversation, tool string) map[string]bool {
+	out := map[string]bool{}
+	for _, c := range recs {
+		if c.Tool == tool && c.NativeID != "" {
+			out[c.NativeID] = true
+		}
+	}
+	return out
+}
+
+// InsertNew appends, under the store lock, those of cs whose tool and
+// native id are not recorded yet (removed conversations included, and the
+// first of duplicates within cs) and returns them. Entries without a native
+// id or an id are never written. Two concurrent imports cannot record the
+// same native conversation twice.
+func (s Store) InsertNew(cs []Conversation) ([]Conversation, error) {
+	var added []Conversation
+	err := s.withLock(func() error {
+		recs, err := s.loadRaw()
+		if err != nil {
+			return err
+		}
+		known := map[string]map[string]bool{}
+		for _, c := range cs {
+			if c.ID == "" || c.NativeID == "" {
+				continue
+			}
+			k, ok := known[c.Tool]
+			if !ok {
+				k = nativeIDs(recs, c.Tool)
+				known[c.Tool] = k
+			}
+			if k[c.NativeID] {
+				continue
+			}
+			if err := s.appendLocked(c); err != nil {
+				return err
+			}
+			k[c.NativeID] = true
+			added = append(added, c)
+		}
+		return nil
+	})
+	return added, err
+}
