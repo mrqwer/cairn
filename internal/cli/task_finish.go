@@ -163,10 +163,6 @@ func showTaskDiff(cmd *cobra.Command, t task.Task, argv []string) error {
 	return nil
 }
 
-// finishRecord hands a task finished by merge or pull request over to the
-// finish record (Task 7). It does nothing until that exists.
-var finishRecord = func(cmd *cobra.Command, e *agentsEnv, t task.Task, p task.FinishPlan, res task.FinishResult) {}
-
 func newTaskFinishCmd() *cobra.Command {
 	var merge, pr, abandon, force, yes bool
 	cmd := &cobra.Command{
@@ -326,6 +322,8 @@ func finishTask(cmd *cobra.Command, e *agentsEnv, st taskSettings, t task.Task, 
 			return err
 		}
 	}
+	// What the draft record is made of is read while the branch exists.
+	info := collectRecordInfo(g, t, cs)
 	res, ferr := task.Finish(g, t, p, task.FinishOptions{Force: force && yes, Remote: st.prRemote, OpenPR: opener})
 	for _, d := range res.Done {
 		_, _ = fmt.Fprintf(out, "done: %s\n", d)
@@ -358,7 +356,7 @@ func finishTask(cmd *cobra.Command, e *agentsEnv, st taskSettings, t task.Task, 
 	removeFinishIntent(e.dirs, t.ID)
 	_, _ = fmt.Fprintf(out, "task %s is %s\n", t.Slug, t.Status)
 	if mode != task.ModeAbandon {
-		finishRecord(cmd, e, t, p, res)
+		offerRecord(cmd, e, t, info)
 	}
 	return nil
 }

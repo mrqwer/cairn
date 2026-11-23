@@ -104,6 +104,10 @@ func trustStore(d xdg.Dirs) task.TrustStore {
 type taskSettings struct {
 	isolation, prefix, worktreeRoot string
 	diffViewer, prTool, prRemote    string
+	// knowledgeRoot is where finish records go (knowledge.root resolved,
+	// <State>/records when unset); gateBanned extends the quality gate.
+	knowledgeRoot string
+	gateBanned    []string
 }
 
 func loadTaskSettings(d xdg.Dirs) (taskSettings, error) {
@@ -113,7 +117,7 @@ func loadTaskSettings(d xdg.Dirs) (taskSettings, error) {
 	}
 	var probs []string
 	for _, fe := range cfg.Validate() {
-		if strings.HasPrefix(fe.Key, "tasks.") {
+		if strings.HasPrefix(fe.Key, "tasks.") || strings.HasPrefix(fe.Key, "knowledge.") {
 			probs = append(probs, fe.Error())
 		}
 	}
@@ -127,8 +131,10 @@ func loadTaskSettings(d xdg.Dirs) (taskSettings, error) {
 	case strings.HasPrefix(root, "~/"):
 		root = filepath.Join(d.Home, root[2:])
 	}
+	kb := knowledgeDir(d, cfg.Knowledge.Root)
 	return taskSettings{isolation: cfg.Tasks.DefaultIsolation, prefix: cfg.Tasks.BranchPrefix, worktreeRoot: root,
-		diffViewer: cfg.Tasks.DiffViewer, prTool: cfg.Tasks.PRTool, prRemote: cfg.Tasks.PRRemote}, nil
+		diffViewer: cfg.Tasks.DiffViewer, prTool: cfg.Tasks.PRTool, prRemote: cfg.Tasks.PRRemote,
+		knowledgeRoot: kb, gateBanned: cfg.Tasks.GateBanned}, nil
 }
 
 // agentQueue is the concurrency queue with agents.max_running from the
@@ -258,7 +264,7 @@ func newTaskCmd() *cobra.Command {
 		Use:   "task",
 		Short: "Tasks: a branch (and worktree) with its agent window",
 	}
-	cmd.AddCommand(newTaskNewCmd(), newTaskLsCmd(), newTaskOpenCmd(), newTaskReviewCmd(), newTaskFinishCmd(), newTaskRecoverCmd())
+	cmd.AddCommand(newTaskNewCmd(), newTaskLsCmd(), newTaskOpenCmd(), newTaskReviewCmd(), newTaskFinishCmd(), newTaskRecoverCmd(), newTaskRecordCmd())
 	return cmd
 }
 
@@ -994,4 +1000,16 @@ func (e *agentsEnv) archiveTaskConvs(cs []conv.Conversation, out io.Writer) {
 	if n > 0 {
 		_, _ = fmt.Fprintf(out, "archived %d conversation(s) of the task (cairn agents resume brings one back)\n", n)
 	}
+}
+
+// knowledgeDir is knowledge.root as a path: <State>/records when unset,
+// "~/" the home directory.
+func knowledgeDir(d xdg.Dirs, root string) string {
+	switch {
+	case root == "":
+		return filepath.Join(d.State, "records")
+	case strings.HasPrefix(root, "~/"):
+		return filepath.Join(d.Home, root[2:])
+	}
+	return root
 }

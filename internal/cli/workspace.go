@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/mrqwer/cairn/internal/agents/task"
+	"github.com/mrqwer/cairn/internal/config"
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/history"
 	"github.com/mrqwer/cairn/internal/tmux"
@@ -175,8 +176,13 @@ func checkID(id string) error {
 // historyStore is the config history. Undo may write project files and the
 // curated overlays of agent conversations (names, tags, archive, removal).
 func historyStore(d xdg.Dirs) history.Store {
-	return history.Store{Root: wsRoot, Path: filepath.Join(d.State, "history.jsonl"),
-		AllowedRoots: []string{projectsDir(d), agentStore(d).CuratedDir(), task.Dir(d)}}
+	roots := []string{projectsDir(d), agentStore(d).CuratedDir(), task.Dir(d), knowledgeDir(d, "")}
+	// Finish records are history events too: their directory is allowed
+	// as configured now (an unreadable configuration allows the default only).
+	if cfg, _, err := config.Load(wsRoot, d, os.Getenv); err == nil && cfg.Knowledge.Root != "" && len(cfg.Validate()) == 0 {
+		roots = append(roots, knowledgeDir(d, cfg.Knowledge.Root))
+	}
+	return history.Store{Root: wsRoot, Path: filepath.Join(d.State, "history.jsonl"), AllowedRoots: roots}
 }
 
 // prompting is true while ask waits for an answer; main does not announce

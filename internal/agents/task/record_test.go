@@ -109,7 +109,7 @@ func TestRecordPathNoTraversal(t *testing.T) {
 			t.Errorf("dir %q accepted", dir)
 		}
 	}
-	filepath.Walk(root.Dir, func(p string, i os.FileInfo, _ error) error {
+	_ = filepath.Walk(root.Dir, func(p string, i os.FileInfo, _ error) error {
 		if !i.IsDir() {
 			t.Errorf("stray file %s", p)
 		}

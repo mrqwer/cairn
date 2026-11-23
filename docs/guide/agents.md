@@ -133,6 +133,20 @@ cairn task finish fix-login --abandon            # drop it
   was kept is listed by `task recover`; `cairn task finish <task> --abandon` removes it then
   (the status and the branch stay). A branch deleted by hand can only be closed with `--abandon`.
 
+### Finish record
+
+After a merge or pull request, `task finish` prints a draft record (Goal, Changed, Decision,
+Verify, Links) and saves it to `<State>/agents/drafts/<task>.md` (owner only). Changed lists the
+real files of the diff and Links the branch and commit range; what cannot be known stays `TODO`.
+Fill it in with `cairn task record <task> --edit` (or `--text-file FILE`, `-` for standard input).
+The record is written to `<knowledge.root>/<project>/<slug>.md` (default `<State>/records`) only
+when the quality gate passes: at most 120 words, at least 2 distinct concrete references (paths,
+7-hex commits, `go test`, `make <target>`, `pnpm`), no `TODO`, none of the filler phrases (robust,
+seamless, leverage, cutting-edge, state-of-the-art, best practices, plus `tasks.gate_banned`).
+Each check is printed as pass or fail. Run `task record` again to redo it; the write is in
+history, so `cairn undo` restores the previous record. A file at that path that is not the
+record of the same task is never overwritten.
+
 ## Concurrency limit
 
 At most `agents.max_running` (default 4, 0 = no limit) tools run at once: conversations in

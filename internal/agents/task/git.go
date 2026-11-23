@@ -525,3 +525,37 @@ func lines(out []byte, err error) ([]string, error) {
 	}
 	return ls, nil
 }
+
+// ChangedFiles lists the files the change of branch since it left base
+// touches (base...branch, renames as their new name), as git names them.
+func (g Git) ChangedFiles(base, branch string) ([]string, error) {
+	if err := CheckRef(base); err != nil {
+		return nil, err
+	}
+	if err := checkBranch(branch); err != nil {
+		return nil, err
+	}
+	out, err := g.run("diff", "--name-only", "-z", "--no-renames", base+"..."+branch, "--")
+	if err != nil {
+		return nil, err
+	}
+	var fs []string
+	for _, f := range strings.Split(string(out), "\x00") {
+		if f != "" {
+			fs = append(fs, f)
+		}
+	}
+	return fs, nil
+}
+
+// CommitIDs lists the full ids of the commits on branch that are not on
+// base, oldest first.
+func (g Git) CommitIDs(base, branch string) ([]string, error) {
+	if err := CheckRef(base); err != nil {
+		return nil, err
+	}
+	if err := checkBranch(branch); err != nil {
+		return nil, err
+	}
+	return lines(g.run("log", "--reverse", "--format=%H", base+".."+branch, "--"))
+}
