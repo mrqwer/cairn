@@ -172,6 +172,12 @@ func TestValidateErrors(t *testing.T) {
 			"history.parser: required when history.locator is set"},
 		{"history parser only", func(a *adapter.Adapter) { a.History.Parser = "p@1" },
 			"history.locator: required when history.parser is set"},
+		{"probe without help", func(a *adapter.Adapter) { a.ProbeFlags = [][]string{{"x", "agents"}} },
+			`probe_flags[0]: must contain "--help", "-h" or "help" (a probe never starts the tool), got ["x" "agents"]`},
+		{"probe empty", func(a *adapter.Adapter) { a.ProbeFlags = [][]string{{}} },
+			"probe_flags[0]: must not be empty"},
+		{"probe placeholder", func(a *adapter.Adapter) { a.ProbeFlags = [][]string{{"x", "{name}", "--help"}} },
+			`probe_flags[0]: placeholders are not allowed, got "{name}"`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -219,6 +225,15 @@ func TestBuiltinsValidate(t *testing.T) {
 		}
 		if errs := a.Validate(); len(errs) != 0 {
 			t.Errorf("%s: %v", n, errs)
+		}
+	}
+	for n, want := range map[string][][]string{
+		"claude": {{"claude", "--help"}, {"claude", "agents", "--help"}},
+		"codex":  {{"codex", "--help"}, {"codex", "resume", "--help"}},
+		"agy":    {{"agy", "--help"}},
+	} {
+		if !reflect.DeepEqual(m[n].ProbeFlags, want) {
+			t.Errorf("%s probe_flags = %v, want %v", n, m[n].ProbeFlags, want)
 		}
 	}
 	if m["codex"].Capabilities.Hooks != "config-override" || m["codex"].Capabilities.Discovery != "dir-diff" {

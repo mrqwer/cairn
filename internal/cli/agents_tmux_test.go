@@ -30,6 +30,14 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	// Agent probes must never run a real tool: only fake tools, which
+	// tests name by absolute path, are found.
+	agentLookPath = func(name string) (string, error) {
+		if !filepath.IsAbs(name) {
+			return "", exec.ErrNotFound
+		}
+		return exec.LookPath(name)
+	}
 	os.Exit(m.Run())
 }
 

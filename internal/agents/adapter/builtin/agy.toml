@@ -3,6 +3,8 @@
 name = "agy"
 binary = "agy"
 version_check = ["agy", "--version"]
+# Help commands `cairn agents doctor` reads to check the flags used exist.
+probe_flags = [["agy", "--help"]]
 
 [capabilities]
 resume_by_id = true

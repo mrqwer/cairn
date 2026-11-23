@@ -13,6 +13,11 @@ type Adapter struct {
 	Env          Env                 `toml:"env"`
 	History      History             `toml:"history"`
 	Hooks        HookConfig          `toml:"hooks"`
+	// ProbeFlags are help commands (each must contain --help, -h or help)
+	// whose output `cairn agents doctor` searches for the flags and
+	// subcommands the commands use; the first is the top-level help, where
+	// options placed right after the binary (hooks) must appear.
+	ProbeFlags [][]string `toml:"probe_flags"`
 }
 
 // Capabilities declares what a tool can do; cairn fills the gaps.

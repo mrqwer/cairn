@@ -1,6 +1,8 @@
 name = "claude"
 binary = "claude"
 version_check = ["claude", "--version"]
+# Help commands `cairn agents doctor` reads to check the flags used exist.
+probe_flags = [["claude", "--help"], ["claude", "agents", "--help"]]
 
 [capabilities]
 name_at_start = true

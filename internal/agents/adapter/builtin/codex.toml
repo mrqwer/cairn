@@ -3,6 +3,8 @@
 name = "codex"
 binary = "codex"
 version_check = ["codex", "--version"]
+# Help commands `cairn agents doctor` reads to check the flags used exist.
+probe_flags = [["codex", "--help"], ["codex", "resume", "--help"]]
 
 [capabilities]
 resume_by_id = true

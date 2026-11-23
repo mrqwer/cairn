@@ -40,3 +40,15 @@ func TestWrite(t *testing.T) {
 		t.Fatalf("log %q", log)
 	}
 }
+
+func TestWriteHelp(t *testing.T) {
+	dir := t.TempDir()
+	p := testtool.Write(t, dir, testtool.Spec{Name: "fake", Help: "Usage: fake [--model <m>]\n  --name <n>\n"})
+	if out := run(t, p, 0, "agents", "--help"); out != "Usage: fake [--model <m>]\n  --name <n>\n" {
+		t.Fatalf("help %q", out)
+	}
+	log, _ := os.ReadFile(filepath.Join(dir, "fake.log"))
+	if !strings.Contains(string(log), "  agents\n  --help\n") {
+		t.Fatalf("help call must be logged: %q", log)
+	}
+}

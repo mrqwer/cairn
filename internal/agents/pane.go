@@ -355,7 +355,13 @@ func withHooks(env PaneEnv, a adapter.Adapter, c conv.Conversation, argv []strin
 		env.printf("note: state hooks for %s are unavailable (%v); its state is observed instead\n", title(c), err)
 		return argv
 	}
-	if len(extra) == 0 {
+	return WithHookArgs(argv, extra)
+}
+
+// WithHookArgs puts hook arguments right after the binary (argv[0]), before
+// any subcommand, where every tool reads options.
+func WithHookArgs(argv, extra []string) []string {
+	if len(extra) == 0 || len(argv) == 0 {
 		return argv
 	}
 	out := make([]string, 0, len(argv)+len(extra))

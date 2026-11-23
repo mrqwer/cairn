@@ -15,6 +15,8 @@ type Spec struct {
 	Version string // printed for --version
 	// ListJSON is printed when the first argument is "agents" and --json is present.
 	ListJSON string
+	// Help is printed (after logging the call) when any argument is --help.
+	Help     string
 	ExitCode int
 }
 
@@ -33,6 +35,10 @@ func Write(t testing.TB, dir string, spec Spec) string {
 	if err := os.WriteFile(list, []byte(spec.ListJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	help := filepath.Join(dir, spec.Name+".help.txt")
+	if err := os.WriteFile(help, []byte(spec.Help), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	script := fmt.Sprintf(`#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo %s
@@ -45,13 +51,16 @@ fi
   env | sort
   echo "END"
 } >> %s
+for a in "$@"; do
+  if [ "$a" = "--help" ]; then cat %s; exit 0; fi
+done
 if [ "$1" = "agents" ]; then
   for a in "$@"; do
     if [ "$a" = "--json" ]; then cat %s; exit 0; fi
   done
 fi
 exit %d
-`, shQuote(spec.Version), shQuote(log), shQuote(list), spec.ExitCode)
+`, shQuote(spec.Version), shQuote(log), shQuote(help), shQuote(list), spec.ExitCode)
 	p := filepath.Join(dir, spec.Name)
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil { //nolint:gosec // test helper must be executable
 		t.Fatal(err)

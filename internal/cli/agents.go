@@ -546,7 +546,7 @@ func newAgentsCmd() *cobra.Command {
 		Short: "AI agent conversations: start, resume, list, name, tag, archive, remove",
 	}
 	cmd.AddCommand(newAgentsNewCmd(), newAgentsResumeCmd(), newAgentsLsCmd(), newAgentsNameCmd(),
-		newAgentsTagCmd(), newAgentsArchiveCmd(), newAgentsRmCmd(), newAgentsPaneCmd())
+		newAgentsTagCmd(), newAgentsArchiveCmd(), newAgentsRmCmd(), newAgentsPaneCmd(), newAgentsDoctorCmd())
 	return cmd
 }
 

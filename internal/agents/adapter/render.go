@@ -200,6 +200,8 @@ func (a Adapter) Validate() []FieldError {
 		add("capabilities.discovery", fmt.Sprintf("must be none, dir-diff, list or state-file, got %q", c.Discovery))
 	}
 
+	errs = append(errs, a.validateProbe()...)
+
 	names := make([]string, 0, len(a.Commands))
 	for n := range a.Commands {
 		names = append(names, n)
@@ -291,6 +293,37 @@ func (a Adapter) validateHooks() []FieldError {
 		}
 		if !validKind(h.Kind) {
 			add("hooks.kind", fmt.Sprintf("unknown event kind %q", h.Kind))
+		}
+	}
+	return errs
+}
+
+// validateProbe checks probe_flags: each entry is a help command, so a
+// doctor probe can never start a conversation.
+func (a Adapter) validateProbe() []FieldError {
+	var errs []FieldError
+	for i, argv := range a.ProbeFlags {
+		f := fmt.Sprintf("probe_flags[%d]", i)
+		if len(argv) == 0 {
+			errs = append(errs, FieldError{f, "must not be empty"})
+			continue
+		}
+		help, bad := false, ""
+		for _, e := range argv {
+			switch e {
+			case "--help", "-h", "help":
+				help = true
+			}
+			if bad == "" && strings.ContainsAny(e, "{}") {
+				bad = e
+			}
+		}
+		if bad != "" {
+			errs = append(errs, FieldError{f, fmt.Sprintf("placeholders are not allowed, got %q", bad)})
+			continue
+		}
+		if !help {
+			errs = append(errs, FieldError{f, fmt.Sprintf(`must contain "--help", "-h" or "help" (a probe never starts the tool), got %q`, argv)})
 		}
 	}
 	return errs
