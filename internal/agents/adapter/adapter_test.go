@@ -2,14 +2,12 @@ package adapter_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/mrqwer/cairn/internal/agents/adapter"
-	"github.com/mrqwer/cairn/internal/agents/testtool"
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/xdg"
 )
@@ -127,34 +125,88 @@ func TestStrictUnknownKey(t *testing.T) {
 	}
 }
 
+func okAdapter() adapter.Adapter {
+	return adapter.Adapter{Name: "x", Capabilities: adapter.Capabilities{Discovery: "list"},
+		Commands: map[string][]string{"start": {"x"}}}
+}
+
 func TestValidateErrors(t *testing.T) {
 	cases := []struct {
 		name string
-		a    adapter.Adapter
+		mod  func(*adapter.Adapter)
 		want string
 	}{
-		{"id without preassign", adapter.Adapter{Name: "x", Capabilities: adapter.Capabilities{Discovery: "list"},
-			Commands: map[string][]string{"start": {"x", "{id}"}}}, "preassign_id"},
-		{"unknown placeholder", adapter.Adapter{Name: "x", Capabilities: adapter.Capabilities{Discovery: "list"},
-			Commands: map[string][]string{"start": {"x", "{foo}"}}}, "{foo}"},
-		{"embedded splice", adapter.Adapter{Name: "x", Capabilities: adapter.Capabilities{Discovery: "list"},
-			Commands: map[string][]string{"start": {"x", "--a={profile_args...}"}}}, "whole element"},
-		{"discovery missing", adapter.Adapter{Name: "x",
-			Commands: map[string][]string{"start": {"x"}}}, "capabilities.discovery"},
-		{"start missing", adapter.Adapter{Name: "x", Capabilities: adapter.Capabilities{Discovery: "list"}}, "commands.start"},
-		{"resume missing", adapter.Adapter{Name: "x", Capabilities: adapter.Capabilities{ResumeByID: true, Discovery: "list"},
-			Commands: map[string][]string{"start": {"x"}}}, "commands.resume"},
+		{"id without preassign", func(a *adapter.Adapter) { a.Commands["start"] = []string{"x", "{id}"} },
+			"commands.start: {id} requires capabilities.preassign_id"},
+		{"unknown placeholder", func(a *adapter.Adapter) { a.Commands["start"] = []string{"x", "{foo}"} },
+			`commands.start: unknown placeholder {foo} in "{foo}"`},
+		{"embedded splice", func(a *adapter.Adapter) { a.Commands["start"] = []string{"x", "--a={profile_args...}"} },
+			`commands.start: {profile_args...} must be a whole element, got "--a={profile_args...}"`},
+		{"value in command", func(a *adapter.Adapter) { a.Commands["start"] = []string{"x", "{value}"} },
+			`commands.start: {value} is only valid in profile_flags, got "{value}"`},
+		{"command placeholder in profile flag", func(a *adapter.Adapter) {
+			a.ProfileFlags = map[string][]string{"model": {"--m", "{name}"}}
+		}, `profile_flags.model: {name} is not valid in profile_flags (only {value}), got "{name}"`},
+		{"splice in profile flag", func(a *adapter.Adapter) {
+			a.ProfileFlags = map[string][]string{"model": {"{profile_args...}"}}
+		}, `profile_flags.model: {profile_args...} is not valid in profile_flags (only {value}), got "{profile_args...}"`},
+		{"unknown placeholder in profile flag", func(a *adapter.Adapter) {
+			a.ProfileFlags = map[string][]string{"model": {"{nope}"}}
+		}, `profile_flags.model: unknown placeholder {nope} in "{nope}"`},
+		{"discovery missing", func(a *adapter.Adapter) { a.Capabilities.Discovery = "" },
+			"capabilities.discovery: required when neither preassign_id nor name_at_start is set"},
+		{"discovery bad enum", func(a *adapter.Adapter) { a.Capabilities.Discovery = "magic" },
+			`capabilities.discovery: must be none, dir-diff, list or state-file, got "magic"`},
+		{"hooks bad enum", func(a *adapter.Adapter) { a.Capabilities.Hooks = "magic" },
+			`capabilities.hooks: must be none, settings-file or config-override, got "magic"`},
+		{"start missing", func(a *adapter.Adapter) { delete(a.Commands, "start") }, "commands.start: required"},
+		{"resume missing", func(a *adapter.Adapter) { a.Capabilities.ResumeByID = true },
+			"commands.resume: required when resume_by_id or resume_by_name is set"},
+		{"fork command missing", func(a *adapter.Adapter) { a.Capabilities.Fork = true },
+			"commands.fork: required when capabilities.fork is set"},
+		{"list command missing", func(a *adapter.Adapter) { a.Capabilities.ListJSON = true },
+			"commands.list: required when capabilities.list_json is set"},
+		{"delete command missing", func(a *adapter.Adapter) { a.Capabilities.Delete = true },
+			"commands.delete: required when capabilities.delete is set"},
+		{"history half set", func(a *adapter.Adapter) { a.History.Locator = "~/x/*.jsonl" },
+			"history.parser: required when history.locator is set"},
+		{"history parser only", func(a *adapter.Adapter) { a.History.Parser = "p@1" },
+			"history.locator: required when history.parser is set"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			errs := c.a.Validate()
-			for _, e := range errs {
-				if strings.Contains(e.Error(), c.want) {
-					return
-				}
+			a := okAdapter()
+			c.mod(&a)
+			errs := a.Validate()
+			if len(errs) != 1 || errs[0].Error() != c.want {
+				t.Fatalf("want exactly [%s], got %v", c.want, errs)
 			}
-			t.Fatalf("want error containing %q, got %v", c.want, errs)
 		})
+	}
+	if errs := okAdapter().Validate(); len(errs) != 0 {
+		t.Fatalf("baseline must be valid: %v", errs)
+	}
+}
+
+func TestDuplicateUserNameIsLoadError(t *testing.T) {
+	root := writeTool(t, "/cfg", "a.toml", "name = \"dup\"\n[capabilities]\ndiscovery = \"list\"\n[commands]\nstart = [\"dup\"]\n")
+	dir := root.Path("/cfg/tools")
+	body := "name = \"dup\"\nbinary = \"other\"\n[capabilities]\ndiscovery = \"list\"\n[commands]\nstart = [\"dup\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "b.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	as, lerrs, err := adapter.Load(root, xdg.Dirs{Config: "/cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lerrs) != 1 || !strings.HasSuffix(lerrs[0].File, "b.toml") ||
+		lerrs[0].Err.Error() != `duplicate adapter name "dup" (already defined in a.toml)` {
+		t.Fatalf("errs: %v", lerrs)
+	}
+	for _, a := range as {
+		if a.Name == "dup" && a.Binary != "" {
+			t.Fatalf("first file must win: %+v", a)
+		}
 	}
 }
 
@@ -187,37 +239,4 @@ func TestForkNeedsCapability(t *testing.T) {
 	if _, err := a.Render("nope", adapter.Vars{}); err == nil {
 		t.Fatal("unknown command must fail")
 	}
-}
-
-func TestTesttoolWrite(t *testing.T) {
-	dir := t.TempDir()
-	p := testtool.Write(t, dir, testtool.Spec{Name: "fake", Version: "1.2.3", ListJSON: `[{"id":"x"}]`, ExitCode: 3})
-	out := runTool(t, p, 0, "--version")
-	if strings.TrimSpace(out) != "1.2.3" {
-		t.Fatalf("version %q", out)
-	}
-	if out := runTool(t, p, 0, "agents", "--json"); out != `[{"id":"x"}]` {
-		t.Fatalf("list %q", out)
-	}
-	runTool(t, p, 3, "start", "a b")
-	log, _ := os.ReadFile(filepath.Join(dir, "fake.log"))
-	if !strings.Contains(string(log), "  a b\n") || !strings.Contains(string(log), "ENV:") {
-		t.Fatalf("log %q", log)
-	}
-}
-
-func runTool(t *testing.T, path string, wantExit int, args ...string) string {
-	t.Helper()
-	cmd := exec.Command(path, args...)
-	out, err := cmd.Output()
-	code := 0
-	if ee, ok := err.(*exec.ExitError); ok {
-		code = ee.ExitCode()
-	} else if err != nil {
-		t.Fatal(err)
-	}
-	if code != wantExit {
-		t.Fatalf("exit %d want %d", code, wantExit)
-	}
-	return string(out)
 }

@@ -10,7 +10,6 @@ resume_by_name = true
 fork = true
 list_json = true
 hooks = "settings-file"
-delete = true
 
 [commands]
 start = ["claude", "--session-id", "{id}", "--name", "{name}", "{profile_args...}"]

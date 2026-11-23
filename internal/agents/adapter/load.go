@@ -39,6 +39,7 @@ func Load(root fsx.Root, dirs xdg.Dirs) ([]Adapter, []LoadError, error) {
 		byName[a.Name] = a
 	}
 
+	userFile := map[string]string{}
 	dir := filepath.Join(dirs.Config, "tools")
 	files, err := os.ReadDir(root.Path(dir))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -59,6 +60,11 @@ func Load(root fsx.Root, dirs xdg.Dirs) ([]Adapter, []LoadError, error) {
 			lerrs = append(lerrs, LoadError{file, err})
 			continue
 		}
+		if first, dup := userFile[a.Name]; dup {
+			lerrs = append(lerrs, LoadError{file, fmt.Errorf("duplicate adapter name %q (already defined in %s)", a.Name, first)})
+			continue
+		}
+		userFile[a.Name] = e.Name()
 		byName[a.Name] = a
 	}
 

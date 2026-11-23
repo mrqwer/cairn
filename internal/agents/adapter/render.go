@@ -36,36 +36,58 @@ func scan(elem string, lit func(string), ph func(string) error) error {
 	return nil
 }
 
-// checkElement validates the placeholders of one template element.
-func checkElement(elem string) error {
-	if elem == profileArgsPlaceholder {
-		return nil
-	}
-	return scan(elem, func(string) {}, func(name string) error {
+type ctxKind int
+
+const (
+	ctxCommand ctxKind = iota // commands.*: every placeholder except {value}
+	ctxFlag                   // profile_flags.*: only {value}
+)
+
+// checkPlaceholder is the single rule for one placeholder name in one element.
+// ponytail: there is no escape for a literal "{...}" in an element; such text
+// fails as an unknown placeholder. Known limit, add a "{{" escape if needed.
+func checkPlaceholder(name, elem string, k ctxKind) error {
+	switch k {
+	case ctxFlag:
+		if name == "value" {
+			return nil
+		}
+		if name == "profile_args..." || knownPlaceholders[name] {
+			return fmt.Errorf("{%s} is not valid in profile_flags (only {value}), got %q", name, elem)
+		}
+	default:
 		if name == "profile_args..." {
 			return fmt.Errorf("{profile_args...} must be a whole element, got %q", elem)
 		}
-		if !knownPlaceholders[name] {
-			return fmt.Errorf("unknown placeholder {%s} in %q", name, elem)
+		if name == "value" {
+			return fmt.Errorf("{value} is only valid in profile_flags, got %q", elem)
 		}
-		return nil
-	})
+		if knownPlaceholders[name] {
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown placeholder {%s} in %q", name, elem)
 }
 
-func expand(tpl []string, vals map[string]string, spliced []string) ([]string, error) {
+// checkElement validates the placeholders of one template element.
+func checkElement(elem string, k ctxKind) error {
+	if k == ctxCommand && elem == profileArgsPlaceholder {
+		return nil
+	}
+	return scan(elem, func(string) {}, func(name string) error { return checkPlaceholder(name, elem, k) })
+}
+
+func expand(tpl []string, vals map[string]string, spliced []string, k ctxKind) ([]string, error) {
 	out := make([]string, 0, len(tpl))
 	for _, elem := range tpl {
-		if elem == profileArgsPlaceholder {
+		if k == ctxCommand && elem == profileArgsPlaceholder {
 			out = append(out, spliced...)
 			continue
 		}
 		var b strings.Builder
 		err := scan(elem, func(s string) { b.WriteString(s) }, func(name string) error {
-			if name == "profile_args..." {
-				return fmt.Errorf("{profile_args...} must be a whole element, got %q", elem)
-			}
-			if !knownPlaceholders[name] {
-				return fmt.Errorf("unknown placeholder {%s} in %q", name, elem)
+			if err := checkPlaceholder(name, elem, k); err != nil {
+				return err
 			}
 			b.WriteString(vals[name])
 			return nil
@@ -98,7 +120,7 @@ func (a Adapter) Render(cmd string, v Vars) ([]string, error) {
 	}
 	return expand(tpl, map[string]string{
 		"id": v.ID, "name": v.Name, "new_id": v.NewID, "native_id": v.NativeID, "cwd": v.Cwd,
-	}, v.ProfileArgs)
+	}, v.ProfileArgs, ctxCommand)
 }
 
 // ProfileArgs maps generic profile settings to this tool's flags in sorted key
@@ -115,7 +137,7 @@ func (a Adapter) ProfileArgs(settings map[string]string) (args, unsupported []st
 			unsupported = append(unsupported, k)
 			continue
 		}
-		out, err := expand(tpl, map[string]string{"value": settings[k]}, nil)
+		out, err := expand(tpl, map[string]string{"value": settings[k]}, nil, ctxFlag)
 		if err != nil {
 			unsupported = append(unsupported, k)
 			continue
@@ -147,6 +169,21 @@ func (a Adapter) Validate() []FieldError {
 	if (c.ResumeByID || c.ResumeByName) && len(a.Commands["resume"]) == 0 {
 		add("commands.resume", "required when resume_by_id or resume_by_name is set")
 	}
+	for _, r := range []struct {
+		on   bool
+		cmd  string
+		capn string
+	}{{c.Fork, "fork", "fork"}, {c.ListJSON, "list", "list_json"}, {c.Delete, "delete", "delete"}} {
+		if r.on && len(a.Commands[r.cmd]) == 0 {
+			add("commands."+r.cmd, "required when capabilities."+r.capn+" is set")
+		}
+	}
+	if a.History.Locator != "" && a.History.Parser == "" {
+		add("history.parser", "required when history.locator is set")
+	}
+	if a.History.Parser != "" && a.History.Locator == "" {
+		add("history.locator", "required when history.parser is set")
+	}
 	switch c.Hooks {
 	case "", "none", "settings-file", "config-override":
 	default:
@@ -169,7 +206,7 @@ func (a Adapter) Validate() []FieldError {
 	sort.Strings(names)
 	for _, n := range names {
 		for _, e := range a.Commands[n] {
-			if err := checkElement(e); err != nil {
+			if err := checkElement(e, ctxCommand); err != nil {
 				add("commands."+n, err.Error())
 			}
 		}
@@ -181,7 +218,7 @@ func (a Adapter) Validate() []FieldError {
 	sort.Strings(flags)
 	for _, n := range flags {
 		for _, e := range a.ProfileFlags[n] {
-			if err := checkElement(e); err != nil {
+			if err := checkElement(e, ctxFlag); err != nil {
 				add("profile_flags."+n, err.Error())
 			}
 		}
