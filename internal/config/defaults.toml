@@ -18,6 +18,9 @@ temporary_file_path = "/var/tmp"
 default_isolation = "ask"
 branch_prefix = "task"
 worktree_root = ""
+diff_viewer = "git diff"
+pr_tool = ""
+pr_remote = "origin"
 
 [agents]
 max_running = 4

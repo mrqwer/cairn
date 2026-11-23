@@ -86,6 +86,38 @@ cairn agents new codex --task fix-login   # a second agent on the same task, in 
   notes) count as work: the worktree is kept and they are listed; `cairn undo --force <id>` lets
   them go and lists them as lost. A worktree an agent still runs in is kept.
 
+### Review and finish
+
+```
+cairn task review fix-login                      # the task's diff; status becomes review
+cairn task review fix-login --viewer "delta --side-by-side"
+cairn task finish fix-login --merge              # merge into the base locally (not undoable)
+cairn task finish fix-login --pr                 # push + pull request via gh/glab (not undoable)
+cairn task finish fix-login --abandon            # drop it
+```
+
+- The viewer is `tasks.diff_viewer` (default `git diff`). It is split on spaces and run without a
+  shell. Arguments may contain `{base}`, `{branch}`, `{range}`, `{repo}`, `{worktree}`, replaced
+  inside the argument. Without placeholders, git gets `<base>...<branch>` appended and any other
+  viewer reads the diff on its input.
+- `finish` needs exactly one mode and prints every step first; steps marked "not undoable"
+  (merge, push, pull request) need `--yes` or a yes on a terminal.
+  - `--merge` merges into the base branch where it is checked out (a fast-forward when possible).
+    It refuses uncommitted changes there; a conflict is aborted and nothing changes. A base that
+    is not checked out moves as a ref only. Then the worktree and the merged branch are removed.
+  - `--pr` needs `tasks.pr_tool = "gh"` or `"glab"` (otherwise it stops and prints the commands to
+    run yourself). It pushes to `tasks.pr_remote` (default `origin`), opens the pull request,
+    then removes the worktree; the branch stays.
+  - `--abandon` removes the worktree, and the branch when it has no commits beyond its base. A
+    branch whose commits are all pushed is kept.
+- Nothing that holds work is removed silently: uncommitted, changed or ignored files in the
+  worktree and commits that exist nowhere else make `finish` refuse and list them. `--force --yes`
+  lets exactly that list go and prints it as lost; work that appears after the list was shown is
+  kept. A `--here` task's main checkout is only switched (back to what it had, or to the base
+  after a merge), never cleaned: its uncommitted changes block the finish even with `--force`.
+- The task's conversations are archived and its window removed; an agent still running in the
+  task blocks the finish. `cairn undo` of a finish restores only the task's status.
+
 ## Concurrency limit
 
 At most `agents.max_running` (default 4, 0 = no limit) tools run at once: conversations in

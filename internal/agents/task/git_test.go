@@ -120,7 +120,7 @@ func TestGitBranchWorktreeLifecycle(t *testing.T) {
 	if c, err := g.NewCommits(base, "task/x"); err != nil || len(c) != 1 || !strings.Contains(c[0], "work") {
 		t.Fatalf("new commits %q %v", c, err)
 	}
-	if u, err := g.Unpushed(wt, "task/x"); err != nil || len(u) == 0 {
+	if u, err := g.Unpushed(wt, "task/x", base); err != nil || len(u) != 1 {
 		t.Fatalf("unpushed %q %v", u, err)
 	}
 	diff, err := g.Diff(base, "task/x")
@@ -163,7 +163,7 @@ func TestGitRefusesOptionLikeArguments(t *testing.T) {
 	}
 	_, e1 := g.Diff("-p", "main")
 	_, e2 := g.NewCommits("main", "--all")
-	_, e3 := g.Unpushed("/home/u/wt", "--all")
+	_, e3 := g.Unpushed("/home/u/wt", "--all", "main")
 	_, e4 := g.ResolveCommit("--all")
 	checks = append(checks, e1, e2, e3, e4)
 	for i, err := range checks {

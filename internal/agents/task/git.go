@@ -3,8 +3,10 @@ package task
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -150,6 +152,11 @@ func (g Git) Dirty(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return porcelainFiles(out), nil
+}
+
+// porcelainFiles is the sorted file list of "status --porcelain=v1 -z".
+func porcelainFiles(out []byte) []string {
 	var files []string
 	recs := strings.Split(string(out), "\x00")
 	for i := 0; i < len(recs); i++ {
@@ -163,7 +170,7 @@ func (g Git) Dirty(path string) ([]string, error) {
 		}
 	}
 	sort.Strings(files)
-	return files, nil
+	return files
 }
 
 // Ignored lists the ignored files and directories (a directory as one
@@ -204,17 +211,141 @@ func (g Git) Tracked(path string) (map[string]bool, error) {
 	return m, nil
 }
 
-// Unpushed lists the commits ("<short id> <subject>") of branch that no
-// remote-tracking branch has, as seen from the checkout at path. Without
-// remotes that is every commit of the branch.
-func (g Git) Unpushed(path, branch string) ([]string, error) {
+// Unpushed lists the commits ("<short id> <subject>") of branch that are
+// on none of bases (at least one: the task's base branch and/or its base
+// commit) and on no remote-tracking branch, as seen from the checkout at
+// path: the commits that exist nowhere else. A repository without remotes
+// therefore lists only the commits beyond the bases, never their history.
+func (g Git) Unpushed(path, branch string, bases ...string) ([]string, error) {
 	if err := checkPath(path); err != nil {
 		return nil, err
 	}
 	if err := checkBranch(branch); err != nil {
 		return nil, err
 	}
-	return lines(g.in(path).run("log", "--format=%h %s", branch, "--not", "--remotes", "--"))
+	if err := checkBases(bases); err != nil {
+		return nil, err
+	}
+	args := append([]string{"log", "--format=%h %s", "refs/heads/" + branch, "--not"}, bases...)
+	return lines(g.in(path).run(append(args, "--remotes", "--")...))
+}
+
+// Unmerged lists the commits ("<short id> <subject>") of branch that are on
+// none of bases.
+func (g Git) Unmerged(branch string, bases ...string) ([]string, error) {
+	if err := checkBranch(branch); err != nil {
+		return nil, err
+	}
+	if err := checkBases(bases); err != nil {
+		return nil, err
+	}
+	args := append([]string{"log", "--format=%h %s", "refs/heads/" + branch, "--not"}, bases...)
+	return lines(g.run(append(args, "--")...))
+}
+
+func checkBases(bases []string) error {
+	if len(bases) == 0 {
+		return errors.New("no base to compare with")
+	}
+	for _, b := range bases {
+		if err := CheckRef(b); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// remoteRe is a remote name cairn passes to git push.
+var remoteRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// ValidRemote reports whether name is a remote name cairn accepts.
+func ValidRemote(name string) bool {
+	return remoteRe.MatchString(name) && !strings.Contains(name, "..")
+}
+
+// Push pushes branch to the same name on remote and sets it as the
+// branch's upstream. Not undoable: callers confirm first.
+func (g Git) Push(remote, branch string) error {
+	if !ValidRemote(remote) {
+		return fmt.Errorf("remote %q is not a remote name", remote)
+	}
+	if err := checkBranch(branch); err != nil {
+		return err
+	}
+	ref := "refs/heads/" + branch
+	_, err := g.run("push", "--set-upstream", "--end-of-options", remote, ref+":"+ref)
+	return err
+}
+
+// HasRemote reports whether the repository has a remote named name.
+func (g Git) HasRemote(name string) (bool, error) {
+	if !ValidRemote(name) {
+		return false, fmt.Errorf("remote %q is not a remote name", name)
+	}
+	rs, err := lines(g.run("remote"))
+	if err != nil {
+		return false, err
+	}
+	for _, r := range rs {
+		if r == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// IsAncestor reports whether commit a is an ancestor of (or equal to) b.
+func (g Git) IsAncestor(a, b string) (bool, error) {
+	if err := CheckRef(a); err != nil {
+		return false, err
+	}
+	if err := CheckRef(b); err != nil {
+		return false, err
+	}
+	out, err := g.R.Run(g.ctx(), "git", "-C", g.Dir, "merge-base", "--is-ancestor", "--end-of-options", a, b)
+	if err == nil {
+		return true, nil
+	}
+	var ee interface{ ExitCode() int }
+	if errors.As(err, &ee) && ee.ExitCode() == 1 && len(bytes.TrimSpace(out)) == 0 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base: %w: %s", err, bytes.TrimSpace(out))
+}
+
+// CheckedOutAt is the checkout (main or a worktree) that has the local
+// branch checked out, or "".
+func (g Git) CheckedOutAt(branch string) (string, error) {
+	if err := checkBranch(branch); err != nil {
+		return "", err
+	}
+	out, err := g.run("worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return "", err
+	}
+	path := ""
+	for _, f := range strings.Split(string(out), "\x00") {
+		switch {
+		case strings.HasPrefix(f, "worktree "):
+			path = strings.TrimPrefix(f, "worktree ")
+		case f == "branch refs/heads/"+branch:
+			return path, nil
+		}
+	}
+	return "", nil
+}
+
+// Changed lists the tracked files with changes (staged or not) of the
+// checkout at path; untracked and ignored files are not listed.
+func (g Git) Changed(path string) ([]string, error) {
+	if err := checkPath(path); err != nil {
+		return nil, err
+	}
+	out, err := g.in(path).run("status", "--porcelain=v1", "-z", "--untracked-files=no", "--ignore-submodules=none")
+	if err != nil {
+		return nil, err
+	}
+	return porcelainFiles(out), nil
 }
 
 // NewCommits lists the commits ("<short id> <subject>") on branch that are

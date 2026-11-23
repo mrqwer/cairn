@@ -42,6 +42,12 @@ func (c *Config) Value(key string) (string, bool) {
 		return c.Tasks.BranchPrefix, true
 	case "tasks.worktree_root":
 		return c.Tasks.WorktreeRoot, true
+	case "tasks.diff_viewer":
+		return c.Tasks.DiffViewer, true
+	case "tasks.pr_tool":
+		return c.Tasks.PRTool, true
+	case "tasks.pr_remote":
+		return c.Tasks.PRRemote, true
 	case "agents.max_running":
 		return strconv.Itoa(c.Agents.MaxRunning), true
 	}

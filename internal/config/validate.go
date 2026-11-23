@@ -16,6 +16,8 @@ type FieldError struct{ Key, Msg string }
 func (e FieldError) Error() string { return e.Key + ": " + e.Msg }
 
 // branchPrefixRe matches task.ValidBranchPrefix.
+var remoteRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
 var branchPrefixRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*(/[A-Za-z0-9][A-Za-z0-9_-]*)*$`)
 
 const (
@@ -55,6 +57,15 @@ func (c *Config) validateAgents() []FieldError {
 		if msg := checkPath(p); msg != "" || p == "/" {
 			errs = append(errs, FieldError{"tasks.worktree_root", fmt.Sprintf("%q must be an absolute clean path or start with ~/", r)})
 		}
+	}
+	if v := c.Tasks.DiffViewer; len(strings.Fields(v)) == 0 || strings.ContainsFunc(v, func(r rune) bool { return r < ' ' && r != '\t' || r == 0x7f }) {
+		errs = append(errs, FieldError{"tasks.diff_viewer", fmt.Sprintf("%q must be a command (split on spaces, no shell)", v)})
+	}
+	if e := oneOf("tasks.pr_tool", c.Tasks.PRTool, "", "gh", "glab"); e != nil {
+		errs = append(errs, *e)
+	}
+	if !remoteRe.MatchString(c.Tasks.PRRemote) || strings.Contains(c.Tasks.PRRemote, "..") {
+		errs = append(errs, FieldError{"tasks.pr_remote", fmt.Sprintf("%q must be a git remote name ([A-Za-z0-9._-], not starting with - or .)", c.Tasks.PRRemote)})
 	}
 	if c.Agents.MaxRunning < 0 {
 		errs = append(errs, FieldError{"agents.max_running", fmt.Sprintf("%d is negative (0 is no limit)", c.Agents.MaxRunning)})

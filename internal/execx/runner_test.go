@@ -65,3 +65,15 @@ func TestOSRunnerDir(t *testing.T) {
 		t.Fatalf("%q %v", out, err)
 	}
 }
+
+func TestOSRunnerStreams(t *testing.T) {
+	var out, errOut strings.Builder
+	r := execx.OSRunner{Stdin: strings.NewReader("in\n"), Stdout: &out, Stderr: &errOut}
+	b, err := r.Run(context.Background(), "sh", "-c", "cat; echo e >&2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) != 0 || out.String() != "in\n" || errOut.String() != "e\n" {
+		t.Fatalf("returned %q, out %q, err %q", b, out.String(), errOut.String())
+	}
+}

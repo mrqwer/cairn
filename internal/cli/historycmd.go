@@ -159,6 +159,9 @@ func newUndoCmd() *cobra.Command {
 			if undoing.Kind == "task.new" {
 				afterTaskUndo(cmd, undoing, force)
 			}
+			if undoing.Kind == "task.finish" {
+				_, _ = fmt.Fprintln(out, "only the task's status is back: its merge, push or pull request is not undoable, and a removed worktree or branch is not restored")
+			}
 			if undoing.Kind == "adopt" && len(undoing.Files) == 1 {
 				project := strings.TrimSuffix(filepath.Base(undoing.Files[0].Path), ".toml")
 				_, _ = fmt.Fprintf(out, "markers on the live session remain; run: cairn adopt --release %s\n", project)

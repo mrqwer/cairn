@@ -77,7 +77,7 @@ func lockTasks(ctx context.Context, d xdg.Dirs, wait time.Duration) (func(), err
 		if !errors.Is(err, unix.EWOULDBLOCK) || time.Now().After(deadline) || ctx.Err() != nil {
 			_ = f.Close()
 			if errors.Is(err, unix.EWOULDBLOCK) {
-				return nil, errors.New("another cairn task new is creating a task; try again")
+				return nil, errors.New("another cairn task command (new, finish or recover) is changing tasks; try again")
 			}
 			return nil, err
 		}
@@ -103,6 +103,7 @@ func trustStore(d xdg.Dirs) task.TrustStore {
 // taskSettings is the validated tasks/agents configuration.
 type taskSettings struct {
 	isolation, prefix, worktreeRoot string
+	diffViewer, prTool, prRemote    string
 }
 
 func loadTaskSettings(d xdg.Dirs) (taskSettings, error) {
@@ -126,7 +127,8 @@ func loadTaskSettings(d xdg.Dirs) (taskSettings, error) {
 	case strings.HasPrefix(root, "~/"):
 		root = filepath.Join(d.Home, root[2:])
 	}
-	return taskSettings{isolation: cfg.Tasks.DefaultIsolation, prefix: cfg.Tasks.BranchPrefix, worktreeRoot: root}, nil
+	return taskSettings{isolation: cfg.Tasks.DefaultIsolation, prefix: cfg.Tasks.BranchPrefix, worktreeRoot: root,
+		diffViewer: cfg.Tasks.DiffViewer, prTool: cfg.Tasks.PRTool, prRemote: cfg.Tasks.PRRemote}, nil
 }
 
 // agentQueue is the concurrency queue with agents.max_running from the
@@ -255,7 +257,7 @@ func newTaskCmd() *cobra.Command {
 		Use:   "task",
 		Short: "Tasks: a branch (and worktree) with its agent window",
 	}
-	cmd.AddCommand(newTaskNewCmd(), newTaskLsCmd(), newTaskOpenCmd(), newTaskRecoverCmd())
+	cmd.AddCommand(newTaskNewCmd(), newTaskLsCmd(), newTaskOpenCmd(), newTaskReviewCmd(), newTaskFinishCmd(), newTaskRecoverCmd())
 	return cmd
 }
 

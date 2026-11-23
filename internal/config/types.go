@@ -17,7 +17,7 @@ type Config struct {
 	Agents  Agents `toml:"agents"`
 }
 
-// Tasks configures cairn task new.
+// Tasks configures cairn task new, review and finish.
 type Tasks struct {
 	// DefaultIsolation is here, worktree or ask (asked on a terminal).
 	DefaultIsolation string `toml:"default_isolation"`
@@ -26,6 +26,14 @@ type Tasks struct {
 	// WorktreeRoot holds worktrees as <root>/<project>/<slug>; empty is
 	// <State>/worktrees; "~/" is the home directory.
 	WorktreeRoot string `toml:"worktree_root"`
+	// DiffViewer is the command of cairn task review, split on spaces (no
+	// shell); see the guide for its placeholders.
+	DiffViewer string `toml:"diff_viewer"`
+	// PRTool opens pull requests for cairn task finish --pr: "" (none:
+	// finish --pr stops with instructions), gh or glab.
+	PRTool string `toml:"pr_tool"`
+	// PRRemote is the remote finish --pr pushes to.
+	PRRemote string `toml:"pr_remote"`
 }
 
 // Agents configures agent conversations.

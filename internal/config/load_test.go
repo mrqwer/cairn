@@ -291,3 +291,25 @@ max_running = -1
 		t.Fatalf("valid values refused: %v", errs)
 	}
 }
+
+func TestTaskFinishKeys(t *testing.T) {
+	root := fsx.Root{Dir: t.TempDir()}
+	cfg, _, err := config.Load(root, testDirs, env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tasks.DiffViewer != "git diff" || cfg.Tasks.PRTool != "" || cfg.Tasks.PRRemote != "origin" {
+		t.Fatalf("defaults %+v", cfg.Tasks)
+	}
+	cfg = loadUser(t, "[tasks]\ndiff_viewer = \" \"\npr_tool = \"curl\"\npr_remote = \"--upload-pack=x\"\n")
+	got := keys(cfg.Validate())
+	for _, k := range []string{"tasks.diff_viewer", "tasks.pr_tool", "tasks.pr_remote"} {
+		if !got[k] {
+			t.Errorf("no error for %s: %v", k, got)
+		}
+	}
+	cfg = loadUser(t, "[tasks]\ndiff_viewer = \"delta --side-by-side\"\npr_tool = \"glab\"\npr_remote = \"upstream\"\n")
+	if errs := cfg.Validate(); len(errs) != 0 {
+		t.Fatalf("valid values refused: %v", errs)
+	}
+}

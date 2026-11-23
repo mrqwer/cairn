@@ -248,6 +248,77 @@ func copyFile(src, dst string) error {
 	return werr
 }
 
+// worktreeWork inspects the worktree at wt of repo: work is what removal
+// would lose that is never an ignorable leftover ("uncommitted <f>",
+// "changed <f>" for an include copy that differs from the repo's
+// original), ignored the ignored files and directories other than
+// unchanged include copies, copies those unchanged include copies.
+func worktreeWork(g Git, repo, wt string) (work, ignored, copies []string, err error) {
+	dirty, err := g.Dirty(wt)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ign, err := g.Ignored(wt)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	tracked, err := g.Tracked(wt)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	rels, err := includeMatches(repo)
+	if err != nil {
+		return []string{"the include list cannot be checked: " + err.Error()}, nil, nil, nil
+	}
+	isCopy := map[string]bool{}
+	for _, rel := range rels {
+		if tracked[rel] {
+			continue
+		}
+		p := filepath.Join(wt, rel)
+		fi, err := os.Lstat(p)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		a, err1 := os.ReadFile(p)
+		b, err2 := os.ReadFile(filepath.Join(repo, rel))
+		if err1 != nil || err2 != nil || !bytes.Equal(a, b) {
+			work = append(work, "changed "+rel)
+			continue
+		}
+		isCopy[rel] = true
+		copies = append(copies, rel)
+	}
+	for _, f := range dirty {
+		if !isCopy[f] {
+			work = append(work, "uncommitted "+f)
+		}
+	}
+	for _, f := range ign {
+		if !isCopy[f] {
+			ignored = append(ignored, f)
+		}
+	}
+	return work, ignored, copies, nil
+}
+
+// WorktreeLoss lists what removing the worktree at wt would lose: its work
+// (see worktreeWork) and "ignored <f>" for each ignored file other than an
+// unchanged include copy. A worktree that is gone loses nothing.
+func WorktreeLoss(g Git, repo, wt string) ([]string, error) {
+	if _, err := os.Lstat(wt); errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	work, ignored, _, err := worktreeWork(g.in(repo), repo, wt)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range ignored {
+		work = append(work, "ignored "+f)
+	}
+	return work, nil
+}
+
 // SafeRemove removes the worktree only when nothing in it is work: no
 // modified, staged or untracked file, no include copy that differs from the
 // repo's original, and no ignored file other than unchanged include copies
@@ -262,55 +333,12 @@ func SafeRemove(g Git, repo, worktree string, force bool) (removed bool, reasons
 		_, err := g.run("worktree", "prune")
 		return err == nil, nil, nil, err
 	}
-	dirty, err := g.Dirty(worktree)
+	work, extra, copies, err := worktreeWork(g, repo, worktree)
 	if err != nil {
 		return false, nil, nil, err
 	}
-	ignored, err := g.Ignored(worktree)
-	if err != nil {
-		return false, nil, nil, err
-	}
-	tracked, err := g.Tracked(worktree)
-	if err != nil {
-		return false, nil, nil, err
-	}
-	rels, err := includeMatches(repo)
-	if err != nil {
-		return false, []string{"the include list cannot be checked: " + err.Error()}, nil, nil
-	}
-	isCopy := map[string]bool{}
-	var copies []string
-	for _, rel := range rels {
-		if tracked[rel] {
-			continue
-		}
-		p := filepath.Join(worktree, rel)
-		fi, err := os.Lstat(p)
-		if err != nil || !fi.Mode().IsRegular() {
-			continue
-		}
-		a, err1 := os.ReadFile(p)
-		b, err2 := os.ReadFile(filepath.Join(repo, rel))
-		if err1 != nil || err2 != nil || !bytes.Equal(a, b) {
-			reasons = append(reasons, "changed "+rel)
-			continue
-		}
-		isCopy[rel] = true
-		copies = append(copies, rel)
-	}
-	for _, f := range dirty {
-		if !isCopy[f] {
-			reasons = append(reasons, "uncommitted "+f)
-		}
-	}
-	if len(reasons) > 0 {
-		return false, reasons, nil, nil
-	}
-	var extra []string
-	for _, f := range ignored {
-		if !isCopy[f] {
-			extra = append(extra, f)
-		}
+	if len(work) > 0 {
+		return false, work, nil, nil
 	}
 	if len(extra) > 0 && !force {
 		for _, f := range extra {
