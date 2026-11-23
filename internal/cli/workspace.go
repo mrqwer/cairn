@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
 
+	"github.com/mrqwer/cairn/internal/agents/task"
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/history"
 	"github.com/mrqwer/cairn/internal/tmux"
@@ -175,7 +176,7 @@ func checkID(id string) error {
 // curated overlays of agent conversations (names, tags, archive, removal).
 func historyStore(d xdg.Dirs) history.Store {
 	return history.Store{Root: wsRoot, Path: filepath.Join(d.State, "history.jsonl"),
-		AllowedRoots: []string{projectsDir(d), agentStore(d).CuratedDir()}}
+		AllowedRoots: []string{projectsDir(d), agentStore(d).CuratedDir(), task.Dir(d)}}
 }
 
 // prompting is true while ask waits for an answer; main does not announce
@@ -224,7 +225,8 @@ func mayBeMidApply(c *cobra.Command) bool {
 	case "cairn up", "cairn apply", "cairn open", "cairn adopt", "cairn undo",
 		"cairn history restore", "cairn host apply", "cairn host uninstall", "cairn host repair",
 		"cairn tmux service install", "cairn tmux service uninstall", "cairn init",
-		"cairn agents new", "cairn agents resume", "cairn agents archive", "cairn agents rm":
+		"cairn agents new", "cairn agents resume", "cairn agents archive", "cairn agents rm",
+		"cairn task new", "cairn task open":
 		return true
 	case "cairn capture":
 		w, _ := c.Flags().GetBool("write")

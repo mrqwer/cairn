@@ -71,7 +71,7 @@ func (r RootRequest) Validate() error {
 	}
 	var errs []error
 	cfg := config.Config{Host: r.Host}
-	for _, e := range cfg.Validate() {
+	for _, e := range cfg.ValidateHost() {
 		errs = append(errs, e)
 	}
 	errs = append(errs, checkExtra(ExtraPaths(r.Host)))

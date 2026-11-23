@@ -251,3 +251,43 @@ func TestTestdataFixture(t *testing.T) {
 		t.Errorf("cfg = %+v", cfg.Host.Sleep)
 	}
 }
+
+func TestTaskAndAgentKeys(t *testing.T) {
+	root := fsx.Root{Dir: t.TempDir()}
+	cfg, prov, err := config.Load(root, testDirs, env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tasks.DefaultIsolation != "ask" || cfg.Tasks.BranchPrefix != "task" || cfg.Tasks.WorktreeRoot != "" || cfg.Agents.MaxRunning != 4 {
+		t.Fatalf("defaults %+v %+v", cfg.Tasks, cfg.Agents)
+	}
+	if got, _ := config.Explain(cfg, prov, "agents.max_running"); got != "4  defaults  (embedded)" {
+		t.Fatalf("explain %q", got)
+	}
+	cfg, _, err = config.Load(root, testDirs, env(map[string]string{
+		"CAIRN_AGENTS_MAX_RUNNING": "2", "CAIRN_TASKS_DEFAULT_ISOLATION": "here"}))
+	if err != nil || cfg.Agents.MaxRunning != 2 || cfg.Tasks.DefaultIsolation != "here" {
+		t.Fatalf("env: %+v %v", cfg, err)
+	}
+	if _, _, err := config.Load(root, testDirs, env(map[string]string{"CAIRN_AGENTS_MAX_RUNNING": "many"})); err == nil ||
+		!strings.Contains(err.Error(), "CAIRN_AGENTS_MAX_RUNNING") {
+		t.Fatalf("bad int: %v", err)
+	}
+	cfg = loadUser(t, `[tasks]
+default_isolation = "sometimes"
+branch_prefix = "-x"
+worktree_root = "rel/dir"
+[agents]
+max_running = -1
+`)
+	got := keys(cfg.Validate())
+	for _, k := range []string{"tasks.default_isolation", "tasks.branch_prefix", "tasks.worktree_root", "agents.max_running"} {
+		if !got[k] {
+			t.Errorf("no error for %s: %v", k, got)
+		}
+	}
+	cfg = loadUser(t, "[tasks]\nworktree_root = \"~/worktrees\"\nbranch_prefix = \"me/task\"\n")
+	if errs := cfg.Validate(); len(errs) != 0 {
+		t.Fatalf("valid values refused: %v", errs)
+	}
+}

@@ -272,6 +272,8 @@ func (f *fakeDriver) KillPane(_ context.Context, id string) error {
 		for _, w := range s.windows {
 			w.panes = slices.DeleteFunc(w.panes, func(p *fPane) bool { return p.id == id })
 		}
+		// As in tmux, a window whose last pane is killed goes too.
+		s.windows = slices.DeleteFunc(s.windows, func(w *fWindow) bool { return len(w.panes) == 0 })
 	}
 	return nil
 }

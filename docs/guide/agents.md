@@ -52,3 +52,34 @@ A conversation whose tool is not running (after a crash or reboot) is counted as
 
 Not in this release: desktop notifications, a badge pushed on transitions, "jump to next waiting
 agent". Use `cairn status --tmux` for now.
+
+## Tasks
+
+```
+cairn task new "Fix login" --worktree     # branch task/fix-login + worktree + window with an agent
+cairn task new "Quick fix" --here         # branch in the main checkout, no worktree
+cairn task ls [--project p] [--status open] [--json]
+cairn task open fix-login                 # jump to the task's window (re-creating its pane if needed)
+cairn agents new codex --task fix-login   # a second agent on the same task, in the same window
+```
+
+- Without `--worktree`/`--here`, `tasks.default_isolation` decides (`ask` asks on a terminal and
+  fails on a pipe). `tasks.branch_prefix` (default `task`) and `tasks.worktree_root` (default
+  `<state>/worktrees`, as `<root>/<project>/<slug>`) are configurable.
+- `.worktreeinclude` in the repo lists files to copy into a new worktree (one path or glob per
+  line, `#` comments), e.g. `.env`. Absolute paths, `..`, `.git` and symlinks out of the repo are
+  refused; file modes are kept.
+- A `.cairn.toml` in the repo may set `[task] setup = ["make", "deps"]` (an argv, not a shell
+  line). It is shown and runs only once approved (on a terminal, or `--approve-setup`); the
+  approval is remembered per project until the file changes.
+- If `task new` fails, it removes what it made (the worktree only when clean, the branch only
+  without new commits) and lists what remains. A crash in the middle is cleaned up by the next
+  `task` command. `cairn undo` of a task removes its window binding and task file, then its
+  worktree and branch under the same rules; a worktree an agent still runs in is kept.
+
+## Concurrency limit
+
+At most `agents.max_running` (default 4, 0 = no limit) tools run at once: conversations in
+`starting`, `working` or `waiting` whose pane runs the tool. A further start is `queued` and its
+pane shows its position; when a running agent goes idle, finishes or stops, the oldest waiting one
+starts. `cairn agents archive`/`rm` take a waiting pane out of the queue.

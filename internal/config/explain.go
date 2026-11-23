@@ -36,6 +36,14 @@ func (c *Config) Value(key string) (string, bool) {
 		return strconv.FormatBool(g.Manage), true
 	case "host.gpu.nvidia.temporary_file_path":
 		return g.TemporaryFilePath, true
+	case "tasks.default_isolation":
+		return c.Tasks.DefaultIsolation, true
+	case "tasks.branch_prefix":
+		return c.Tasks.BranchPrefix, true
+	case "tasks.worktree_root":
+		return c.Tasks.WorktreeRoot, true
+	case "agents.max_running":
+		return strconv.Itoa(c.Agents.MaxRunning), true
 	}
 	return "", false
 }

@@ -13,3 +13,11 @@ path = ""
 [host.gpu.nvidia]
 manage = true
 temporary_file_path = "/var/tmp"
+
+[tasks]
+default_isolation = "ask"
+branch_prefix = "task"
+worktree_root = ""
+
+[agents]
+max_running = 4

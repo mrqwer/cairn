@@ -79,7 +79,7 @@ func TestValidatePathHygiene(t *testing.T) {
 		cfg.Host.Sleep.HibernateAfter, _ = config.ParseDuration("15min")
 		cfg.Host.GPU.Nvidia.TemporaryFilePath = p
 		cfg.Host.Sleep.HibernationSwap.Path = p
-		got := keys(cfg.Validate())
+		got := keys(cfg.ValidateHost())
 		if !got["host.gpu.nvidia.temporary_file_path"] || !got["host.sleep.hibernation_swap.path"] || len(got) != 2 {
 			t.Errorf("%q: errors %v", p, got)
 		}
@@ -92,7 +92,7 @@ func TestValidateTemporaryPathWhitespace(t *testing.T) {
 	cfg.Host.Sleep.CriticalBattery, cfg.Host.Sleep.IdleBattery = "hibernate", "hibernate"
 	cfg.Host.Sleep.HibernateAfter, _ = config.ParseDuration("15min")
 	cfg.Host.GPU.Nvidia.TemporaryFilePath = "/home/my dumps"
-	if got := keys(cfg.Validate()); !got["host.gpu.nvidia.temporary_file_path"] || len(got) != 1 {
+	if got := keys(cfg.ValidateHost()); !got["host.gpu.nvidia.temporary_file_path"] || len(got) != 1 {
 		t.Fatalf("errors %v", got)
 	}
 }

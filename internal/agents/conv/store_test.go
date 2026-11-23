@@ -705,3 +705,62 @@ func TestPutCompactsAsItGrows(t *testing.T) {
 		t.Fatalf("%+v", c)
 	}
 }
+
+func TestTxnSeesAllAndWritesChanged(t *testing.T) {
+	s, _ := newStore(t)
+	for _, id := range []string{"a", "b", "c"} {
+		if err := s.Put(conv.Conversation{ID: id, State: conv.StateIdle}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := s.Txn(func(all []conv.Conversation) ([]conv.Conversation, error) {
+		if len(all) != 3 {
+			t.Errorf("txn saw %d", len(all))
+		}
+		all[1].State = conv.StateQueued
+		return []conv.Conversation{all[1]}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _, _ := s.Get("b"); b.State != conv.StateQueued {
+		t.Fatalf("b %+v", b)
+	}
+	if a, _, _ := s.Get("a"); a.State != conv.StateIdle {
+		t.Fatalf("a %+v", a)
+	}
+	// An error writes nothing; an unknown id is refused.
+	_ = s.Txn(func(all []conv.Conversation) ([]conv.Conversation, error) {
+		all[0].State = conv.StateDone
+		return all[:1], errors.New("no")
+	})
+	if a, _, _ := s.Get("a"); a.State != conv.StateIdle {
+		t.Fatal("failed txn wrote")
+	}
+	if err := s.Txn(func([]conv.Conversation) ([]conv.Conversation, error) {
+		return []conv.Conversation{{ID: "zz"}}, nil
+	}); err == nil {
+		t.Fatal("unknown id written")
+	}
+	// Concurrent transactions are serialised: increments are not lost.
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = s.Txn(func(all []conv.Conversation) ([]conv.Conversation, error) {
+				for _, c := range all {
+					if c.ID == "c" {
+						c.IgnoredEvents++
+						return []conv.Conversation{c}, nil
+					}
+				}
+				return nil, nil
+			})
+		}()
+	}
+	wg.Wait()
+	if c, _, _ := s.Get("c"); c.IgnoredEvents != 20 {
+		t.Fatalf("lost updates: %d", c.IgnoredEvents)
+	}
+}

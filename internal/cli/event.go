@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mrqwer/cairn/internal/agents"
+	"github.com/mrqwer/cairn/internal/agents/conv"
 	"github.com/mrqwer/cairn/internal/agents/hooks"
 )
 
@@ -56,8 +57,18 @@ func newEventCmd() *cobra.Command {
 				return nil
 			}
 			ev := agents.Event{TS: time.Now().UTC(), Conversation: id, Kind: kind, Reason: reason, NativeID: nativeID}
-			if _, err := hooks.Post(agentStore(dirs), ev, eventLockWait); err != nil {
+			s := agentStore(dirs)
+			if _, err := hooks.Post(s, ev, eventLockWait); err != nil {
 				note("%v", err)
+				return nil
+			}
+			// A conversation that stopped taking a slot lets the oldest
+			// queued one start.
+			switch kind {
+			case conv.StateIdle, conv.StateDone, conv.StateFailed, conv.StateStopped:
+				if _, _, err := agents.Promote(s, agentQueue(dirs, s, nil), time.Now().UTC(), eventLockWait); err != nil {
+					note("queue: %v", err)
+				}
 			}
 			return nil
 		},

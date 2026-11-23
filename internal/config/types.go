@@ -13,6 +13,26 @@ import (
 type Config struct {
 	Profile string `toml:"profile"`
 	Host    Host   `toml:"host"`
+	Tasks   Tasks  `toml:"tasks"`
+	Agents  Agents `toml:"agents"`
+}
+
+// Tasks configures cairn task new.
+type Tasks struct {
+	// DefaultIsolation is here, worktree or ask (asked on a terminal).
+	DefaultIsolation string `toml:"default_isolation"`
+	// BranchPrefix: task branches are <prefix>/<slug>.
+	BranchPrefix string `toml:"branch_prefix"`
+	// WorktreeRoot holds worktrees as <root>/<project>/<slug>; empty is
+	// <State>/worktrees; "~/" is the home directory.
+	WorktreeRoot string `toml:"worktree_root"`
+}
+
+// Agents configures agent conversations.
+type Agents struct {
+	// MaxRunning is the most agents running at once; more starts queue.
+	// 0 is no limit.
+	MaxRunning int `toml:"max_running"`
 }
 
 // Host holds settings for the host module.

@@ -42,6 +42,6 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newInitCmd())
 	root.PersistentFlags().String("socket", "", "tmux server socket name (tmux -L); default $CAIRN_TMUX_SOCKET, else tmux's default server")
 	root.AddCommand(newProjectCmd(), newWsPlanCmd(), newWsApplyCmd(), newWsUpCmd(), newWsOpenCmd(),
-		newWsStatusCmd(), newHistoryCmd(), newUndoCmd(), newCaptureCmd(), newAdoptCmd(), newTmuxCmd(), newAgentsCmd(), newEventCmd())
+		newWsStatusCmd(), newHistoryCmd(), newUndoCmd(), newCaptureCmd(), newAdoptCmd(), newTmuxCmd(), newAgentsCmd(), newEventCmd(), newTaskCmd())
 	return root
 }

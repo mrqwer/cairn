@@ -16,8 +16,10 @@ type Runner interface {
 
 // OSRunner runs real commands. Env, when non-nil, is the complete
 // environment of the child ("KEY=value" pairs); nil inherits the caller's.
+// Dir, when set, is the child's working directory.
 type OSRunner struct {
 	Env []string
+	Dir string
 }
 
 func (r OSRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -28,6 +30,7 @@ func (r OSRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 	if r.Env != nil {
 		cmd.Env = r.Env
 	}
+	cmd.Dir = r.Dir
 	return cmd.CombinedOutput()
 }
 

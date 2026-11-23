@@ -147,6 +147,9 @@ func newUndoCmd() *cobra.Command {
 				return err
 			}
 			_, _ = fmt.Fprintf(out, "%s\nRun: cairn apply   (config only; tmux was not changed)\n", e.Summary)
+			if undoing.Kind == "task.new" {
+				afterTaskUndo(cmd, undoing)
+			}
 			if undoing.Kind == "adopt" && len(undoing.Files) == 1 {
 				project := strings.TrimSuffix(filepath.Base(undoing.Files[0].Path), ".toml")
 				_, _ = fmt.Fprintf(out, "markers on the live session remain; run: cairn adopt --release %s\n", project)

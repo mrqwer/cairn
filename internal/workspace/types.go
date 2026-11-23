@@ -20,6 +20,8 @@ const (
 
 	// AgentWindow is the window key agent panes are added to by default.
 	AgentWindow = "agents"
+	// TaskWindowPrefix starts the window key of a task ("task-<slug>").
+	TaskWindowPrefix = "task-"
 
 	RestartNever     = "never"
 	RestartOnFailure = "on-failure"

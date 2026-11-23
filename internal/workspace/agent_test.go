@@ -100,3 +100,26 @@ func TestRemoveAgentPane(t *testing.T) {
 		t.Fatalf("last window must stay: %+v", cp.Windows)
 	}
 }
+
+func TestAgentPaneInTaskWindow(t *testing.T) {
+	p := workspace.Project{ID: "demo", Root: "/home/u/demo", Windows: []workspace.Window{{Key: "main"}}}
+	key := p.AddAgentPaneIn("task-fix-login", "fix login", "C1")
+	if key != "demo/task-fix-login/1" || len(p.Windows) != 2 || p.Windows[1].Name != "fix login" {
+		t.Fatalf("key %q windows %+v", key, p.Windows)
+	}
+	if k := p.AddAgentPaneIn("task-fix-login", "ignored", "C2"); k != "demo/task-fix-login/2" || p.Windows[1].Panes[1].Split != workspace.SplitH {
+		t.Fatalf("second %q %+v", k, p.Windows[1])
+	}
+	// The default window is still "agents".
+	if k := p.AddAgentPane("C3"); k != "demo/agents/1" {
+		t.Fatalf("default %q", k)
+	}
+	// A task window left empty goes, like the agents window.
+	p.RemoveAgentPane("C1")
+	p.RemoveAgentPane("C2")
+	for _, w := range p.Windows {
+		if w.Key == "task-fix-login" {
+			t.Fatalf("empty task window kept: %+v", p.Windows)
+		}
+	}
+}

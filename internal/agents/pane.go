@@ -14,6 +14,7 @@ import (
 
 	"github.com/mrqwer/cairn/internal/agents/adapter"
 	"github.com/mrqwer/cairn/internal/agents/conv"
+	"github.com/mrqwer/cairn/internal/agents/task"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/fsx"
 )
@@ -59,6 +60,8 @@ type PaneEnv struct {
 	// runs, for Observe.
 	Activity    func() (time.Time, error)
 	ObservePoll time.Duration
+	// Queue, when set, is the concurrency limit a launch waits for.
+	Queue *task.Queue
 }
 
 func (e PaneEnv) now() time.Time {
@@ -158,6 +161,10 @@ func RunPane(ctx context.Context, env PaneEnv, id string) error {
 		// Whether it ran or was not started (locked, gone, failed), the
 		// same choices follow; r tries again.
 		c := launch(ctx, env, a, id)
+		if env.Queue != nil {
+			// This tool no longer takes a slot: the next queued one may.
+			_, _, _ = Promote(env.Store, *env.Queue, env.now(), 2*time.Second)
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -221,6 +228,11 @@ func launch(ctx context.Context, env PaneEnv, a adapter.Adapter, id string) conv
 		return c
 	}
 	defer release()
+	if env.Queue != nil {
+		if c, ok = waitSlot(ctx, env, c); !ok {
+			return c
+		}
+	}
 
 	var profile []string
 	if env.ProfileArgs != nil {
@@ -292,6 +304,43 @@ func launch(ctx context.Context, env PaneEnv, a adapter.Adapter, id string) conv
 		c = u
 	}
 	return c
+}
+
+// waitSlot holds the launch, with the conversation lock taken, until the
+// concurrency queue admits it (AdmitLaunch), polling every env.Poll and
+// showing the queue position when it changes. false when ctx ended or the
+// store failed: the tool is not started.
+func waitSlot(ctx context.Context, env PaneEnv, c conv.Conversation) (conv.Conversation, bool) {
+	shown := -1
+	for {
+		ok, pos, err := AdmitLaunch(env.Store, *env.Queue, c.ID, env.now(), shown >= 0)
+		if errors.Is(err, ErrDequeued) {
+			env.printf("%s left the queue; its tool was not started\n", title(c))
+			return c, false
+		}
+		if err != nil {
+			env.printf("%s: %v\n", title(c), err)
+			return c, false
+		}
+		if ok {
+			if shown >= 0 {
+				env.printf("a slot is free; starting %s\n", title(c))
+			}
+			if u, found, err := env.Store.Get(c.ID); err == nil && found {
+				c = u
+			}
+			return c, true
+		}
+		if pos != shown {
+			env.printf("queued: position %d (at most %d agents run at once); %s starts when one finishes\n", pos, env.Queue.Max, title(c))
+			shown = pos
+		}
+		select {
+		case <-ctx.Done():
+			return c, false
+		case <-time.After(env.Poll):
+		}
+	}
 }
 
 // withHooks puts the tool arguments of env.Hooks right after the binary

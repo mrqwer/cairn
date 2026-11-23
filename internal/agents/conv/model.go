@@ -13,6 +13,9 @@ const (
 	StateFailed   = "failed"
 	StateStopped  = "stopped"
 	StateArchived = "archived"
+	// StateQueued waits for a free slot under agents.max_running; no tool
+	// runs.
+	StateQueued = "queued"
 )
 
 // State sources: how the current state was learned.

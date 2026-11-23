@@ -23,6 +23,7 @@ import (
 	"github.com/mrqwer/cairn/internal/agents/adapter"
 	"github.com/mrqwer/cairn/internal/agents/conv"
 	"github.com/mrqwer/cairn/internal/agents/hooks"
+	"github.com/mrqwer/cairn/internal/agents/task"
 	"github.com/mrqwer/cairn/internal/execx"
 	"github.com/mrqwer/cairn/internal/history"
 	"github.com/mrqwer/cairn/internal/reconcile"
@@ -167,6 +168,21 @@ func (e *agentsEnv) notRunning(c conv.Conversation) (func(), error) {
 	return rel, err
 }
 
+// notRunningOrQueued is notRunning for archive and rm: a pane waiting in
+// the agent queue holds the lock but runs no tool; it is taken out of the
+// queue (atomically with its admission, so it cannot start meanwhile) and
+// gives up, and the pane may then be removed.
+func (e *agentsEnv) notRunningOrQueued(c conv.Conversation) (func(), error) {
+	rel, err := e.notRunning(c)
+	if err == nil {
+		return rel, nil
+	}
+	if ok, derr := agents.Dequeue(e.store, c.ID); derr == nil && ok {
+		return func() {}, nil
+	}
+	return nil, err
+}
+
 // fileEdit is one file change of a recorded operation.
 type fileEdit struct {
 	path                      string
@@ -266,17 +282,18 @@ func projectEdit(dirs xdg.Dirs, id string, change func(raw *workspace.Project, b
 	return fileEdit{path: path, before: before, beforeExists: true, after: after, afterExists: true, perm: 0o644}, warn, nil
 }
 
-// addBindingEdit binds convID in project id (no change when bound already).
-func addBindingEdit(dirs xdg.Dirs, id, convID string) (f fileEdit, key, warn string, err error) {
+// addBindingEdit binds convID in window (named name when it is created) of
+// project id; no change when bound already.
+func addBindingEdit(dirs xdg.Dirs, id, convID, window, name string) (f fileEdit, key, warn string, err error) {
 	f, warn, err = projectEdit(dirs, id, func(p *workspace.Project, before []byte) func(workspace.Project) ([]byte, bool) {
 		var ok bool
 		if key, ok = p.AgentPaneKey(convID); ok {
 			return nil
 		}
-		key = p.AddAgentPane(convID)
+		key = p.AddAgentPaneIn(window, name, convID)
 		wi := 0
 		for i, w := range p.Windows {
-			if w.Key == workspace.AgentWindow {
+			if w.Key == window {
 				wi = i
 			}
 		}
@@ -436,12 +453,18 @@ func unbindLive(ctx context.Context, d wsDriver, ws *wsState, project, window, c
 // extra edits as one history event, under the apply lock so two concurrent
 // resumes cannot bind the conversation twice. It records the pane key.
 func (e *agentsEnv) bind(cmd *cobra.Command, c conv.Conversation, extra []fileEdit, kind, summary string) (string, error) {
+	window, name := e.windowFor(c)
+	return e.bindIn(cmd, c, window, name, extra, kind, summary)
+}
+
+// bindIn is bind into window (named name when it is created).
+func (e *agentsEnv) bindIn(cmd *cobra.Command, c conv.Conversation, window, name string, extra []fileEdit, kind, summary string) (string, error) {
 	unlock, err := lockApply(cmd)
 	if err != nil {
 		return "", err
 	}
 	defer unlock()
-	pe, key, warn, err := addBindingEdit(e.dirs, c.Project, c.ID)
+	pe, key, warn, err := addBindingEdit(e.dirs, c.Project, c.ID, window, name)
 	if err != nil {
 		return "", err
 	}
@@ -544,7 +567,7 @@ func projectOfDir(ws *wsState, dir string) (workspace.Project, bool) {
 }
 
 func newAgentsNewCmd() *cobra.Command {
-	var name, project, task, profile, cwd string
+	var name, project, taskRef, profile, cwd string
 	var now bool
 	cmd := &cobra.Command{
 		Use:   "new <tool>",
@@ -571,21 +594,37 @@ func newAgentsNewCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var p workspace.Project
-			if project == "" {
-				wd, err := os.Getwd()
+			var tk task.Task
+			if taskRef != "" {
+				ts, err := loadTasks(e.dirs, cmd.ErrOrStderr())
 				if err != nil {
 					return err
 				}
-				if p, ok = projectOfDir(ws, wd); !ok {
-					return fmt.Errorf("no project contains %s; pass --project", wd)
+				if tk, err = task.Find(ts, taskRef); err != nil {
+					return err
 				}
-			} else if p, err = ws.requireProject(project); err != nil {
+				if project == "" {
+					project = tk.Project
+				} else if project != tk.Project {
+					return fmt.Errorf("task %s belongs to project %s, not %s", tk.Slug, tk.Project, project)
+				}
+			}
+			p, err := projectFor(ws, project)
+			if err != nil {
 				return err
 			}
-			if cwd == "" {
+			switch {
+			case cwd == "" && tk.ID != "":
+				cwd = tk.Repos[0].Repo
+				if tk.Repos[0].Worktree != "" {
+					cwd = tk.Repos[0].Worktree
+				}
+			case cwd == "":
 				cwd = p.Root
-			} else if cwd, err = filepath.Abs(cwd); err != nil {
+			default:
+				cwd, err = filepath.Abs(cwd)
+			}
+			if err != nil {
 				return err
 			}
 			if fi, err := os.Stat(cwd); err != nil || !fi.IsDir() {
@@ -595,8 +634,11 @@ func newAgentsNewCmd() *cobra.Command {
 				return err
 			}
 			t := time.Now().UTC()
-			c := conv.Conversation{ID: conv.NewID(t, nil), Tool: a.Name, Name: name, Project: p.ID, Task: task,
+			c := conv.Conversation{ID: conv.NewID(t, nil), Tool: a.Name, Name: name, Project: p.ID, Task: tk.ID,
 				Cwd: cwd, Profile: profile, State: conv.StateStarting, CreatedAt: t, LastActivityAt: t}
+			if tk.ID != "" {
+				c.Worktree, c.Branch = tk.Repos[0].Worktree, tk.Repos[0].Branch
+			}
 			if a.Capabilities.PreassignID {
 				c.NativeID = agents.NewNativeID()
 			}
@@ -620,6 +662,7 @@ func newAgentsNewCmd() *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			_, _ = fmt.Fprintf(out, "created agent %s (%s, %s) in %s, pane %s\n", c.Name, c.ID, a.Name, p.ID, key)
+			e.admitNew(out, cmd.ErrOrStderr(), c)
 			if profile != "" {
 				_, _ = fmt.Fprintf(out, "note: profile %s is recorded; profiles are not applied to the tool yet\n", profile)
 			}
@@ -638,7 +681,7 @@ func newAgentsNewCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&name, "name", "", "conversation name (default: <tool>-<id suffix>)")
 	f.StringVar(&project, "project", "", "project (default: the one containing the current directory)")
-	f.StringVar(&task, "task", "", "task id")
+	f.StringVar(&taskRef, "task", "", "task (id or slug): its project, worktree and window")
 	f.StringVar(&profile, "profile", "", "profile name")
 	f.StringVar(&cwd, "cwd", "", "working directory of the tool (default: the project root)")
 	f.BoolVar(&now, "now", false, "start the tool at once instead of on first attach")
@@ -709,6 +752,7 @@ func newAgentsResumeCmd() *cobra.Command {
 			// Start at once unless the tool already runs in its pane.
 			if rel, err := e.notRunning(c); err == nil {
 				rel()
+				e.admitNew(cmd.OutOrStdout(), cmd.ErrOrStderr(), c)
 				if err := agents.RequestStart(e.store, c.ID); err != nil {
 					return err
 				}
@@ -984,7 +1028,7 @@ func newAgentsArchiveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rel, err := e.notRunning(c)
+			rel, err := e.notRunningOrQueued(c)
 			if err != nil {
 				return err
 			}
@@ -1057,7 +1101,7 @@ func newAgentsRmCmd() *cobra.Command {
 					}
 				}
 			}
-			rel, err := e.notRunning(c)
+			rel, err := e.notRunningOrQueued(c)
 			if err != nil {
 				return err
 			}
@@ -1175,6 +1219,8 @@ func newAgentsPaneCmd() *cobra.Command {
 					return e.unbind(cmd, c, cur, "agents.archive", "archive agent "+convTitle(c), drv)
 				},
 			}
+			q := agentQueue(e.dirs, e.store, cmd.OutOrStdout())
+			env.Queue = &q
 			err = agents.RunPane(ctx, env, args[0])
 			if errors.Is(err, context.Canceled) {
 				return nil

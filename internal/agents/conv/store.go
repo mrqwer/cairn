@@ -376,3 +376,43 @@ func NewID(now time.Time, r io.Reader) string {
 	}
 	return string(out)
 }
+
+// Txn runs fn under the store lock with every visible record (as List with
+// archived ones, in no particular order) and appends the records fn
+// returns, which must be existing ids. A decision over several records
+// (the concurrency queue) is made this way so no other process changes
+// them in between. fn must not call Store methods (the lock is not
+// reentrant); an error from fn writes nothing.
+func (s Store) Txn(fn func(all []Conversation) ([]Conversation, error)) error {
+	return s.TxnWait(-1, fn)
+}
+
+// TxnWait is Txn waiting at most wait for the store lock (blocking when
+// wait < 0); a lock still taken is ErrBusy and nothing runs.
+func (s Store) TxnWait(wait time.Duration, fn func(all []Conversation) ([]Conversation, error)) error {
+	return s.withLockWait(wait, func() error {
+		recs, err := s.load()
+		if err != nil {
+			return err
+		}
+		known := make(map[string]bool, len(recs))
+		for _, c := range recs {
+			known[c.ID] = true
+		}
+		out, err := fn(append([]Conversation(nil), recs...))
+		if err != nil {
+			return err
+		}
+		for _, c := range out {
+			if !known[c.ID] {
+				return fmt.Errorf("%w: %s", ErrNotFound, c.ID)
+			}
+		}
+		for _, c := range out {
+			if err := s.appendLocked(c); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}

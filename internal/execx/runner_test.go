@@ -57,3 +57,11 @@ func TestOSRunnerNilEnvInherits(t *testing.T) {
 		t.Fatalf("%q %v", out, err)
 	}
 }
+
+func TestOSRunnerDir(t *testing.T) {
+	dir := t.TempDir()
+	out, err := execx.OSRunner{Dir: dir}.Run(context.Background(), "pwd")
+	if err != nil || strings.TrimSpace(string(out)) != dir {
+		t.Fatalf("%q %v", out, err)
+	}
+}
