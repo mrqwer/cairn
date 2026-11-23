@@ -20,8 +20,9 @@ type agentsStatus struct {
 	// running is counted as stopped: it is left over from a crash or reboot.
 	Counts  map[string]int      `json:"counts"`
 	Waiting []waitingConvStatus `json:"waiting"`
-	// Risky are the conversations launched with flags that skip the
-	// tool's permission checks (the "!" badge).
+	// Risky are the live conversations (tool running) launched with flags
+	// that skip the tool's permission checks (the "!" badge); agents ls
+	// shows the mark on every conversation.
 	Risky []riskyConvStatus `json:"risky"`
 }
 
@@ -77,7 +78,7 @@ func readAgentsStatus(s conv.Store, liveOnly bool) (agentsStatus, error) {
 			state = conv.StateStopped
 		}
 		st.Counts[state]++
-		if c.Risk {
+		if c.Risk && liveState(state) {
 			st.Risky = append(st.Risky, riskyConvStatus{ID: c.ID, Name: c.Name, Project: c.Project, State: state})
 		}
 		if state == conv.StateWaiting {

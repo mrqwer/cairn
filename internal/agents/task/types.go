@@ -173,8 +173,8 @@ func (t Task) Validate() error {
 	if !projectRe.MatchString(t.Project) {
 		add("project %q is not a valid project id", t.Project)
 	}
-	if strings.ContainsFunc(t.Title, func(c rune) bool { return c < ' ' || c == 0x7f }) {
-		add("title contains control characters")
+	if !ValidTitle(t.Title) {
+		add("title contains control characters or bidirectional marks")
 	}
 	if t.Profile != "" && !projectRe.MatchString(t.Profile) {
 		add("profile %q is not a valid profile name", t.Profile)
@@ -330,4 +330,19 @@ func Find(ts []Task, ref string) (Task, error) {
 		}
 	}
 	return Task{}, fmt.Errorf("no task %q (see: cairn task ls)", ref)
+}
+
+// ValidTitle reports whether s may be a task title: titles are printed on
+// terminals, so control characters (C0, DEL, C1) and bidirectional
+// formatting marks are refused.
+func ValidTitle(s string) bool {
+	return !strings.ContainsFunc(s, func(r rune) bool {
+		switch {
+		case unicode.IsControl(r):
+			return true
+		case r == 0x061c, r == 0x200e, r == 0x200f, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+			return true
+		}
+		return false
+	})
 }

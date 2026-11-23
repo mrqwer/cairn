@@ -20,12 +20,12 @@ const (
 var usageConvs = []conv.Conversation{
 	{ID: "01A", Tool: "claude", NativeID: uuidA, Project: "api"},
 	{ID: "01B", Tool: "claude", NativeID: uuidB, Project: "demo"},
-	{ID: "01C", Tool: "agy", Project: "demo"},
+	{ID: "01C", Tool: "claude", Project: "demo"},
 }
 
 func found(string) (string, error) { return "/usr/bin/ccusage", nil }
 
-const ccusageKey = "/usr/bin/ccusage session --json --offline"
+func ccKey(id string) string { return "/usr/bin/ccusage session --id " + id + " --json --offline" }
 
 func TestUsageMissingCcusageNotError(t *testing.T) {
 	run := &execx.FakeRunner{}
@@ -41,9 +41,12 @@ func TestUsageMissingCcusageNotError(t *testing.T) {
 		t.Fatalf("every conversation gets an entry: %+v", got)
 	}
 	for id, u := range got {
-		if u.Source != profile.SourceUnavailable || u.Tokens != 0 || !u.Estimate {
+		if u.Source != profile.SourceUnavailable || u.Tokens != 0 || !u.Estimate || u.Reason == "" || strings.Contains(u.Reason, "\n") {
 			t.Fatalf("%s: %+v", id, u)
 		}
+	}
+	if !strings.Contains(got["01A"].Reason, "not installed") {
+		t.Fatalf("reason %q", got["01A"].Reason)
 	}
 }
 
@@ -51,48 +54,59 @@ func TestUsageMalformedWarns(t *testing.T) {
 	for name, resp := range map[string]execx.Response{
 		"garbage": {Out: []byte("not json at all")},
 		"exit":    {Out: []byte("boom"), Err: errors.New("exit status 1")},
+		"huge":    {Out: []byte(`{"sessionId":"` + uuidA + `","totalTokens":1,"pad":"` + strings.Repeat("x", profile.MaxUsageOutput) + `"}`)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			run := &execx.FakeRunner{Responses: map[string]execx.Response{ccusageKey: resp}}
+			run := &execx.FakeRunner{Responses: map[string]execx.Response{ccKey(uuidA): resp, ccKey(uuidB): resp}}
 			got, err := profile.CollectUsage(context.Background(), run, found, usageConvs)
 			var w *profile.Warning
-			if !errors.As(err, &w) || !strings.Contains(err.Error(), "ccusage") {
-				t.Fatalf("want a ccusage warning, got %v", err)
+			if !errors.As(err, &w) || !strings.Contains(err.Error(), "ccusage") || strings.Contains(err.Error(), "\n") {
+				t.Fatalf("want a one-line ccusage warning, got %v", err)
 			}
-			if len(got) != len(usageConvs) || got["01A"].Source != profile.SourceUnavailable {
+			if u := got["01A"]; u.Source != profile.SourceUnavailable || u.Reason == "" {
 				t.Fatalf("results stay usable: %+v", got)
 			}
 		})
 	}
-	// Entries that cannot be read are left out; the rest is used.
-	out := `ccusage v99 (a note on stdout)
-{"sessions": [
-  {"sessionId": "` + uuidA + `", "totalTokens": 1200, "totalCost": 0.5},
-  {"sessionId": 42, "totalTokens": "lots"},
-  "junk",
-  {"sessionId": "-home-u-demo/` + uuidB + `", "inputTokens": 10, "outputTokens": 5, "cacheReadTokens": 100, "costUSD": 0.01}
-]}`
-	run := &execx.FakeRunner{Responses: map[string]execx.Response{ccusageKey: {Out: []byte(out)}}}
+}
+
+func TestUsageExactMatchOnly(t *testing.T) {
+	run := &execx.FakeRunner{Responses: map[string]execx.Response{
+		ccKey(uuidA): {Out: []byte("a note\n" + `{"sessionId": "` + uuidA + `", "totalTokens": 1200, "totalCost": 0.5}`)},
+		// An older ccusage keys sessions by project directory: no match.
+		ccKey(uuidB): {Out: []byte(`{"sessions": [{"sessionId": "-home-u-demo/` + uuidB + `", "totalTokens": 9, "totalCost": 1}]}`)},
+	}}
 	got, err := profile.CollectUsage(context.Background(), run, found, usageConvs)
 	if err != nil {
-		t.Fatalf("tolerated entries: %v", err)
+		t.Fatal(err)
 	}
 	if u := got["01A"]; u.Tokens != 1200 || u.CostUSD != 0.5 || u.Source != profile.SourceCcusage {
 		t.Fatalf("01A %+v", u)
 	}
-	if u := got["01B"]; u.Tokens != 115 || u.CostUSD != 0.01 || u.Source != profile.SourceCcusage {
-		t.Fatalf("01B %+v", u)
+	if u := got["01B"]; u.Source != profile.SourceUnavailable || u.Tokens != 0 || !strings.Contains(u.Reason, uuidB) {
+		t.Fatalf("01B must not match a containing id: %+v", u)
 	}
-	if u := got["01C"]; u.Source != profile.SourceNone || u.Tokens != 0 {
+	if u := got["01C"]; u.Source != profile.SourceUnavailable || !strings.Contains(u.Reason, "no session id") {
 		t.Fatalf("01C %+v", u)
+	}
+	// One query per conversation with a usable native id, no shell.
+	if len(run.Calls) != 2 || run.Calls[0][0] != "/usr/bin/ccusage" {
+		t.Fatalf("calls %v", run.Calls)
+	}
+	// A native id that could pass as a flag is never queried.
+	run = &execx.FakeRunner{}
+	got, _ = profile.CollectUsage(context.Background(), run, found, []conv.Conversation{{ID: "01X", NativeID: "--all"}})
+	if len(run.Calls) != 0 || got["01X"].Source != profile.SourceUnavailable {
+		t.Fatalf("flag-like id: %v %+v", run.Calls, got)
 	}
 }
 
 func TestUsageMarkedEstimate(t *testing.T) {
-	out := `[{"session_id": "` + uuidA + `", "total_tokens": 7, "cost": 1.25}]`
-	run := &execx.FakeRunner{Responses: map[string]execx.Response{ccusageKey: {Out: []byte(out)}}}
-	convs := append([]conv.Conversation{{ID: "01N", Tool: "x", Usage: &conv.Usage{InputTokens: 3, OutputTokens: 4, CostUSD: 2}}}, usageConvs...)
-	got, err := profile.CollectUsage(context.Background(), run, found, convs)
+	run := &execx.FakeRunner{Responses: map[string]execx.Response{
+		ccKey(uuidA): {Out: []byte(`{"session_id": "` + uuidA + `", "total_tokens": 7, "cost": 1.25}`)},
+		ccKey(uuidB): {Out: []byte(`{}`)},
+	}}
+	got, err := profile.CollectUsage(context.Background(), run, found, usageConvs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,17 +117,5 @@ func TestUsageMarkedEstimate(t *testing.T) {
 	}
 	if u := got["01A"]; u.Tokens != 7 || u.CostUSD != 1.25 {
 		t.Fatalf("01A %+v", u)
-	}
-	if u := got["01N"]; u.Source != profile.SourceNative || u.Tokens != 7 || u.CostUSD != 2 {
-		t.Fatalf("native usage wins: %+v", u)
-	}
-	// ccusage runs once, with no shell, and only when a conversation has a
-	// native id to match.
-	if len(run.Calls) != 1 || run.Calls[0][0] != "/usr/bin/ccusage" {
-		t.Fatalf("calls %v", run.Calls)
-	}
-	run = &execx.FakeRunner{}
-	if _, err := profile.CollectUsage(context.Background(), run, found, usageConvs[2:]); err != nil || len(run.Calls) != 0 {
-		t.Fatalf("no native ids: %v %v", err, run.Calls)
 	}
 }

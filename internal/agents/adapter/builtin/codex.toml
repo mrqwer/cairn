@@ -23,9 +23,17 @@ model = ["--model", "{value}"]
 permission_mode = ["--ask-for-approval", "{value}"]
 sandbox = ["--sandbox", "{value}"]
 
-# Sandbox is on by default; a profile may choose another mode.
-[profile_defaults]
-sandbox = "workspace-write"
+# Values the tool takes; a profile with another value is refused (give
+# per-tool values in [profiles.<name>.codex]).
+[profile_values]
+permission_mode = ["untrusted", "on-failure", "on-request", "never"]
+sandbox = ["read-only", "workspace-write", "danger-full-access"]
+
+# --sandbox is passed only when a profile sets it; otherwise codex decides
+# (sandbox_mode in its config, per-project trust). agents doctor reports it.
+[sandbox_config]
+file = "~/.codex/config.toml"
+key = "sandbox_mode"
 
 [history]
 locator = "~/.codex/sessions/*/*/*/*-{native_id}.jsonl"

@@ -38,12 +38,21 @@ model = ["--model", "{value}"]
 permission_mode = ["--permission-mode", "{value}"]
 sandbox = ["--sandbox", "{value}"]
 
-[profile_defaults]
-sandbox = "workspace-write"
+[profile_values]
+permission_mode = ["default", "plan", "bypassPermissions"]
 `)
-	writeFile(t, filepath.Join(dir, "config/cairn/profiles.toml"), `[profiles.careful]
+	writeFile(t, filepath.Join(dir, "config/cairn/agents/profiles.toml"), `[profiles.careful]
 model = "opus"
 effort = "high"
+
+[profiles.wrong]
+permission_mode = "never"
+
+[profiles.percodex]
+permission_mode = "never"
+
+[profiles.percodex.pfake]
+permission_mode = "plan"
 
 [profiles.yolo]
 permission_mode = "bypassPermissions"
@@ -89,10 +98,11 @@ func TestAgentsNewProfileAppliedAtLaunch(t *testing.T) {
 		t.Fatalf("record %+v", c)
 	}
 	argv, _ := launchArgs(t, tool, c)
-	for _, want := range []string{"  --model\n  opus\n", "  --sandbox\n  workspace-write\n"} {
-		if !strings.Contains(argv, want) {
-			t.Fatalf("launch argv lacks %q:\n%s", want, argv)
-		}
+	if !strings.Contains(argv, "  --model\n  opus\n") {
+		t.Fatalf("launch argv lacks the model:\n%s", argv)
+	}
+	if strings.Contains(argv, "--sandbox") {
+		t.Fatalf("no sandbox flag unless the profile sets one:\n%s", argv)
 	}
 	// Unknown and malformed profile names create nothing.
 	for _, bad := range []string{"nope", "-x", "Bad Name"} {
@@ -102,6 +112,51 @@ func TestAgentsNewProfileAppliedAtLaunch(t *testing.T) {
 	}
 	if l, _ := testStore(dir).List(conv.Filter{Archived: true}); len(l) != 1 {
 		t.Fatalf("refused profiles must not create records: %d", len(l))
+	}
+}
+
+func TestAgentsProfileValueCheckedBeforeCreate(t *testing.T) {
+	dir, tool := profileTestEnv(t)
+	out, err := runHost(t, "", "agents", "new", "pfake", "--project", "demo", "--profile", "wrong")
+	if err == nil || !strings.Contains(err.Error(), `"never"`) || !strings.Contains(err.Error(), "[profiles.wrong.pfake]") {
+		t.Fatalf("a value the tool does not take must be refused: %v\n%s", err, out)
+	}
+	out, err = runHost(t, "", "task", "new", "Wrong", "--project", "demo", "--tool", "pfake", "--here", "--profile", "wrong")
+	if err == nil || !strings.Contains(err.Error(), `"never"`) {
+		t.Fatalf("task new: %v\n%s", err, out)
+	}
+	if l, _ := testStore(dir).List(conv.Filter{Archived: true}); len(l) != 0 {
+		t.Fatalf("nothing may be created: %+v", l)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config/cairn/tasks")); err == nil {
+		if ents, _ := os.ReadDir(filepath.Join(dir, "config/cairn/tasks")); len(ents) != 0 {
+			t.Fatalf("no task may be recorded: %v", ents)
+		}
+	}
+	mustRun(t, "", "agents", "new", "pfake", "--project", "demo", "--profile", "percodex")
+	argv, _ := launchArgs(t, tool, onlyConv(t, dir))
+	if !strings.Contains(argv, "  --permission-mode\n  plan\n") {
+		t.Fatalf("the per-tool value is used:\n%s", argv)
+	}
+}
+
+func TestAgentsPaneSaysWhenTaskUnreadable(t *testing.T) {
+	dir, tool := profileTestEnv(t)
+	mustRun(t, "", "agents", "new", "pfake", "--project", "demo")
+	c := onlyConv(t, dir)
+	if _, err := testStore(dir).Update(c.ID, func(r *conv.Conversation) error { r.Task = "01MISSINGTASK000000000000"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	c = onlyConv(t, dir)
+	argv, out := launchArgs(t, tool, c)
+	if argv == "" || !strings.Contains(out, "01MISSINGTASK000000000000") || !strings.Contains(out, "profile") {
+		t.Fatalf("an unreadable task is reported: %q\n%s", argv, out)
+	}
+	// With a risky project default, an unreadable task fails closed.
+	appendProject(t, dir, "\n[agents]\ni_understand_the_risk = true\ndefault_profile = \"yolo\"\n")
+	argv, out = launchArgs(t, tool, c)
+	if argv != "" || !strings.Contains(out, "not started") {
+		t.Fatalf("risky launch with an unreadable task must refuse: %q\n%s", argv, out)
 	}
 }
 
@@ -193,8 +248,13 @@ func TestAgentsRiskyAllowedWithAckShowsBadge(t *testing.T) {
 	if err := json.Unmarshal([]byte(mustRun(t, "", "agents", "ls", "--json")), &rows); err != nil || len(rows) != 1 || rows[0]["risk"] != true || rows[0]["profile"] != "yolo" {
 		t.Fatalf("ls --json %v %+v", err, rows)
 	}
+	// After the tool exits the conversation is stopped: no status badge.
+	if st := mustRun(t, "", "status"); strings.Contains(st, "! wild") {
+		t.Fatalf("a stopped conversation keeps no status badge:\n%s", st)
+	}
+	putLive(t, testStore(dir), conv.Conversation{ID: "01LIVE", Name: "live", Project: "demo", Tool: "pfake", State: conv.StateWorking, Risk: true}, true)
 	st := mustRun(t, "", "status")
-	if !strings.Contains(st, "! wild") {
+	if !strings.Contains(st, "! live") || strings.Contains(st, "! wild") {
 		t.Fatalf("status badge:\n%s", st)
 	}
 	var sj struct {
@@ -214,7 +274,7 @@ func TestAgentsRiskyAllowedWithAckShowsBadge(t *testing.T) {
 
 func TestAgentsProfileLs(t *testing.T) {
 	dir, _ := profileTestEnv(t)
-	writeFile(t, filepath.Join(dir, "config/cairn/profiles.toml"), `[profiles.careful]
+	writeFile(t, filepath.Join(dir, "config/cairn/agents/profiles.toml"), `[profiles.careful]
 model = "opus"
 
 [profiles.typo]
@@ -229,6 +289,31 @@ modle = "x"
 	fs := decodeFindings(t, mustRun(t, "", "agents", "doctor", "--json"))
 	if f, ok := findingOf(fs, "profiles", "load"); !ok || f.Level != "warn" {
 		t.Fatalf("doctor load finding %+v", f)
+	}
+	// The old location is still read, with a note to move it.
+	if err := os.Rename(filepath.Join(dir, "config/cairn/agents/profiles.toml"), filepath.Join(dir, "config/cairn/profiles.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if out := mustRun(t, "", "agents", "profile", "ls"); !strings.Contains(out, "careful") {
+		t.Fatalf("old path not read:\n%s", out)
+	}
+	fs = decodeFindings(t, mustRun(t, "", "agents", "doctor", "--json"))
+	if f, ok := findingOf(fs, "profiles", "path"); !ok || f.Level != "warn" || !strings.Contains(f.Detail, "agents/profiles.toml") {
+		t.Fatalf("doctor path finding %+v", f)
+	}
+}
+
+func TestAgentsDoctorReportsToolSandbox(t *testing.T) {
+	dir, _ := profileTestEnv(t)
+	writeFile(t, filepath.Join(dir, ".codex/config.toml"), "sandbox_mode = \"danger-full-access\"\n")
+	fs := decodeFindings(t, mustRun(t, "", "agents", "doctor", "--json"))
+	if f, ok := findingOf(fs, "codex", "sandbox"); !ok || f.Level != "warn" || !strings.Contains(f.Detail, "danger-full-access") {
+		t.Fatalf("codex sandbox finding %+v in %+v", f, fs)
+	}
+	writeFile(t, filepath.Join(dir, ".codex/config.toml"), "sandbox_mode = \"read-only\"\n")
+	fs = decodeFindings(t, mustRun(t, "", "agents", "doctor", "--json"))
+	if f, ok := findingOf(fs, "codex", "sandbox"); !ok || f.Level != "ok" {
+		t.Fatalf("codex sandbox finding %+v", f)
 	}
 }
 
@@ -253,7 +338,7 @@ func TestAgentsUsage(t *testing.T) {
 	}
 	usageLookPath = func(string) (string, error) { return "/usr/bin/ccusage", nil }
 	usageRunner = &execx.FakeRunner{Responses: map[string]execx.Response{
-		"/usr/bin/ccusage session --json --offline": {Out: []byte(`{"sessions":[{"sessionId":"0b6f3b1e-6f5c-4c43-9d0a-1d2b3c4d5e6f","totalTokens":1000,"totalCost":1.5}]}`)},
+		"/usr/bin/ccusage session --id 0b6f3b1e-6f5c-4c43-9d0a-1d2b3c4d5e6f --json --offline": {Out: []byte(`{"sessionId":"0b6f3b1e-6f5c-4c43-9d0a-1d2b3c4d5e6f","totalTokens":1000,"totalCost":1.5}`)},
 	}}
 	out = mustRun(t, "", "agents", "usage", "--by", "tool")
 	if !strings.Contains(out, "claude") || !strings.Contains(out, "1000") || !strings.Contains(out, "~$1.50") || !strings.Contains(out, "estimate") {
@@ -273,8 +358,12 @@ func TestAgentsUsage(t *testing.T) {
 	if len(js.Groups) != 2 || js.Groups[0].Key != "(no task)" && js.Groups[0].Key != "T1" {
 		t.Fatalf("groups %+v", js.Groups)
 	}
+	// codex has no usage source: it is never passed to ccusage.
+	if calls := usageRunner.(*execx.FakeRunner).Calls; len(calls) != 2 {
+		t.Fatalf("ccusage calls %v", calls)
+	}
 	usageRunner = &execx.FakeRunner{Responses: map[string]execx.Response{
-		"/usr/bin/ccusage session --json --offline": {Err: errors.New("exit status 1")},
+		"/usr/bin/ccusage session --id 0b6f3b1e-6f5c-4c43-9d0a-1d2b3c4d5e6f --json --offline": {Err: errors.New("exit status 1")},
 	}}
 	out, err := runHost(t, "", "agents", "usage")
 	if err != nil || !strings.Contains(out, "warning") {
@@ -312,5 +401,14 @@ func TestStatusTmuxMarksRiskyWork(t *testing.T) {
 	out, _, err := runSplit(t, "status", "--tmux")
 	if err != nil || out != "! 1 working\n" {
 		t.Fatalf("tmux badge %q %v", out, err)
+	}
+}
+
+func TestTaskNewRejectsTerminalControlsInTitle(t *testing.T) {
+	_, _, _ = agentsTestEnv(t)
+	for _, title := range []string{"x\u009b31m", "x\u202ey"} {
+		if out, err := runHost(t, "", "task", "new", title, "--project", "demo", "--tool", "fake", "--here"); err == nil || !strings.Contains(err.Error(), "title") {
+			t.Fatalf("title %q: %v\n%s", title, err, out)
+		}
 	}
 }

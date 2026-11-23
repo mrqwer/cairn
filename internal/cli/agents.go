@@ -670,7 +670,7 @@ func newAgentsNewCmd() *cobra.Command {
 				}
 			}
 			out := cmd.OutOrStdout()
-			_, _ = fmt.Fprintf(out, "created agent %s (%s, %s) in %s, pane %s\n", c.Name, c.ID, a.Name, p.ID, key)
+			_, _ = fmt.Fprintf(out, "created agent %s (%s, %s) in %s, pane %s\n", ui.SafeLine(c.Name), c.ID, a.Name, p.ID, key)
 			setup.report(out, a.Name, p.ID)
 			e.admitNew(out, cmd.ErrOrStderr(), c)
 			running, err := applyProject(cmd, p.ID, false)

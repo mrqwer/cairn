@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -29,16 +30,39 @@ var (
 )
 
 // stdoutRunner runs a command without a shell and returns its standard
-// output only (a tool's notes on stderr stay out of its JSON).
+// output only (a tool's notes on stderr stay out of its JSON), at most
+// one byte more than profile.MaxUsageOutput; the rest is discarded.
 type stdoutRunner struct{}
 
 func (stdoutRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	c := exec.CommandContext(ctx, name, args...)
 	c.WaitDelay = 5 * time.Second
-	return c.Output()
+	var w capWriter
+	w.max = profile.MaxUsageOutput + 1
+	c.Stdout = &w
+	err := c.Run()
+	return w.buf.Bytes(), err
 }
 
-// loadProfiles reads <Config>/profiles.toml.
+// capWriter keeps the first max bytes written and discards the rest, so
+// the child never blocks on a full pipe.
+type capWriter struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	if room := w.max - w.buf.Len(); room > 0 {
+		if len(p) > room {
+			w.buf.Write(p[:room])
+		} else {
+			w.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
+// loadProfiles reads the agent profiles file.
 func (e *agentsEnv) loadProfiles() (map[string]profile.Profile, []profile.LoadError, error) {
 	return profile.Load(wsRoot, e.dirs)
 }
@@ -80,6 +104,9 @@ func (e *agentsEnv) launchProfile(a adapter.Adapter, p workspace.Project, convPr
 				orNone(strings.Join(names, ", ")), profile.Path(e.dirs))
 		}
 	}
+	if err := profile.Check(a, pr); err != nil {
+		return ls, err
+	}
 	if err := profile.Authorize(pr, a, p); err != nil {
 		return ls, err
 	}
@@ -120,7 +147,8 @@ func checkProfileFlag(name string) error {
 // paneProfileArgs is the pane wrapper's ProfileArgs: the launch resolves
 // the profile again from the current project and task files, so a
 // withdrawn acknowledgement stops a risky launch; the record's risk mark
-// follows what is passed.
+// follows what is passed. A task file that cannot be read is said; its
+// profile is unknown then, so a launch that would be risky is refused.
 func (e *agentsEnv) paneProfileArgs(out io.Writer) func(conv.Conversation, adapter.Adapter) ([]string, error) {
 	return func(c conv.Conversation, a adapter.Adapter) ([]string, error) {
 		p := workspace.Project{ID: c.Project}
@@ -129,17 +157,26 @@ func (e *agentsEnv) paneProfileArgs(out io.Writer) func(conv.Conversation, adapt
 				p = wp
 			}
 		}
-		taskProfile := ""
+		taskProfile, taskUnread := "", false
 		if c.Task != "" {
-			if ts, _, err := task.Load(wsRoot, e.dirs); err == nil {
-				if tk, err := task.Find(ts, c.Task); err == nil {
-					taskProfile = tk.Profile
-				}
+			ts, _, err := task.Load(wsRoot, e.dirs)
+			var tk task.Task
+			if err == nil {
+				tk, err = task.Find(ts, c.Task)
 			}
+			if err != nil {
+				taskUnread = true
+				_, _ = fmt.Fprintf(out, "note: task %s cannot be read (%s); its profile is not applied\n", c.Task, ui.SafeLine(err.Error()))
+			}
+			taskProfile = tk.Profile
 		}
 		ls, err := e.launchProfile(a, p, c.Profile, taskProfile)
 		if err != nil {
 			return nil, err
+		}
+		if taskUnread && c.Profile == "" && len(ls.risky) > 0 {
+			return nil, fmt.Errorf("task %s cannot be read, and without its profile the launch would pass %s; fix the task file first",
+				c.Task, strings.Join(ls.risky, ", "))
 		}
 		if len(ls.unsupported) > 0 {
 			_, _ = fmt.Fprintf(out, "note: %s cannot express %s; left out\n", a.Name, strings.Join(ls.unsupported, ", "))
@@ -166,6 +203,10 @@ func (e *agentsEnv) profileFindings() []agentsdoctor.Finding {
 			out = append(out, agentsdoctor.Finding{Tool: "profiles", Check: "load", Level: agentsdoctor.LevelWarn, Detail: ui.SafeLine(le.Error())})
 		}
 	}
+	if profile.UsesOldPath(wsRoot, e.dirs) {
+		out = append(out, agentsdoctor.Finding{Tool: "profiles", Check: "path", Level: agentsdoctor.LevelWarn,
+			Detail: "profiles are read from " + profile.OldPath(e.dirs) + "; move the file to " + profile.Path(e.dirs)})
+	}
 	if ws, err := loadWorkspace(); err == nil {
 		for _, p := range ws.projects {
 			if p.Agents.IUnderstandTheRisk {
@@ -175,6 +216,25 @@ func (e *agentsEnv) profileFindings() []agentsdoctor.Finding {
 		}
 	}
 	return out
+}
+
+// sandboxFinding reports the sandbox a tool's own config sets (cairn
+// passes none unless a profile does); nothing when the adapter names no
+// config or the tool leaves it unset.
+func (e *agentsEnv) sandboxFinding(a adapter.Adapter) []agentsdoctor.Finding {
+	s, ok, err := profile.ToolSandbox(wsRoot, e.dirs, a)
+	switch {
+	case err != nil:
+		return []agentsdoctor.Finding{{Tool: a.Name, Check: "sandbox", Level: agentsdoctor.LevelWarn,
+			Detail: "cannot read the tool's sandbox setting: " + ui.SafeLine(err.Error())}}
+	case !ok:
+		return nil
+	case s.Risky:
+		return []agentsdoctor.Finding{{Tool: a.Name, Check: "sandbox", Level: agentsdoctor.LevelWarn,
+			Detail: fmt.Sprintf("! %s sets %s = %q: conversations without a sandbox profile run unsandboxed", s.File, a.SandboxConfig.Key, ui.SafeLine(s.Value))}}
+	}
+	return []agentsdoctor.Finding{{Tool: a.Name, Check: "sandbox", Level: agentsdoctor.LevelOK,
+		Detail: fmt.Sprintf("%s = %q in %s (used unless a profile sets sandbox)", a.SandboxConfig.Key, ui.SafeLine(s.Value), s.File)}}
 }
 
 func newAgentsProfileCmd() *cobra.Command {
@@ -191,6 +251,7 @@ type profileToolJSON struct {
 	Args        []string `json:"args"`
 	Unsupported []string `json:"unsupported"`
 	Risky       []string `json:"risky"`
+	Problem     string   `json:"problem,omitempty"`
 }
 
 type profileJSON struct {
@@ -230,8 +291,12 @@ func newAgentsProfileLsCmd() *cobra.Command {
 				for _, t := range tools {
 					a := e.adapters[t]
 					args, uns := profile.Args(a, ps[n])
-					r.Tools = append(r.Tools, profileToolJSON{Tool: t, Args: nonNil(args), Unsupported: nonNil(uns),
-						Risky: nonNil(profile.RiskyFlags(a, ps[n]))})
+					tj := profileToolJSON{Tool: t, Args: nonNil(args), Unsupported: nonNil(uns),
+						Risky: nonNil(profile.RiskyFlags(a, ps[n]))}
+					if err := profile.Check(a, ps[n]); err != nil {
+						tj.Problem = err.Error()
+					}
+					r.Tools = append(r.Tools, tj)
 				}
 				rows = append(rows, r)
 			}
@@ -258,6 +323,9 @@ func newAgentsProfileLsCmd() *cobra.Command {
 					line := fmt.Sprintf("  %s %s %s", badge, ui.Pad(ui.SafeLine(t.Tool), 8), ui.SafeLine(orNone(strings.Join(t.Args, " "))))
 					if len(t.Unsupported) > 0 {
 						line += "  (cannot express: " + strings.Join(t.Unsupported, ", ") + ")"
+					}
+					if t.Problem != "" {
+						line += "  refused: " + ui.SafeLine(t.Problem)
 					}
 					_, _ = fmt.Fprintln(out, line)
 				}
@@ -433,11 +501,13 @@ func newAgentsUsageCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "usage",
-		Short: "Tokens and estimated cost per tool, project or task (from the tool's records or ccusage, if installed)",
-		Long: "Sums usage over all conversations, archived ones included. Figures come from what a\n" +
-			"tool recorded, else from ccusage (optional: run as `ccusage session --json --offline`,\n" +
-			"without a shell, stopped after 30 s). Dollar figures are estimates, not a bill. Without\n" +
-			"ccusage the usage is reported as unavailable; that is not an error.",
+		Short: "Tokens and estimated cost per tool, project or task (from ccusage, if installed)",
+		Long: "Sums usage over all conversations, archived ones included, from ccusage (optional),\n" +
+			"asked once per conversation of a tool whose adapter sets usage = \"ccusage\"\n" +
+			"(`ccusage session --id <id> --json --offline`, no shell, 10 s each, 30 s in all; these\n" +
+			"flags are not verified against a real ccusage). Only a session with exactly the\n" +
+			"conversation's id counts. Dollar figures are estimates, not a bill. Without ccusage the\n" +
+			"usage is reported as unavailable with the reason; that is not an error.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			key := map[string]func(conv.Conversation) string{
@@ -456,7 +526,20 @@ func newAgentsUsageCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			us, werr := profile.CollectUsage(ctxOf(cmd), usageRunner, usageLookPath, cs)
+			var ask []conv.Conversation
+			us := map[string]profile.Usage{}
+			for _, c := range cs {
+				if a, ok := e.adapter(c.Tool); ok && a.Usage == "ccusage" {
+					ask = append(ask, c)
+					continue
+				}
+				us[c.ID] = profile.Usage{Estimate: true, Source: profile.SourceUnavailable, Reason: "no usage source for " + c.Tool}
+			}
+			got, werr := profile.CollectUsage(ctxOf(cmd), usageRunner, usageLookPath, ask)
+			for id, u := range got {
+				us[id] = u
+			}
+			reasons := map[string]bool{}
 			res := usageJSON{By: by, Estimate: true, Groups: []usageGroup{}, Sources: []string{}, Warnings: []string{}}
 			if werr != nil {
 				res.Warnings = append(res.Warnings, werr.Error())
@@ -475,7 +558,10 @@ func newAgentsUsageCmd() *cobra.Command {
 				}
 				g.Conversations++
 				u := us[c.ID]
-				if u.Source == profile.SourceNative || u.Source == profile.SourceCcusage {
+				if u.Source != profile.SourceCcusage {
+					reasons[u.Reason] = true
+				}
+				if u.Source == profile.SourceCcusage {
 					g.WithData++
 					g.Tokens += u.Tokens
 					g.CostUSD += u.CostUSD
@@ -497,8 +583,18 @@ func newAgentsUsageCmd() *cobra.Command {
 			for _, w := range res.Warnings {
 				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "warning:", ui.SafeLine(w))
 			}
+			why := make([]string, 0, len(reasons))
+			for r := range reasons {
+				if r != "" {
+					why = append(why, r)
+				}
+			}
+			sort.Strings(why)
 			if len(res.Sources) == 0 {
-				_, _ = fmt.Fprintln(out, "usage: unavailable (no tool recorded any, and ccusage is not installed or knows none of these conversations; ccusage is optional)")
+				if len(why) == 0 {
+					why = []string{"no conversations"}
+				}
+				_, _ = fmt.Fprintf(out, "usage: unavailable (%s)\n", ui.SafeLine(strings.Join(why, "; ")))
 				return nil
 			}
 			st, styled := styleFor(out)
@@ -512,6 +608,9 @@ func newAgentsUsageCmd() *cobra.Command {
 				_, _ = fmt.Fprintf(out, "%s %s %s ~$%.2f\n", ui.Pad(ui.SafeLine(g.Key), 28), ui.Pad(convs, 14), ui.Pad(fmt.Sprint(g.Tokens), 12), g.CostUSD)
 			}
 			_, _ = fmt.Fprintf(out, "source: %s; conversations with data / all; costs are estimates, not a bill\n", strings.Join(res.Sources, ", "))
+			if len(why) > 0 {
+				_, _ = fmt.Fprintf(out, "without data: %s\n", ui.SafeLine(strings.Join(why, "; ")))
+			}
 			return nil
 		},
 	}

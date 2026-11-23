@@ -54,6 +54,7 @@ func probeAgents(ctx context.Context, tool string) ([]agentsdoctor.Finding, erro
 	run := agentsdoctor.Runner{Dir: tmp, Env: agentsdoctor.MinimalEnv(os.Getenv, tmp)}
 	for _, n := range names {
 		out = append(out, agentsdoctor.Probe(ctx, e.adapters[n], run, agentLookPath)...)
+		out = append(out, e.sandboxFinding(e.adapters[n])...)
 	}
 	if tool == "" {
 		out = append(out, e.profileFindings()...)
@@ -132,6 +133,8 @@ var agentsChecks = func(ctx context.Context) ([]doctor.Check, error) {
 			switch {
 			case f.Tool == "profiles" && f.Check == "risk":
 				r.Fix = "remove i_understand_the_risk from the project file unless you mean it (cairn project edit <id>)"
+			case f.Check == "sandbox":
+				r.Fix = "set a sandboxed mode in the tool's own config, or launch with a profile that sets sandbox"
 			case f.Tool == "profiles":
 				r.Fix = "fix profiles.toml in the config dir (see: cairn agents profile ls)"
 			}

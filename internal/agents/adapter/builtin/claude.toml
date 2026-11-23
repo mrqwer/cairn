@@ -7,6 +7,9 @@ probe_flags = [["claude", "--help"], ["claude", "agents", "--help"]]
 # allowed only in a project with i_understand_the_risk = true.
 risky_flags = ["--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--permission-mode bypassPermissions"]
 
+# agents usage asks ccusage (optional) for this tool's sessions.
+usage = "ccusage"
+
 [capabilities]
 name_at_start = true
 preassign_id = true
@@ -26,6 +29,11 @@ list = ["claude", "agents", "--json", "--all"]
 model = ["--model", "{value}"]
 effort = ["--effort", "{value}"]
 permission_mode = ["--permission-mode", "{value}"]
+
+# Values the tool takes; a profile with another value is refused (give
+# per-tool values in [profiles.<name>.claude]).
+[profile_values]
+permission_mode = ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "manual", "plan"]
 
 [env]
 unset = ["ANTHROPIC_API_KEY"]

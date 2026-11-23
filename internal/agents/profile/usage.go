@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/mrqwer/cairn/internal/agents/conv"
@@ -14,32 +13,39 @@ import (
 
 // Usage sources.
 const (
-	// SourceNative is usage the tool reported into the record.
-	SourceNative = "native"
 	// SourceCcusage is usage read from ccusage.
 	SourceCcusage = "ccusage"
-	// SourceNone means ccusage ran but knows nothing of the conversation.
-	SourceNone = "none"
-	// SourceUnavailable means there is no source: ccusage is not installed
-	// or its output could not be used.
+	// SourceUnavailable means there is no figure; Reason says why.
 	SourceUnavailable = "unavailable"
 )
 
-// UsageTimeout bounds one ccusage run.
-const UsageTimeout = 30 * time.Second
+// Bounds of the ccusage queries.
+const (
+	// UsageTimeout bounds all queries of one CollectUsage.
+	UsageTimeout = 30 * time.Second
+	// UsageQueryTimeout bounds one query.
+	UsageQueryTimeout = 10 * time.Second
+	// MaxUsageOutput is the most output of one query that is read; more
+	// makes that conversation unavailable.
+	MaxUsageOutput = 1 << 20
+)
 
-// ccusageArgs asks for per-session totals as JSON with cached prices (no
-// network).
-var ccusageArgs = []string{"session", "--json", "--offline"}
+// ccusageArgs is the per-conversation query. These flags (session --id,
+// --json, --offline) are not verified against a real ccusage install; a
+// version that differs degrades to "unavailable".
+func ccusageArgs(nativeID string) []string {
+	return []string{"session", "--id", nativeID, "--json", "--offline"}
+}
 
 // Usage is the token and cost total of one conversation. Costs are always
-// estimates (Estimate is true): neither ccusage nor a tool's own count is a
-// bill.
+// estimates (Estimate is true). Reason is a one-line explanation when the
+// usage is unavailable.
 type Usage struct {
 	Tokens   int64   `json:"tokens"`
 	CostUSD  float64 `json:"cost_usd"`
 	Estimate bool    `json:"estimate"`
 	Source   string  `json:"source"`
+	Reason   string  `json:"reason,omitempty"`
 }
 
 // Warning is a problem that leaves usage incomplete but is not a failure.
@@ -47,60 +53,88 @@ type Warning struct{ Msg string }
 
 func (w *Warning) Error() string { return w.Msg }
 
-// CollectUsage returns the usage of every conversation by id: the record's
-// own usage when the tool reported it, else ccusage's (an optional tool,
-// run once without a shell, bounded by UsageTimeout, matched by native
-// id). A missing ccusage is not an error (Source "unavailable"); a failed
-// run or unreadable output is a *Warning, and the map is still complete.
-// Grouping is the caller's.
+// CollectUsage returns the usage of every conversation by id, from ccusage
+// (optional), queried once per conversation (the caller passes only
+// conversations of tools whose sessions ccusage knows), without a shell,
+// bounded in time and output. A result counts only when ccusage reports
+// the session with exactly the conversation's native id; anything else is
+// "unavailable" with a reason. A missing ccusage is not an error; a failed
+// query or unreadable output is also returned as a *Warning (the first
+// one), and the map is still complete.
 func CollectUsage(ctx context.Context, run execx.Runner, lookPath func(string) (string, error), convs []conv.Conversation) (map[string]Usage, error) {
 	out := make(map[string]Usage, len(convs))
-	need := false
+	none := func(reason string) Usage { return Usage{Estimate: true, Source: SourceUnavailable, Reason: reason} }
+	var todo []conv.Conversation
 	for _, c := range convs {
-		if u := c.Usage; u != nil && (u.InputTokens+u.OutputTokens > 0 || u.CostUSD > 0) {
-			out[c.ID] = Usage{Tokens: u.InputTokens + u.OutputTokens, CostUSD: u.CostUSD, Estimate: true, Source: SourceNative}
-			continue
+		switch {
+		case c.NativeID == "":
+			out[c.ID] = none("no session id is known for this conversation")
+		case !conv.ValidID(c.NativeID):
+			out[c.ID] = none("the session id is not one ccusage can be asked for")
+		default:
+			out[c.ID] = none("not queried")
+			todo = append(todo, c)
 		}
-		out[c.ID] = Usage{Estimate: true, Source: SourceUnavailable}
-		need = need || c.NativeID != ""
 	}
-	if !need {
+	if len(todo) == 0 {
 		return out, nil
 	}
 	bin, err := lookPath("ccusage")
 	if err != nil || bin == "" {
+		for _, c := range todo {
+			out[c.ID] = none("ccusage is not installed (it is optional)")
+		}
 		return out, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, UsageTimeout)
 	defer cancel()
-	data, err := run.Run(ctx, bin, ccusageArgs...)
-	if err != nil {
-		if ctx.Err() != nil {
-			err = ctx.Err()
-		}
-		return out, &Warning{Msg: fmt.Sprintf("ccusage failed (%v); usage is unavailable", err)}
-	}
-	entries, ok := parseCcusage(data)
-	if !ok {
-		return out, &Warning{Msg: "ccusage printed no session JSON cairn can read; usage is unavailable"}
-	}
-	for _, c := range convs {
-		if out[c.ID].Source == SourceNative {
-			continue
-		}
-		u := Usage{Estimate: true, Source: SourceNone}
-		if c.NativeID != "" {
-			for _, e := range entries {
-				if e.id == c.NativeID || strings.Contains(e.id, c.NativeID) {
-					u.Tokens += e.tokens
-					u.CostUSD += e.cost
-					u.Source = SourceCcusage
-				}
-			}
-		}
+	var warn error
+	for _, c := range todo {
+		u, w := query(ctx, run, bin, c.NativeID)
 		out[c.ID] = u
+		if w != "" && warn == nil {
+			warn = &Warning{Msg: "ccusage: " + w + "; usage is unavailable where it failed"}
+		}
 	}
-	return out, nil
+	return out, warn
+}
+
+// query asks ccusage for one session; w is a warning for a failure (not
+// for a session ccusage does not know).
+func query(ctx context.Context, run execx.Runner, bin, id string) (Usage, string) {
+	none := func(reason string) Usage { return Usage{Estimate: true, Source: SourceUnavailable, Reason: reason} }
+	if ctx.Err() != nil {
+		return none("ccusage took too long"), "it took too long"
+	}
+	qctx, cancel := context.WithTimeout(ctx, UsageQueryTimeout)
+	defer cancel()
+	data, err := run.Run(qctx, bin, ccusageArgs(id)...)
+	switch {
+	case err != nil && qctx.Err() != nil:
+		return none("ccusage took too long"), "it took too long"
+	case err != nil:
+		return none("ccusage failed: " + oneLine(err.Error())), "it failed (" + oneLine(err.Error()) + ")"
+	case len(data) > MaxUsageOutput:
+		return none("ccusage printed more than 1 MiB"), "its output is too large"
+	}
+	e, ok, readable := findSession(data, id)
+	switch {
+	case !readable:
+		return none("ccusage printed nothing cairn can read"), "its output is not session JSON"
+	case !ok:
+		return none(fmt.Sprintf("ccusage reported no session %s", id)), ""
+	}
+	return Usage{Tokens: e.tokens, CostUSD: e.cost, Estimate: true, Source: SourceCcusage}, ""
+}
+
+func oneLine(s string) string {
+	if i := bytes.IndexAny([]byte(s), "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 120 {
+		s = s[:120]
+	}
+	return s
 }
 
 type ccEntry struct {
@@ -109,14 +143,14 @@ type ccEntry struct {
 	cost   float64
 }
 
-// parseCcusage reads the first JSON value of data that starts a line (a
-// note printed before it is skipped): an array of sessions, or an object
-// holding one under "sessions" or "data". Entries without a string id or
-// with numbers that are not numbers are left out.
-func parseCcusage(data []byte) ([]ccEntry, bool) {
+// findSession reads the first JSON value of data that starts a line (a
+// note printed before it is skipped): one session object, a list of them,
+// or an object with one under "sessions" or "data". ok is set only for a
+// session whose id is exactly id; readable is false when no JSON value is
+// found.
+func findSession(data []byte, id string) (e ccEntry, ok, readable bool) {
 	var v any
-	found := false
-	for off := 0; off < len(data) && !found; {
+	for off := 0; off < len(data) && !readable; {
 		line := data[off:]
 		if i := bytes.IndexByte(line, '\n'); i >= 0 {
 			line = line[:i+1]
@@ -124,35 +158,34 @@ func parseCcusage(data []byte) ([]ccEntry, bool) {
 		if t := bytes.TrimLeft(line, " \t\r"); len(t) > 0 && (t[0] == '{' || t[0] == '[') {
 			dec := json.NewDecoder(bytes.NewReader(data[off:]))
 			dec.UseNumber()
-			found = dec.Decode(&v) == nil
+			readable = dec.Decode(&v) == nil
 		}
 		off += len(line)
 	}
-	if !found {
-		return nil, false
+	if !readable {
+		return e, false, false
 	}
 	var list []any
 	switch x := v.(type) {
 	case []any:
 		list = x
 	case map[string]any:
-		l, ok := x["sessions"].([]any)
-		if !ok {
-			if l, ok = x["data"].([]any); !ok {
-				return nil, false
-			}
+		if l, isList := x["sessions"].([]any); isList {
+			list = l
+		} else if l, isList := x["data"].([]any); isList {
+			list = l
+		} else {
+			list = []any{x}
 		}
-		list = l
 	}
-	var out []ccEntry
 	for _, it := range list {
-		if m, ok := it.(map[string]any); ok {
-			if e, ok := readEntry(m); ok {
-				out = append(out, e)
+		if m, isObj := it.(map[string]any); isObj {
+			if got, good := readEntry(m); good && got.id == id {
+				return got, true, true
 			}
 		}
 	}
-	return out, true
+	return e, false, true
 }
 
 // readEntry reads one session; ok is false when it has no string id or a

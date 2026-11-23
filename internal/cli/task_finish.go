@@ -20,6 +20,7 @@ import (
 	"github.com/mrqwer/cairn/internal/agents/conv"
 	"github.com/mrqwer/cairn/internal/agents/task"
 	"github.com/mrqwer/cairn/internal/execx"
+	"github.com/mrqwer/cairn/internal/ui"
 	"github.com/mrqwer/cairn/internal/xdg"
 )
 
@@ -364,7 +365,7 @@ func finishTask(cmd *cobra.Command, e *agentsEnv, st taskSettings, t task.Task, 
 // printFinishPlan shows the steps before anything runs.
 func printFinishPlan(w io.Writer, t task.Task, p task.FinishPlan, st taskSettings) {
 	sty, styled := styleFor(w)
-	_, _ = fmt.Fprintf(w, "finish task %s (%s), %s:\n", t.Slug, t.Title, p.Mode)
+	_, _ = fmt.Fprintf(w, "finish task %s (%s), %s:\n", t.Slug, ui.SafeLine(t.Title), p.Mode)
 	for i, s := range p.Steps {
 		mark := ""
 		if s.Irreversible {

@@ -202,7 +202,7 @@ func (e *agentsEnv) reportPending(w io.Writer) {
 		return
 	}
 	for _, t := range ps {
-		_, _ = fmt.Fprintf(w, "an interrupted task new %q (%s) left changes behind\n", t.Title, t.Slug)
+		_, _ = fmt.Fprintf(w, "an interrupted task new %q (%s) left changes behind\n", ui.SafeLine(t.Title), t.Slug)
 	}
 	_, _ = fmt.Fprintln(w, "clean them up with: cairn task recover")
 }
@@ -364,8 +364,8 @@ func newTaskNewCmd() *cobra.Command {
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			title := strings.TrimSpace(args[0])
-			if title == "" || hasControlChars(title) {
-				return errors.New("the title must not be empty or contain control characters")
+			if title == "" || !task.ValidTitle(title) {
+				return errors.New("the title must not be empty or contain control characters or bidirectional marks")
 			}
 			e, err := loadAgents()
 			if err != nil {

@@ -25,13 +25,6 @@ const (
 	SourceObserved = "observed"
 )
 
-// Usage is token and cost information, when the tool reports it.
-type Usage struct {
-	InputTokens  int64   `json:"input_tokens,omitempty"`
-	OutputTokens int64   `json:"output_tokens,omitempty"`
-	CostUSD      float64 `json:"cost_usd,omitempty"`
-}
-
 // Conversation is one agent conversation (spec §9.3). Pane is the @cairn_p
 // key of the owning pane, not a tmux id.
 type Conversation struct {
@@ -60,7 +53,6 @@ type Conversation struct {
 	ParentID         string     `json:"parent_id,omitempty"`
 	ForkedFrom       string     `json:"forked_from,omitempty"`
 	HandoffFrom      string     `json:"handoff_from,omitempty"`
-	Usage            *Usage     `json:"usage,omitempty"`
 	TranscriptRef    string     `json:"transcript_ref,omitempty"`
 	TranscriptParser string     `json:"transcript_parser,omitempty"`
 	Summary          string     `json:"summary,omitempty"`

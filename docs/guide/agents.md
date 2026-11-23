@@ -3,7 +3,7 @@
 ## Quickstart
 
 1. Check the tools: `cairn agents doctor` (a tool that is not installed is a skip, not a failure).
-2. Optionally define profiles in `~/.config/cairn/profiles.toml` and pick a project default:
+2. Optionally define profiles in `~/.config/cairn/agents/profiles.toml` and pick a project default:
    `cairn agents profile default careful --project api`.
 3. Start a conversation: `cairn agents new claude --project api --name "fix login" [--profile careful]`.
 4. Open it: `cairn open api` (the tool starts on first attach), or later `cairn agents resume "fix login"`.
@@ -246,41 +246,61 @@ index, it says so and waits up to 30 s, then searches the index as it stands.
 ## Profiles and safety
 
 ```toml
-# ~/.config/cairn/profiles.toml
+# ~/.config/cairn/agents/profiles.toml
 [profiles.careful]
+effort = "high"
+sandbox = "read-only"        # a tool without a sandbox flag reports it and goes on
+
+[profiles.careful.claude]    # values for one tool replace the generic ones
 model = "opus"
 permission_mode = "plan"
-sandbox = "read-only"
+
+[profiles.careful.codex]
+permission_mode = "on-request"
 ```
 
-- Keys: `model`, `effort`, `permission_mode`, `sandbox`, `mcp_set`. Values are passed as given; each
-  adapter maps a key to its tool's flags (`[profile_flags]`). A key a tool cannot express is reported
-  and left out. An unknown key, a non-string value or a value starting with `-` keeps that profile from
-  loading (`cairn agents profile ls` and `cairn agents doctor` show why).
+- The file was `~/.config/cairn/profiles.toml` before; that path is still read when the new one is
+  missing, and `agents doctor` says to move it. (`~/.config/cairn/profiles/<name>.toml` are config
+  layers, a different thing.)
+- Keys: `model`, `effort`, `permission_mode`, `sandbox`, `mcp_set`. Each adapter maps a key to its
+  tool's flags (`[profile_flags]`) and may list the values the tool takes (`[profile_values]`; claude
+  `permission_mode`: acceptEdits, auto, bypassPermissions, default, dontAsk, manual, plan; codex
+  `permission_mode`: untrusted, on-failure, on-request, never; codex `sandbox`: read-only,
+  workspace-write, danger-full-access). Tools take different values, so put tool-specific ones in
+  `[profiles.<name>.<tool>]`. A value a tool does not take stops `agents new` and `task new` before
+  anything is created. A key a tool cannot express is reported and left out. An unknown key, a
+  non-string value or a value starting with `-` keeps that profile from loading (`cairn agents profile
+  ls` and `cairn agents doctor` show why).
 - The profile of a launch is the conversation's `--profile`, else its task's (`task new --profile`),
   else the project's `default_profile` (`cairn agents profile default <name> --project p`, undoable;
-  `--clear` removes it). It is resolved again at each launch.
-- Sandbox is on by default where the tool has a sandbox flag (codex: `--sandbox workspace-write`); a
-  profile may pick another mode.
-- Flags that skip permission checks or the sandbox (`risky_flags` of the adapter, plus the known ones:
-  `--dangerously-skip-permissions`, `--permission-mode bypassPermissions`,
-  `--dangerously-bypass-approvals-and-sandbox`, `--sandbox danger-full-access`, ...) are refused unless
-  the project file says so itself:
+  `--clear` removes it). It is resolved again at each launch; when the task file cannot be read, the
+  pane says so, and a launch that would then be risky is refused.
+- A sandbox flag is passed only when the profile sets `sandbox`. Otherwise the tool's own config
+  decides (codex: `sandbox_mode` in `~/.codex/config.toml`, and its per-project trust). `agents doctor`
+  shows that setting and warns when it is `danger-full-access`.
+- Flags that skip permission checks or the sandbox are refused unless the project file says so itself.
+  They are the adapter's `risky_flags` plus the known ones (any `--dangerously-*`,
+  `--allow-dangerously-skip-permissions`, `--permission-mode bypassPermissions`, `--yolo`,
+  `--approve-for-me`, `--sandbox`/`-s danger-full-access`, `-c sandbox_mode=danger-full-access`),
+  matched in every spelling (`--x=v`, `-xv`, `-x=v`, `-c k=v`, `--config=k=v`, quoted values):
 
   ```toml
   [agents]
   i_understand_the_risk = true
   ```
 
-  There is no global switch and no command sets it (edit the file: `cairn project edit api`). Removing it
-  stops the next launch. Such conversations carry `!` in `agents ls` and `status` (and `status --tmux`
-  while one works or waits), and
-  `agents doctor` lists every project that allows them.
+  There is no global switch and no command sets it (edit the file: `cairn project edit api`). Removing
+  it stops the next launch. `agents ls` marks such conversations with `!`; `status` (and
+  `status --tmux`) shows the mark while their tool runs; `agents doctor` lists every project that
+  allows them.
 
 ## Usage
 
-`cairn agents usage [--by tool|project|task] [--json]` sums tokens and cost over all conversations.
-Figures come from the tool's own record when it has one, else from `ccusage` (optional; run as
-`ccusage session --json --offline`, no shell, stopped after 30 s, matched by the tool's session id).
-Without `ccusage` it says `unavailable` and exits 0; output it cannot read is a warning. Every dollar
-figure is an estimate, not a bill. Quota and limit status is not shown yet.
+`cairn agents usage [--by tool|project|task] [--json]` sums tokens and cost over all conversations of
+tools whose adapter sets `usage = "ccusage"` (claude). It asks `ccusage` (optional) once per
+conversation: `ccusage session --id <id> --json --offline`, no shell, 10 s each and 30 s in all,
+at most 1 MiB of output. **These ccusage flags are not verified against a real install.** Only a
+session reported with exactly the conversation's id counts; anything else is `unavailable` with a
+one-line reason, and a failed or unreadable run is also a warning. Without `ccusage` it says
+`unavailable` and exits 0. Every dollar figure is an estimate, not a bill. Quota and limit status is
+not shown yet.

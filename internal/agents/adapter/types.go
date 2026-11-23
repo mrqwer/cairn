@@ -10,12 +10,21 @@ type Adapter struct {
 	Capabilities Capabilities        `toml:"capabilities"`
 	Commands     map[string][]string `toml:"commands"`
 	ProfileFlags map[string][]string `toml:"profile_flags"`
-	// ProfileDefaults are profile settings used when the profile does not
-	// set them: sandbox is on by default for a tool that has a sandbox flag.
-	ProfileDefaults map[string]string `toml:"profile_defaults"`
+	// ProfileValues lists, per generic profile key, the values the tool
+	// takes; a profile with another value is refused before anything is
+	// created (a profile may give per-tool values in [profiles.<n>.<tool>]).
+	ProfileValues map[string][]string `toml:"profile_values"`
+	// SandboxConfig names the tool's own config file and key that set its
+	// sandbox, read only by `agents doctor` to report it. cairn passes a
+	// sandbox flag only when a profile sets one.
+	SandboxConfig SandboxConfig `toml:"sandbox_config"`
+	// Usage is the usage source of the tool's conversations: "" (none) or
+	// "ccusage".
+	Usage string `toml:"usage"`
 	// RiskyFlags are arguments that skip the tool's permission checks or
-	// sandbox, as "--flag" or "--flag value"; a profile or command using one
-	// needs i_understand_the_risk in the project.
+	// sandbox, as "--flag", "--flag value", "-f value" or "-c key=value"
+	// (matched in every spelling); a profile or command using one needs
+	// i_understand_the_risk in the project.
 	RiskyFlags []string   `toml:"risky_flags"`
 	Env        Env        `toml:"env"`
 	History    History    `toml:"history"`
@@ -25,6 +34,13 @@ type Adapter struct {
 	// subcommands the commands use; the first is the top-level help, where
 	// options placed right after the binary (hooks) must appear.
 	ProbeFlags [][]string `toml:"probe_flags"`
+}
+
+// SandboxConfig is where a tool keeps its sandbox setting: File ("~/" is
+// the home directory) and a top-level Key in it (TOML).
+type SandboxConfig struct {
+	File string `toml:"file"`
+	Key  string `toml:"key"`
 }
 
 // Capabilities declares what a tool can do; cairn fills the gaps.

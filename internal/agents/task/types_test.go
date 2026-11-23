@@ -133,3 +133,22 @@ func TestTaskProfileValidated(t *testing.T) {
 		t.Fatalf("a bad profile name must be refused: %v", err)
 	}
 }
+
+func TestTaskTitleRejectsC1AndBidi(t *testing.T) {
+	base := Task{ID: "01JTEST0000000000000000000", Slug: "x", Project: "demo",
+		Repos:     []Repo{{Repo: "/home/u/src/demo", Branch: "task/x"}},
+		Isolation: IsolationHere, Status: StatusOpen}
+	for _, title := range []string{"a\u009b31mb", "a\u202eb", "a\u2066b", "a\u200fb", "a\u061cb"} {
+		tk := base
+		tk.Title = title
+		if err := tk.Validate(); err == nil {
+			t.Errorf("title %q accepted", title)
+		}
+		if ValidTitle(title) {
+			t.Errorf("ValidTitle(%q)", title)
+		}
+	}
+	if !ValidTitle("Fix «login» — ü") {
+		t.Fatal("ordinary text is a valid title")
+	}
+}

@@ -25,14 +25,17 @@ import (
 // flags in [profile_flags].
 var Keys = []string{"effort", "mcp_set", "model", "permission_mode", "sandbox"}
 
-// Profile is one [profiles.<name>] table of <Config>/profiles.toml.
+// Profile is one [profiles.<name>] table of the profiles file. Tools holds
+// per-tool values ([profiles.<name>.<tool>]) that replace Settings for
+// that tool.
 type Profile struct {
 	Name     string
 	Settings map[string]string
+	Tools    map[string]map[string]string
 }
 
-// LoadError is one problem in profiles.toml; the profile it names is not
-// loaded.
+// LoadError is one problem in the profiles file; the profile it names is
+// not loaded.
 type LoadError struct {
 	File    string
 	Profile string
@@ -46,21 +49,35 @@ func (e LoadError) Error() string {
 	return fmt.Sprintf("%s: profile %s: %s", e.File, e.Profile, e.Msg)
 }
 
-// nameRe is the profile name rule (names reach project files and output).
+// nameRe is the profile (and tool) name rule: names reach project files,
+// tables and output.
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 
 // ValidName reports whether s is a usable profile name.
 func ValidName(s string) bool { return nameRe.MatchString(s) }
 
-// Path is the profiles file.
-func Path(dirs xdg.Dirs) string { return filepath.Join(dirs.Config, "profiles.toml") }
+// Path is the profiles file: <Config>/agents/profiles.toml (apart from
+// the config layers in <Config>/profiles/, which are something else).
+func Path(dirs xdg.Dirs) string { return filepath.Join(dirs.Config, "agents", "profiles.toml") }
 
-// Load reads <Config>/profiles.toml; a missing file is no profiles. A
-// profile with an unknown key, a non-string value or a value a tool could
-// misread as a flag is reported and left out; a file that does not parse
-// is one LoadError.
+// OldPath is where the profiles file was first kept; it is still read
+// when Path does not exist.
+func OldPath(dirs xdg.Dirs) string { return filepath.Join(dirs.Config, "profiles.toml") }
+
+// UsesOldPath reports whether profiles are read from OldPath.
+func UsesOldPath(root fsx.Root, dirs xdg.Dirs) bool {
+	return !root.Exists(Path(dirs)) && root.Exists(OldPath(dirs))
+}
+
+// Load reads the profiles file (Path, else OldPath); none is no profiles.
+// A profile with an unknown key, a non-string value, a value a tool could
+// misread as a flag or a bad tool table is reported and left out; a file
+// that does not parse is one LoadError.
 func Load(root fsx.Root, dirs xdg.Dirs) (map[string]Profile, []LoadError, error) {
 	file := Path(dirs)
+	if UsesOldPath(root, dirs) {
+		file = OldPath(dirs)
+	}
 	data, err := root.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
 		return map[string]Profile{}, nil, nil
@@ -95,24 +112,7 @@ func Load(root fsx.Root, dirs xdg.Dirs) (map[string]Profile, []LoadError, error)
 			lerrs = append(lerrs, LoadError{File: file, Profile: name, Msg: "must be a table"})
 			continue
 		}
-		p := Profile{Name: name, Settings: map[string]string{}}
-		var probs []string
-		for _, k := range sortedKeys(t) {
-			if !isKey(k) {
-				probs = append(probs, "unknown key "+k+" (keys: "+strings.Join(Keys, ", ")+")")
-				continue
-			}
-			v, ok := t[k].(string)
-			if !ok {
-				probs = append(probs, k+": must be a string")
-				continue
-			}
-			if err := CheckValue(v); err != nil {
-				probs = append(probs, k+": "+err.Error())
-				continue
-			}
-			p.Settings[k] = v
-		}
+		p, probs := decodeProfile(name, t)
 		if len(probs) > 0 {
 			for _, m := range probs {
 				lerrs = append(lerrs, LoadError{File: file, Profile: name, Msg: m})
@@ -122,6 +122,58 @@ func Load(root fsx.Root, dirs xdg.Dirs) (map[string]Profile, []LoadError, error)
 		out[name] = p
 	}
 	return out, lerrs, nil
+}
+
+// decodeSettings reads generic keys of m into into; prefix names a tool
+// table in messages. Sub-tables are skipped (the caller reads them).
+func decodeSettings(prefix string, m map[string]any, into map[string]string) []string {
+	var probs []string
+	for _, k := range sortedKeys(m) {
+		if _, isTable := m[k].(map[string]any); isTable && prefix == "" {
+			continue
+		}
+		if !isKey(k) {
+			probs = append(probs, prefix+k+": unknown key (keys: "+strings.Join(Keys, ", ")+")")
+			if prefix == "" {
+				probs[len(probs)-1] = "unknown key " + k + " (keys: " + strings.Join(Keys, ", ") + ")"
+			}
+			continue
+		}
+		v, ok := m[k].(string)
+		if !ok {
+			probs = append(probs, prefix+k+": must be a string")
+			continue
+		}
+		if err := CheckValue(v); err != nil {
+			probs = append(probs, prefix+k+": "+err.Error())
+			continue
+		}
+		into[k] = v
+	}
+	return probs
+}
+
+// decodeProfile reads one profile table: generic keys, and tool tables of
+// generic keys.
+func decodeProfile(name string, t map[string]any) (Profile, []string) {
+	p := Profile{Name: name, Settings: map[string]string{}}
+	probs := decodeSettings("", t, p.Settings)
+	for _, k := range sortedKeys(t) {
+		sub, isTable := t[k].(map[string]any)
+		if !isTable {
+			continue
+		}
+		if !ValidName(k) {
+			probs = append(probs, fmt.Sprintf("%q is not a tool name", k))
+			continue
+		}
+		if p.Tools == nil {
+			p.Tools = map[string]map[string]string{}
+		}
+		p.Tools[k] = map[string]string{}
+		probs = append(probs, decodeSettings(k+".", sub, p.Tools[k])...)
+	}
+	return p, probs
 }
 
 // CheckValue rejects a setting value a tool could misread: empty, too long,
@@ -173,58 +225,168 @@ func Resolve(convProfile, taskProfile, projectDefault string) (name, src string)
 	return "", ""
 }
 
-// Settings are the profile's settings over the adapter's defaults for the
-// keys it leaves out (sandbox is on by default where the tool has it).
+// Settings are p's settings for a's tool: the per-tool values over the
+// generic ones. Nothing is added: without a profile setting, the tool's
+// own configuration decides (its sandbox included).
 func Settings(a adapter.Adapter, p Profile) map[string]string {
 	s := map[string]string{}
-	for k, v := range a.ProfileDefaults {
+	for k, v := range p.Settings {
 		s[k] = v
 	}
-	for k, v := range p.Settings {
+	for k, v := range p.Tools[a.Name] {
 		s[k] = v
 	}
 	return s
 }
 
-// Args maps p to the tool's flags (with the adapter's defaults) and lists
-// the keys the tool cannot express, which are reported, not fatal.
+// Args maps p to the tool's flags and lists the keys the tool cannot
+// express, which are reported, not fatal.
 func Args(a adapter.Adapter, p Profile) (args, unsupported []string) {
 	return a.ProfileArgs(Settings(a, p))
 }
 
-// knownRisky are flags that skip permission checks or the sandbox in the
-// built-in tools; they count for every adapter, so a user adapter that
-// leaves risky_flags out cannot pass them unacknowledged.
-var knownRisky = []string{
-	"--dangerously-skip-permissions",
-	"--allow-dangerously-skip-permissions",
-	"--permission-mode bypassPermissions",
-	"--dangerously-bypass-approvals-and-sandbox",
-	"--yolo",
-	"--sandbox danger-full-access",
+// Check refuses a value the tool does not take (the adapter's
+// profile_values), naming where a per-tool value goes.
+func Check(a adapter.Adapter, p Profile) error {
+	s := Settings(a, p)
+	for _, k := range sortedKeys(s) {
+		allowed, ok := a.ProfileValues[k]
+		if !ok || len(a.ProfileFlags[k]) == 0 {
+			continue
+		}
+		found := false
+		for _, v := range allowed {
+			found = found || v == s[k]
+		}
+		if !found {
+			return fmt.Errorf("profile %s: %s does not take %s %q (one of: %s); set a value for it in [profiles.%s.%s]",
+				p.Name, a.Name, k, s[k], strings.Join(allowed, ", "), p.Name, a.Name)
+		}
+	}
+	return nil
 }
 
-// RiskyArgs returns the risky flags (the adapter's risky_flags and the
-// built-in list) that occur in args: "--flag" matches the argument or
-// "--flag=…"; "--flag value" matches the two arguments or "--flag=value"
-// (the value case-insensitively).
+// knownRisky are flags that skip permission checks or the sandbox in the
+// built-in tools; they count for every adapter, so a user adapter that
+// leaves risky_flags out cannot pass them unacknowledged. Any flag starting
+// with --dangerously- counts as well.
+var knownRisky = []string{
+	"--allow-dangerously-skip-permissions",
+	"--permission-mode bypassPermissions",
+	"--yolo",
+	"--approve-for-me",
+	"--sandbox danger-full-access",
+	"-s danger-full-access",
+	"-c sandbox_mode=danger-full-access",
+}
+
+// option is one option of an argv in normal form: flag ("--x", "-x", or
+// "config:<key>" for a -c/--config override) and its value, if any.
+type option struct {
+	flag, val string
+	hasVal    bool
+}
+
+func isConfigFlag(f string) bool { return f == "-c" || f == "--config" }
+
+// unquote strips one level of TOML-style quotes from a config value.
+func unquote(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) >= 2 && (v[0] == '"' && v[len(v)-1] == '"' || v[0] == '\'' && v[len(v)-1] == '\'') {
+		return v[1 : len(v)-1]
+	}
+	return v
+}
+
+// configOption turns "key=value" of a config override into its option.
+func configOption(kv string) (option, bool) {
+	k, v, ok := strings.Cut(kv, "=")
+	if !ok {
+		return option{}, false
+	}
+	return option{flag: "config:" + strings.TrimSpace(k), val: unquote(v), hasVal: true}, true
+}
+
+// normalise lists every reading of args as options: "--x=v", "--x v",
+// "-xv", "-x=v", "-x v" and config overrides "-c k=v", "-ck=v",
+// "--config=k=v". A flag followed by a non-flag is read both with and
+// without that value, so nothing is missed.
+func normalise(args []string) []option {
+	var out []option
+	add := func(o option) {
+		out = append(out, o)
+		if isConfigFlag(o.flag) && o.hasVal {
+			if co, ok := configOption(o.val); ok {
+				out = append(out, co)
+			}
+		}
+	}
+	for i, arg := range args {
+		next, hasNext := "", i+1 < len(args) && !strings.HasPrefix(args[i+1], "-")
+		if hasNext {
+			next = args[i+1]
+		}
+		switch {
+		case strings.HasPrefix(arg, "--"):
+			if f, v, ok := strings.Cut(arg, "="); ok {
+				add(option{flag: f, val: v, hasVal: true})
+				continue
+			}
+			add(option{flag: arg})
+			if hasNext {
+				add(option{flag: arg, val: next, hasVal: true})
+			}
+		case strings.HasPrefix(arg, "-") && len(arg) >= 2:
+			f := arg[:2]
+			if rest := strings.TrimPrefix(arg[2:], "="); rest != "" {
+				add(option{flag: f, val: rest, hasVal: true})
+				continue
+			}
+			add(option{flag: f})
+			if hasNext {
+				add(option{flag: f, val: next, hasVal: true})
+			}
+		}
+	}
+	return out
+}
+
+// parseEntry reads a risky_flags entry into the option it matches.
+func parseEntry(e string) option {
+	f, v, hasVal := strings.Cut(e, " ")
+	if hasVal && isConfigFlag(f) {
+		if co, ok := configOption(v); ok {
+			return co
+		}
+	}
+	return option{flag: f, val: v, hasVal: hasVal}
+}
+
+// RiskyArgs returns the risky flags (the adapter's risky_flags, the
+// built-in list and any --dangerously-* flag) that occur in args, in any
+// spelling: long or short, joined with "=" or not, or as a config
+// override; values compare case-insensitively.
 func RiskyArgs(a adapter.Adapter, args []string) []string {
+	opts := normalise(args)
 	var hits []string
 	seen := map[string]bool{}
-	for _, rf := range append(append([]string{}, a.RiskyFlags...), knownRisky...) {
-		flag, val, pair := strings.Cut(rf, " ")
-		for i, arg := range args {
-			var hit bool
-			if pair {
-				hit = arg == flag && i+1 < len(args) && strings.EqualFold(args[i+1], val) ||
-					strings.HasPrefix(arg, flag+"=") && strings.EqualFold(arg[len(flag)+1:], val)
-			} else {
-				hit = arg == flag || strings.HasPrefix(arg, flag+"=")
+	hit := func(s string) {
+		if !seen[s] {
+			seen[s] = true
+			hits = append(hits, s)
+		}
+	}
+	for _, e := range append(append([]string{}, a.RiskyFlags...), knownRisky...) {
+		want := parseEntry(e)
+		for _, o := range opts {
+			if o.flag == want.flag && (!want.hasVal || o.hasVal && strings.EqualFold(o.val, want.val)) {
+				hit(e)
 			}
-			if hit && !seen[rf] {
-				seen[rf] = true
-				hits = append(hits, rf)
-			}
+		}
+	}
+	for _, o := range opts {
+		if strings.HasPrefix(o.flag, "--dangerously-") {
+			hit(o.flag)
 		}
 	}
 	return hits
@@ -268,4 +430,47 @@ func Badge(risk bool) string {
 		return "!"
 	}
 	return ""
+}
+
+// Sandbox is a tool's own sandbox setting, as its config file has it.
+type Sandbox struct {
+	File  string
+	Value string
+	// Risky is set when the value would be a risky flag if cairn passed it.
+	Risky bool
+}
+
+// ToolSandbox reads the sandbox setting of a's tool from its own config
+// (adapter sandbox_config), for agents doctor. ok is false when the
+// adapter names no such file, or the file or key is absent. The file is
+// only read, never written.
+func ToolSandbox(root fsx.Root, dirs xdg.Dirs, a adapter.Adapter) (s Sandbox, ok bool, err error) {
+	sc := a.SandboxConfig
+	if sc.File == "" || sc.Key == "" {
+		return Sandbox{}, false, nil
+	}
+	file := sc.File
+	if rest, home := strings.CutPrefix(file, "~/"); home {
+		file = filepath.Join(dirs.Home, rest)
+	}
+	data, err := root.ReadFile(file)
+	if errors.Is(err, os.ErrNotExist) {
+		return Sandbox{}, false, nil
+	}
+	if err != nil {
+		return Sandbox{}, false, err
+	}
+	var m map[string]any
+	if err := toml.Unmarshal(data, &m); err != nil {
+		return Sandbox{}, false, fmt.Errorf("%s: %w", file, err)
+	}
+	v, isStr := m[sc.Key].(string)
+	if !isStr {
+		return Sandbox{}, false, nil
+	}
+	s = Sandbox{File: file, Value: v}
+	if args, _ := a.ProfileArgs(map[string]string{"sandbox": v}); len(args) > 0 {
+		s.Risky = len(RiskyArgs(a, args)) > 0
+	}
+	return s, true, nil
 }
