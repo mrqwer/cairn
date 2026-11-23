@@ -1,0 +1,5 @@
+Goal: stop API 502s when the DB pool is exhausted.
+Changed: internal/db/pool.go (max 20 conns, 2s acquire timeout), internal/http/server.go (503 + Retry-After instead of 502).
+Decision: fail fast instead of queueing requests, see note "pgxpool max 20 connections".
+Verify: go test ./internal/db -run TestPoolExhaustion
+Links: branch task/fix-login, commits 3f2a9c1..b81d0e4

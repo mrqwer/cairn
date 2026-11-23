@@ -155,6 +155,15 @@ func (l *loader) applyEnv(getenv func(string) string) error {
 		}
 		var v any = raw
 		switch defaults[k].(type) {
+		case []any:
+			// A list: comma separated, blanks dropped.
+			list := []any{}
+			for _, e := range strings.Split(raw, ",") {
+				if e = strings.TrimSpace(e); e != "" {
+					list = append(list, e)
+				}
+			}
+			v = list
 		case bool:
 			b, err := strconv.ParseBool(raw)
 			if err != nil {

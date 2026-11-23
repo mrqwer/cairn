@@ -48,6 +48,10 @@ func (c *Config) Value(key string) (string, bool) {
 		return c.Tasks.PRTool, true
 	case "tasks.pr_remote":
 		return c.Tasks.PRRemote, true
+	case "tasks.gate_banned":
+		return strings.Join(c.Tasks.GateBanned, ", "), true
+	case "knowledge.root":
+		return c.Knowledge.Root, true
 	case "agents.max_running":
 		return strconv.Itoa(c.Agents.MaxRunning), true
 	}

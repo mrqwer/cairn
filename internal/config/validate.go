@@ -73,6 +73,21 @@ func (c *Config) validateAgents() []FieldError {
 	if !ValidRemoteName(c.Tasks.PRRemote) {
 		errs = append(errs, FieldError{"tasks.pr_remote", fmt.Sprintf("%q must be a git remote name ([A-Za-z0-9._-], not starting with - or .)", c.Tasks.PRRemote)})
 	}
+	for _, b := range c.Tasks.GateBanned {
+		if strings.TrimSpace(b) == "" {
+			errs = append(errs, FieldError{"tasks.gate_banned", "a phrase is empty or blank: it would match every record"})
+			break
+		}
+	}
+	if r := c.Knowledge.Root; r != "" {
+		p := r
+		if strings.HasPrefix(r, "~/") {
+			p = "/" + r[2:]
+		}
+		if msg := checkPath(p); msg != "" || p == "/" {
+			errs = append(errs, FieldError{"knowledge.root", fmt.Sprintf("%q must be an absolute clean path or start with ~/", r)})
+		}
+	}
 	if c.Agents.MaxRunning < 0 {
 		errs = append(errs, FieldError{"agents.max_running", fmt.Sprintf("%d is negative (0 is no limit)", c.Agents.MaxRunning)})
 	}

@@ -11,10 +11,19 @@ import (
 
 // Config is the fully merged configuration.
 type Config struct {
-	Profile string `toml:"profile"`
-	Host    Host   `toml:"host"`
-	Tasks   Tasks  `toml:"tasks"`
-	Agents  Agents `toml:"agents"`
+	Profile   string    `toml:"profile"`
+	Host      Host      `toml:"host"`
+	Tasks     Tasks     `toml:"tasks"`
+	Agents    Agents    `toml:"agents"`
+	Knowledge Knowledge `toml:"knowledge"`
+}
+
+// Knowledge configures where finish records are written for the
+// knowledge module.
+type Knowledge struct {
+	// Root is the directory of records, <root>/<project>/<slug>.md; empty
+	// is <State>/records; "~/" is the home directory.
+	Root string `toml:"root"`
 }
 
 // Tasks configures cairn task new, review and finish.
@@ -34,6 +43,9 @@ type Tasks struct {
 	PRTool string `toml:"pr_tool"`
 	// PRRemote is the remote finish --pr pushes to.
 	PRRemote string `toml:"pr_remote"`
+	// GateBanned adds filler phrases to those the finish record gate
+	// rejects (case-insensitive).
+	GateBanned []string `toml:"gate_banned"`
 }
 
 // Agents configures agent conversations.

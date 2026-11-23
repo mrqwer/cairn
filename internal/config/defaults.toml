@@ -21,6 +21,10 @@ worktree_root = ""
 diff_viewer = "git diff"
 pr_tool = ""
 pr_remote = "origin"
+gate_banned = []
+
+[knowledge]
+root = ""
 
 [agents]
 max_running = 4

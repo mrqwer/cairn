@@ -313,3 +313,33 @@ func TestTaskFinishKeys(t *testing.T) {
 		t.Fatalf("valid values refused: %v", errs)
 	}
 }
+
+func TestRecordKeys(t *testing.T) {
+	root := fsx.Root{Dir: t.TempDir()}
+	cfg, _, err := config.Load(root, testDirs, env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Knowledge.Root != "" || len(cfg.Tasks.GateBanned) != 0 {
+		t.Fatalf("defaults %+v %+v", cfg.Knowledge, cfg.Tasks.GateBanned)
+	}
+	cfg = loadUser(t, "[knowledge]\nroot = \"~/kb\"\n[tasks]\ngate_banned = [\"holistic\", \"надёжный\"]\n")
+	if errs := cfg.Validate(); len(errs) != 0 || cfg.Knowledge.Root != "~/kb" || len(cfg.Tasks.GateBanned) != 2 {
+		t.Fatalf("%+v %v", cfg, errs)
+	}
+	if v, ok := cfg.Value("tasks.gate_banned"); !ok || v != "holistic, надёжный" {
+		t.Fatalf("value %q %v", v, ok)
+	}
+	if v, ok := cfg.Value("knowledge.root"); !ok || v != "~/kb" {
+		t.Fatalf("value %q %v", v, ok)
+	}
+	cfg, _, err = config.Load(root, testDirs, env(map[string]string{"CAIRN_TASKS_GATE_BANNED": "a, b,,c"}))
+	if err != nil || strings.Join(cfg.Tasks.GateBanned, "|") != "a|b|c" {
+		t.Fatalf("env: %+v %v", cfg.Tasks.GateBanned, err)
+	}
+	cfg = loadUser(t, "[knowledge]\nroot = \"rel/kb\"\n[tasks]\ngate_banned = [\"ok\", \" \"]\n")
+	got := keys(cfg.Validate())
+	if !got["knowledge.root"] || !got["tasks.gate_banned"] {
+		t.Fatalf("no error: %v", got)
+	}
+}
