@@ -1,0 +1,73 @@
+package conv
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+
+	"golang.org/x/sys/unix"
+)
+
+// ErrLocked means the conversation is already resumed elsewhere. Holder is the
+// pid recorded in the lock file (may be empty if unreadable).
+type ErrLocked struct{ Holder string }
+
+func (e ErrLocked) Error() string {
+	return "conversation is in use by another cairn process (pid " + e.Holder + ")"
+}
+
+// safeName escapes every byte outside [A-Za-z0-9._-] so a tool or native id
+// can never alter the lock path. A leading dot is escaped too.
+func safeName(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.' && i > 0
+		if ok {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
+
+// AcquireLock takes a non-blocking exclusive flock on
+// <Dir>/locks/<tool>-<native_id>.lock and writes this pid into it. The kernel
+// drops the lock when the holder dies, so a lock file left by a dead pid is
+// simply taken over. release is idempotent.
+func (s Store) AcquireLock(tool, nativeID string) (release func(), err error) {
+	if err := s.Root.MkdirAll(s.Dir+"/locks", 0o700); err != nil {
+		return nil, err
+	}
+	p := s.path("locks/" + safeName(tool) + "-" + safeName(nativeID) + ".lock")
+	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		holder := ""
+		if b, rerr := os.ReadFile(p); rerr == nil {
+			holder = strings.TrimSpace(string(b))
+		}
+		_ = f.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, ErrLocked{Holder: holder}
+		}
+		return nil, err
+	}
+	if err := f.Truncate(0); err == nil {
+		_, err = f.WriteAt([]byte(strconv.Itoa(os.Getpid())), 0)
+		_ = err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+			_ = f.Close()
+		})
+	}, nil
+}

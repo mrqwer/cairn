@@ -1,0 +1,111 @@
+// Package conv holds the conversation record and its append-only JSONL store.
+package conv
+
+import "time"
+
+// Conversation states (spec §9.3).
+const (
+	StateStarting = "starting"
+	StateWorking  = "working"
+	StateWaiting  = "waiting"
+	StateIdle     = "idle"
+	StateDone     = "done"
+	StateFailed   = "failed"
+	StateStopped  = "stopped"
+	StateArchived = "archived"
+)
+
+// State sources: how the current state was learned.
+const (
+	SourceHook     = "hook"
+	SourceNative   = "native"
+	SourceObserved = "observed"
+)
+
+// Usage is token and cost information, when the tool reports it.
+type Usage struct {
+	InputTokens  int64   `json:"input_tokens,omitempty"`
+	OutputTokens int64   `json:"output_tokens,omitempty"`
+	CostUSD      float64 `json:"cost_usd,omitempty"`
+}
+
+// Conversation is one agent conversation (spec §9.3). Pane is the @cairn_p
+// key of the owning pane, not a tmux id.
+type Conversation struct {
+	ID               string     `json:"id"`
+	Tool             string     `json:"tool,omitempty"`
+	NativeID         string     `json:"native_id,omitempty"`
+	Name             string     `json:"name,omitempty"`
+	Purpose          string     `json:"purpose,omitempty"`
+	Tags             []string   `json:"tags,omitempty"`
+	Project          string     `json:"project,omitempty"`
+	Task             string     `json:"task,omitempty"`
+	Cwd              string     `json:"cwd,omitempty"`
+	Worktree         string     `json:"worktree,omitempty"`
+	Branch           string     `json:"branch,omitempty"`
+	Profile          string     `json:"profile,omitempty"`
+	LaunchArgv       []string   `json:"launch_argv,omitempty"`
+	State            string     `json:"state,omitempty"`
+	StateSource      string     `json:"state_source,omitempty"`
+	WaitingReason    string     `json:"waiting_reason,omitempty"`
+	LastActivityAt   time.Time  `json:"last_activity_at"`
+	Pane             string     `json:"pane,omitempty"`
+	ParentID         string     `json:"parent_id,omitempty"`
+	ForkedFrom       string     `json:"forked_from,omitempty"`
+	HandoffFrom      string     `json:"handoff_from,omitempty"`
+	Usage            *Usage     `json:"usage,omitempty"`
+	TranscriptRef    string     `json:"transcript_ref,omitempty"`
+	TranscriptParser string     `json:"transcript_parser,omitempty"`
+	Summary          string     `json:"summary,omitempty"`
+	Pinned           bool       `json:"pinned,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	ArchivedAt       *time.Time `json:"archived_at,omitempty"`
+	AdapterVersion   string     `json:"adapter_version,omitempty"`
+}
+
+// Filter selects conversations; empty fields match everything. Archived
+// conversations are hidden unless Archived is true. Since matches on
+// LastActivityAt.
+type Filter struct {
+	Project, Task, Tool, State, Tag string
+	Archived                        bool
+	Since                           time.Time
+}
+
+func (c Conversation) isArchived() bool {
+	return c.ArchivedAt != nil || c.State == StateArchived
+}
+
+func (f Filter) match(c Conversation) bool {
+	if c.isArchived() && !f.Archived && f.State != StateArchived {
+		return false
+	}
+	if f.Project != "" && c.Project != f.Project {
+		return false
+	}
+	if f.Task != "" && c.Task != f.Task {
+		return false
+	}
+	if f.Tool != "" && c.Tool != f.Tool {
+		return false
+	}
+	if f.State != "" && c.State != f.State {
+		return false
+	}
+	if f.Tag != "" {
+		found := false
+		for _, t := range c.Tags {
+			if t == f.Tag {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if !f.Since.IsZero() && c.LastActivityAt.Before(f.Since) {
+		return false
+	}
+	return true
+}
