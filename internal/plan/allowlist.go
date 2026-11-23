@@ -334,3 +334,17 @@ func trustedNode(root fsx.Root, p string, ownerOf func(fs.FileInfo) (uint32, boo
 	}
 	return st, nil
 }
+
+// unsafeSelfChars may not appear in the cairn binary path: it is embedded in
+// unit files (where % is a specifier and whitespace splits arguments) and in
+// shell and pacman hook lines.
+const unsafeSelfChars = " \t\n\r\v\f%\"'\\$`;"
+
+// CheckSelfPath rejects binary paths that cannot be embedded safely.
+func CheckSelfPath(p string) error {
+	if i := strings.IndexAny(p, unsafeSelfChars); i >= 0 {
+		return fmt.Errorf("cairn binary path %q contains %q, which cannot be used in unit files and hooks; "+
+			"install cairn to a path without whitespace, %%, quotes, backslash, $, backtick or ;", p, p[i])
+	}
+	return nil
+}

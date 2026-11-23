@@ -19,7 +19,7 @@ const gib = 1 << 30
 func fixture() detect.System {
 	return detect.System{
 		Swaps:                []detect.Swap{{Path: "/swapfile", Type: "file", SizeKiB: 16 * 1024 * 1024, UsedKiB: 0, Priority: -2}},
-		Resume:               detect.Resume{Device: "259:3", Offset: 61112320},
+		Resume:               detect.Resume{Device: "259:3", Offset: 20971520},
 		KernelModulesPresent: true,
 		InitramfsResume:      detect.Yes,
 		HibernateSupported:   detect.Yes,
@@ -59,7 +59,7 @@ func testProbes(off uint64) Probes {
 }
 
 func TestChecksAllGreen(t *testing.T) {
-	rs := run(t, fixture(), 61112320, 2*gib)
+	rs := run(t, fixture(), 20971520, 2*gib)
 	if len(rs) != 6 {
 		t.Fatalf("got %d results", len(rs))
 	}
@@ -72,7 +72,7 @@ func TestChecksAllGreen(t *testing.T) {
 
 func TestResumeOffsetMismatch(t *testing.T) {
 	r := run(t, fixture(), 999, 2*gib)[IDResume]
-	if r.Status != doctor.Crit || !strings.Contains(r.Evidence, "61112320") || !strings.Contains(r.Evidence, "999") ||
+	if r.Status != doctor.Crit || !strings.Contains(r.Evidence, "20971520") || !strings.Contains(r.Evidence, "999") ||
 		!strings.Contains(r.Fix, "kernel command line") {
 		t.Fatalf("%+v", r)
 	}
@@ -109,7 +109,7 @@ func TestPartitionSwapSelectedAndMatched(t *testing.T) {
 func TestBtrfsSwapFileUnsupported(t *testing.T) {
 	sys := fixture()
 	sys.Swaps = []detect.Swap{{Path: "/btrfs/swapfile", Type: "file", SizeKiB: 16 << 20}}
-	r := run(t, sys, 61112320, gib)[IDResume]
+	r := run(t, sys, 20971520, gib)[IDResume]
 	if r.Status != doctor.Crit || r.Evidence != "btrfs swap files are not supported yet" ||
 		r.Fix != "use a swap partition or a swap file on ext4/xfs" {
 		t.Fatalf("%+v", r)
@@ -128,11 +128,11 @@ func TestFixStrings(t *testing.T) {
 	sys = fixture()
 	sys.InitramfsResume = detect.No
 	sys.PkgManager = "pacman"
-	if r := run(t, sys, 61112320, gib)[IDInitramfs]; r.Fix != `add the "resume" hook to HOOKS in /etc/mkinitcpio.conf (after "block") and run: sudo mkinitcpio -P` {
+	if r := run(t, sys, 20971520, gib)[IDInitramfs]; r.Fix != `add the "resume" hook to HOOKS in /etc/mkinitcpio.conf (after "block") and run: sudo mkinitcpio -P` {
 		t.Errorf("arch initramfs fix %q", r.Fix)
 	}
 	sys.PkgManager = "apt-get"
-	if r := run(t, sys, 61112320, gib)[IDInitramfs]; r.Fix == "" || strings.Contains(r.Fix, "cairn host repair") {
+	if r := run(t, sys, 20971520, gib)[IDInitramfs]; r.Fix == "" || strings.Contains(r.Fix, "cairn host repair") {
 		t.Errorf("generic initramfs fix %q", r.Fix)
 	}
 }
@@ -140,7 +140,7 @@ func TestFixStrings(t *testing.T) {
 func TestKernelMismatchCrit(t *testing.T) {
 	sys := fixture()
 	sys.KernelModulesPresent = false
-	if r := run(t, sys, 61112320, gib)[IDKernel]; r.Status != doctor.Crit {
+	if r := run(t, sys, 20971520, gib)[IDKernel]; r.Status != doctor.Crit {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -148,7 +148,7 @@ func TestKernelMismatchCrit(t *testing.T) {
 func TestSwapTooSmall(t *testing.T) {
 	sys := fixture()
 	sys.Swaps[0].SizeKiB = 4 * 1024 * 1024
-	if r := run(t, sys, 61112320, 8*gib)[IDSwapFree]; r.Status != doctor.Crit {
+	if r := run(t, sys, 20971520, 8*gib)[IDSwapFree]; r.Status != doctor.Crit {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -175,7 +175,7 @@ func TestInitramfsTri(t *testing.T) {
 	for tri, want := range map[detect.Tri]doctor.Status{detect.Yes: doctor.OK, detect.No: doctor.Crit, detect.Unknown: doctor.Unknown} {
 		sys := fixture()
 		sys.InitramfsResume = tri
-		if r := run(t, sys, 61112320, gib)[IDInitramfs]; r.Status != want {
+		if r := run(t, sys, 20971520, gib)[IDInitramfs]; r.Status != want {
 			t.Errorf("%v: got %v", tri, r.Status)
 		}
 	}
@@ -207,16 +207,16 @@ func TestRecordRoundTrip(t *testing.T) {
 func TestHibernateSupportedCheck(t *testing.T) {
 	sys := fixture()
 	sys.HibernateSupported, sys.Lockdown = detect.No, "integrity"
-	r := run(t, sys, 61112320, gib)[IDSupported]
+	r := run(t, sys, 20971520, gib)[IDSupported]
 	if r.Status != doctor.Crit || r.Evidence != "hibernation is disabled by kernel lockdown (Secure Boot)" || r.Fix == "" {
 		t.Fatalf("lockdown: %+v", r)
 	}
 	sys.Lockdown = "none"
-	if r := run(t, sys, 61112320, gib)[IDSupported]; r.Status != doctor.Crit || !strings.Contains(r.Evidence, "disk") {
+	if r := run(t, sys, 20971520, gib)[IDSupported]; r.Status != doctor.Crit || !strings.Contains(r.Evidence, "disk") {
 		t.Fatalf("no disk state: %+v", r)
 	}
 	sys.HibernateSupported = detect.Unknown
-	if r := run(t, sys, 61112320, gib)[IDSupported]; r.Status != doctor.Unknown {
+	if r := run(t, sys, 20971520, gib)[IDSupported]; r.Status != doctor.Unknown {
 		t.Fatalf("unknown: %+v", r)
 	}
 }

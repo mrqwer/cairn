@@ -292,7 +292,7 @@ func resolveAll(desired []plan.Action, root fsx.Root, userInv, sysInv *inventory
 
 func TestUninstallKeepsPreexistingDir(t *testing.T) {
 	env, _ := newEnv(t)
-	dir := "/home/.nvidia-suspend"
+	dir := "/home/nvidia-suspend"
 	if err := env.Root.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

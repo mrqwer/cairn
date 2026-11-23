@@ -1,0 +1,14 @@
+# Managed by cairn host (workspace). Do not edit; run "cairn host ..."
+[Unit]
+Description=tmux server for cairn workspaces
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/usr/bin/env tmux -L work has-session -t =cairn-base 2>/dev/null || exec /usr/bin/env tmux -L work new-session -d -s cairn-base'
+ExecStartPost=/usr/bin/env tmux -L work set -g exit-empty off
+ExecStop=/usr/bin/env tmux -L work kill-server
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

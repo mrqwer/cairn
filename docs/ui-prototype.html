@@ -1,0 +1,597 @@
+<title>cairn console</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: three columns. Navigation, working area with a command log under it, and a Russian explainer rail.
+   Palette: cool stone neutrals, one indigo accent; status colours (ok / warn / crit) are separate from the accent. */
+:root{
+  --bg:#eceff2; --surface:#ffffff; --surface2:#f5f6f8; --line:#d8dde3; --line2:#e7eaee;
+  --fg:#1a2027; --muted:#5b6672; --faint:#8a95a1;
+  --accent:#3d58cc; --accent-soft:#e5e9fa; --accent-fg:#ffffff;
+  --ok:#1b7a4b; --ok-soft:#dff2e8; --warn:#8f6200; --warn-soft:#faefd0; --crit:#b3261e; --crit-soft:#fae3e1;
+  --term-bg:#10151b; --term-fg:#d5dbe2; --term-dim:#7d8896; --term-ok:#6fd0a0; --term-cmd:#9fb1ff; --term-err:#ff9088;
+  --font-ui:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0e1216; --surface:#151a20; --surface2:#1b2129; --line:#29313b; --line2:#212831;
+  --fg:#e5e9ed; --muted:#98a3af; --faint:#6e7985;
+  --accent:#8ea2ff; --accent-soft:#222a4d; --accent-fg:#0e1216;
+  --ok:#52c68d; --ok-soft:#14301f; --warn:#e2b24c; --warn-soft:#33290f; --crit:#ff8a82; --crit-soft:#3a1714;
+  --term-bg:#0a0d11; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0e1216; --surface:#151a20; --surface2:#1b2129; --line:#29313b; --line2:#212831;
+  --fg:#e5e9ed; --muted:#98a3af; --faint:#6e7985;
+  --accent:#8ea2ff; --accent-soft:#222a4d; --accent-fg:#0e1216;
+  --ok:#52c68d; --ok-soft:#14301f; --warn:#e2b24c; --warn-soft:#33290f; --crit:#ff8a82; --crit-soft:#3a1714;
+  --term-bg:#0a0d11; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:14px/1.5 var(--font-ui);margin:0}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+h1,h2,h3,p{margin:0}
+.app{display:grid;grid-template-columns:212px minmax(0,1fr) 300px;min-height:100vh;padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px)}
+.nav{background:var(--surface);border-right:1px solid var(--line);padding:18px 12px;display:flex;flex-direction:column;gap:18px;position:sticky;top:0;height:100vh;overflow:auto}
+.brand{display:flex;align-items:center;gap:10px;padding:0 8px;font-weight:600;font-size:17px;letter-spacing:.01em}
+.brand svg{width:26px;height:26px;color:var(--accent)}
+.navlist{display:flex;flex-direction:column;gap:2px}
+.navbtn{display:flex;align-items:center;justify-content:space-between;gap:8px;background:none;border:0;border-radius:6px;padding:8px 10px;text-align:left;color:var(--muted)}
+.navbtn:hover{background:var(--surface2);color:var(--fg)}
+.navbtn[aria-current="page"]{background:var(--accent-soft);color:var(--fg);font-weight:500}
+.tag{font:500 10px/1 var(--font-mono);text-transform:uppercase;letter-spacing:.06em;padding:3px 5px;border-radius:4px;border:1px solid var(--line);color:var(--faint)}
+.tag.built{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent)}
+.try{margin-top:auto;border:1px solid var(--line);border-radius:8px;padding:12px;background:var(--surface2);display:flex;flex-direction:column;gap:8px}
+.try h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600}
+.try p{font-size:12px;color:var(--muted)}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:6px;padding:7px 12px;font-weight:500}
+.btn:hover{border-color:var(--faint)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.danger{color:var(--crit);border-color:color-mix(in srgb,var(--crit) 45%,var(--line))}
+.btn.small{padding:4px 9px;font-size:12px}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+.main{min-width:0;display:flex;flex-direction:column;padding:22px 26px 0}
+.demo{font-size:12px;color:var(--muted);background:var(--warn-soft);border:1px solid color-mix(in srgb,var(--warn) 30%,transparent);border-radius:6px;padding:6px 10px;margin-bottom:16px}
+.head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+.head h1{font-size:22px;font-weight:600;letter-spacing:-.01em;text-wrap:balance}
+.head p{color:var(--muted);margin-top:2px;max-width:60ch}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+.content{flex:1;min-width:0;padding-bottom:18px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:8px}
+.panel>header{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line2);font-weight:600}
+.panel>header small{font-weight:400;color:var(--muted)}
+.pad{padding:14px}
+.stack{display:flex;flex-direction:column;gap:16px}
+.cols{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:16px}
+.table{width:100%;border-collapse:collapse}
+.table th{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);font-weight:600;text-align:left;padding:8px 14px;border-bottom:1px solid var(--line2)}
+.table td{padding:10px 14px;border-bottom:1px solid var(--line2);vertical-align:middle}
+.table tr:last-child td{border-bottom:0}
+.table tr.row{cursor:pointer}
+.table tr.row:hover td{background:var(--surface2)}
+.scroll{overflow-x:auto}
+.mono{font-family:var(--font-mono);font-size:12.5px}
+.muted{color:var(--muted)}
+.faint{color:var(--faint)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;padding:2px 9px;border-radius:99px;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.pill.ok{color:var(--ok);background:var(--ok-soft)}
+.pill.warn{color:var(--warn);background:var(--warn-soft)}
+.pill.crit{color:var(--crit);background:var(--crit-soft)}
+.pill.info{color:var(--accent);background:var(--accent-soft)}
+.pill.idle{color:var(--muted);background:var(--surface2)}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.tab{border:1px solid var(--line);background:var(--surface);border-radius:6px;padding:5px 11px;font-family:var(--font-mono);font-size:12.5px}
+.tab[aria-selected="true"]{background:var(--accent-soft);border-color:var(--accent);}
+.layout{height:250px;border:1px solid var(--line);border-radius:6px;display:flex;background:var(--surface2);padding:6px;gap:6px}
+.split{display:flex;flex:1;gap:6px;min-width:0;min-height:0}
+.split.right{flex-direction:row}
+.split.down{flex-direction:column}
+.pane{flex:1;min-width:0;min-height:0;border:1px solid var(--line);background:var(--surface);border-radius:5px;padding:8px 10px;text-align:left;display:flex;flex-direction:column;gap:3px;overflow:hidden}
+.pane:hover{border-color:var(--faint)}
+.pane[aria-pressed="true"]{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.pane .t{display:flex;align-items:center;gap:7px;font:500 12.5px var(--font-mono)}
+.pane .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+.pane.dead .dot{background:var(--crit)}
+.pane.missing{border-style:dashed;background:transparent;color:var(--faint)}
+.pane.missing .dot{background:transparent;border:1px solid var(--faint)}
+.pane .r{font:12px var(--font-mono);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pane .s{font-size:11px;color:var(--faint);margin-top:auto}
+.pane.dead .s{color:var(--crit)}
+.field{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+.field label{font-size:12px;color:var(--muted);font-weight:500}
+.field input[type=text],.field select,.field textarea{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 9px;width:100%}
+.field textarea{font-family:var(--font-mono);font-size:12.5px;min-height:150px;resize:vertical}
+.field .hint{font-size:12px;color:var(--faint)}
+.row2{display:flex;gap:8px;flex-wrap:wrap}
+pre.code{margin:0;background:var(--surface2);border:1px solid var(--line2);border-radius:6px;padding:10px 12px;font:12.5px/1.55 var(--font-mono);overflow-x:auto;white-space:pre}
+.ops{list-style:none;margin:0;padding:0}
+.ops li{display:flex;gap:10px;align-items:baseline;padding:7px 14px;border-bottom:1px solid var(--line2);font-family:var(--font-mono);font-size:12.5px}
+.ops li:last-child{border-bottom:0}
+.ops .k{width:120px;flex:none;color:var(--accent)}
+.ops li.warn .k{color:var(--warn)}
+.ops li.info .k{color:var(--faint)}
+.ops li.done .k{color:var(--ok)}
+.empty{padding:22px 14px;color:var(--muted);text-align:center}
+.list{list-style:none;margin:0;padding:0}
+.list li button{display:block;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid var(--line2);padding:10px 14px}
+.list li:last-child button{border-bottom:0}
+.list li button:hover{background:var(--surface2)}
+.list li button[aria-current="true"]{background:var(--accent-soft)}
+.list .ttl{font-weight:500;display:flex;justify-content:space-between;gap:8px;align-items:center}
+.list .sub{font-size:12px;color:var(--muted);margin-top:2px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{border:1px solid var(--line);background:var(--surface);border-radius:99px;padding:3px 10px;font-size:12px}
+.chip[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent)}
+.kv{display:grid;grid-template-columns:150px minmax(0,1fr);gap:6px 14px;font-size:13px}
+.kv dt{color:var(--muted)} .kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.checks{list-style:none;margin:0;padding:0}
+.checks li{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;align-items:baseline;padding:10px 14px;border-bottom:1px solid var(--line2)}
+.checks li:last-child{border-bottom:0}
+.checks .fix{grid-column:2;font:12px var(--font-mono);color:var(--muted)}
+.checks .ev{color:var(--muted);font-size:12.5px}
+.gate{list-style:none;margin:0;padding:0;font-size:13px}
+.gate li{padding:2px 0}
+.gate .okc{color:var(--ok)} .gate .badc{color:var(--crit)}
+.term{margin:0 -26px;background:var(--term-bg);color:var(--term-fg);border-top:1px solid var(--line);position:sticky;bottom:0}
+.term header{display:flex;justify-content:space-between;align-items:center;padding:6px 26px;font:500 11px var(--font-mono);text-transform:uppercase;letter-spacing:.08em;color:var(--term-dim)}
+.term header button{background:none;border:0;color:var(--term-dim);font:inherit;text-transform:inherit;letter-spacing:inherit}
+.term .out{padding:0 26px 10px;height:150px;overflow:auto;font:12.5px/1.6 var(--font-mono);white-space:pre-wrap}
+.term.closed .out{display:none}
+.term .c{color:var(--term-cmd)} .term .o{color:var(--term-ok)} .term .i{color:var(--term-dim)} .term .e{color:var(--term-err)}
+.tour{background:var(--surface);border-left:1px solid var(--line);padding:22px 18px;position:sticky;top:0;height:100vh;overflow:auto;display:flex;flex-direction:column;gap:14px;font-size:13.5px}
+.tour h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600}
+.tour h3{font-size:16px;font-weight:600;text-wrap:balance}
+.tour ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:7px}
+.tour .cli{font:12px/1.5 var(--font-mono);background:var(--surface2);border:1px solid var(--line2);border-radius:6px;padding:8px 10px;white-space:pre-wrap}
+.tour .legend{font-size:12px;color:var(--muted);border-top:1px solid var(--line2);padding-top:12px}
+.toast{position:fixed;left:50%;bottom:calc(190px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:8px 14px;border-radius:6px;font-size:13px;z-index:20;max-width:90vw}
+.toast[hidden]{display:none}
+.tourbtn{display:none}
+input[type=range]{width:100%;accent-color:var(--accent)}
+.back{background:none;border:0;color:var(--accent);padding:0;margin-bottom:8px;font-weight:500}
+@media (max-width:1180px){
+  .app{grid-template-columns:200px minmax(0,1fr)}
+  .tour{grid-column:1/-1;position:static;height:auto;border-left:0;border-top:1px solid var(--line)}
+  .tour.closed{display:none}
+  .tourbtn{display:inline-block}
+}
+@media (max-width:820px){
+  .app{grid-template-columns:minmax(0,1fr)}
+  .nav{position:static;height:auto;flex-direction:column;border-right:0;border-bottom:1px solid var(--line);padding:12px max(16px,env(safe-area-inset-left,0px))}
+  .navlist{flex-direction:row;overflow-x:auto}
+  .navbtn{white-space:nowrap}
+  .try{margin-top:0;flex-direction:row;flex-wrap:wrap;align-items:center}
+  .try p{display:none}
+  .main{padding:16px max(16px,env(safe-area-inset-left,0px)) 0 max(16px,env(safe-area-inset-right,0px))}
+  .term{margin:0 calc(-1*max(16px,env(safe-area-inset-left,0px)))}
+  .term header,.term .out{padding-left:16px;padding-right:16px}
+  .cols{grid-template-columns:minmax(0,1fr)}
+  .kv{grid-template-columns:minmax(0,1fr)}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="app">
+  <nav class="nav" aria-label="Sections">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"><ellipse cx="16" cy="25.5" rx="12" ry="4.5"/><ellipse cx="16" cy="16.5" rx="8.5" ry="3.8" opacity=".78"/><ellipse cx="16" cy="8.8" rx="5" ry="3.2" opacity=".56"/></svg>
+      cairn
+    </div>
+    <div class="navlist" id="navlist"></div>
+    <div class="try">
+      <h3>Try it</h3>
+      <button class="btn danger" data-act="power">Simulate power loss</button>
+      <button class="btn primary" data-act="upall">Run cairn up</button>
+      <button class="btn" data-act="reset">Reset demo</button>
+      <p>Power loss kills every tmux session. cairn up builds them again from the config.</p>
+    </div>
+  </nav>
+  <main class="main">
+    <div class="demo">Демо с вымышленными данными. Ничего не запускается и не пишется на диск, ваша система не затронута.</div>
+    <div id="view" class="content"></div>
+    <section class="term" id="term" aria-label="Command log">
+      <header><span>Command log</span><button data-act="termtoggle" id="termbtn">hide</button></header>
+      <div class="out" id="termout" role="log"></div>
+    </section>
+  </main>
+  <aside class="tour" id="tour" aria-label="Пояснения"></aside>
+</div>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+'use strict';
+const $=s=>document.querySelector(s);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const pl=(n,a,b)=>n+' '+(n===1?a:b);
+const clone=o=>JSON.parse(JSON.stringify(o));
+let uid=100; const nid=p=>p+(++uid);
+const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+
+/* ---------- demo data ---------- */
+const P=(title,role,run,restart,split,from)=>({title,role,run,restart:restart||'never',split:split||null,from:from||null});
+function initialConfig(){return{projects:[
+ {id:'api',root:'~/code/api',session:'api',windows:[
+  {key:'edit',panes:[P('editor','editor','nvim'),P('shell','shell','','never','right')]},
+  {key:'server',panes:[P('server','service','go run ./cmd/api','on-failure'),P('logs','service','tail -f logs/api.log','always','down')]},
+  {key:'agent',panes:[P('claude','agent','claude')]}]},
+ {id:'web',root:'~/code/web',session:'web',windows:[
+  {key:'edit',panes:[P('editor','editor','nvim'),P('shell','shell','','never','right')]},
+  {key:'dev',panes:[P('dev','service','pnpm dev','on-failure'),P('tests','service','pnpm test --watch','on-failure','down')]}]},
+ {id:'infra',root:'~/code/infra',session:'infra',windows:[
+  {key:'ops',panes:[P('shell','shell',''),P('k9s','service','k9s','on-failure','right')]}]},
+ {id:'notes',root:'~/knowledge',session:'notes',windows:[
+  {key:'main',panes:[P('editor','editor','nvim')]}]}
+]};}
+function initialLive(){const run=t=>({title:t,state:'running'});return{
+ api:{windows:[{key:'edit',panes:[run('editor'),run('shell')]},{key:'server',panes:[{title:'server',state:'dead',exit:1},run('logs')]},{key:'agent',panes:[run('claude')]}]},
+ web:{windows:[{key:'edit',panes:[run('editor'),run('shell')]},{key:'dev',panes:[run('dev')]}]},
+ infra:{windows:[{key:'ops',panes:[run('shell'),run('k9s')]}]},
+ notes:{windows:[{key:'main',panes:[run('editor')]}]}};}
+const initialTasks=()=>[
+ {id:'t1',title:'Fix pool exhaustion in api',agent:'Claude Code',project:'api',worktree:'~/worktrees/api-pool-fix',branch:'fix/pool',status:'working',age:'2 min ago',conv:'c-81f3',
+  log:['you: API returns 502 when the DB pool is exhausted. Find out why.','agent: Found it. internal/db/pool.go allows 100 connections, the database allows 60.','agent: Lowering MaxConns to 20 and failing fast with 503 + Retry-After.','agent: Running go test ./internal/db ...'],
+  files:['internal/db/pool.go','internal/http/server.go','internal/db/pool_test.go']},
+ {id:'t2',title:'Add pagination to /users',agent:'Codex',project:'api',worktree:'',branch:'main',status:'waiting',age:'11 min ago',conv:'c-27ab',
+  log:['you: Add cursor pagination to GET /users.','agent: Plan ready: cursor = base64(id), limit 1..100. Edit handlers/users.go and tests?','agent: waiting for your approval'],files:['handlers/users.go']},
+ {id:'t3',title:'Migrate CI to reusable workflows',agent:'Antigravity',project:'infra',worktree:'~/worktrees/infra-ci',branch:'ci/reusable',status:'done',age:'yesterday',conv:'c-90de',
+  log:['agent: 3 workflows now call .github/workflows/_build.yml.','agent: CI time 9m40s to 6m05s.'],files:['.github/workflows/_build.yml','.github/workflows/api.yml']},
+ {id:'t4',title:'Landing page copy pass',agent:'Claude Code',project:'web',worktree:'',branch:'main',status:'working',age:'1 h ago',conv:'c-5c10',
+  log:['you: Tighten the hero copy, no marketing words.','agent: Rewrote 4 sections, kept headings.'],files:['src/pages/Landing.tsx']}];
+const initialNotes=()=>[
+ {id:'n1',type:'decision',title:'pgxpool max 20 connections',body:'Context: the database accepts 60 connections shared by 3 services.\nDecision: api uses at most 20 and fails fast when the pool is empty.\nWhy: queueing requests hid the overload and caused 502s.',anchors:['internal/db/pool.go'],stale:false,project:'api'},
+ {id:'n2',type:'runbook',title:'Restore the api workspace after a reboot',body:'1. cairn up\n2. cairn open api\n3. In the agent window run: claude --resume (the task shows its conversation id).\nNothing is replayed; panes start fresh from the config.',anchors:['cairn up'],stale:false,project:'api'},
+ {id:'n3',type:'how-to',title:'Run integration tests locally',body:'docker compose up -d db\ngo test ./... -tags integration\nThe tests need DB_URL from .env.test.',anchors:['Makefile','.env.test'],stale:false,project:'api'},
+ {id:'n4',type:'incident',title:'2026-11-09 API 502s under load',body:'Impact: 14 minutes of 502s on /orders.\nCause: pool exhaustion, see decision "pgxpool max 20 connections".\nFix: commit b81d0e4.',anchors:['internal/http/server.go'],stale:true,staleWhy:'internal/http/server.go changed in 3 commits since this note was written.',project:'api'},
+ {id:'n5',type:'task record',title:'Migrate CI to reusable workflows',body:'Goal: stop copy-pasting build steps between workflows.\nChanged: .github/workflows/_build.yml, api.yml, web.yml.\nVerify: push a branch, CI finishes in about 6 minutes.\nLinks: branch ci/reusable.',anchors:['.github/workflows/_build.yml'],stale:false,project:'infra'}];
+
+let S;
+function initState(){
+  S={view:(location.hash||'#workspaces').slice(1),config:initialConfig(),live:initialLive(),unmanaged:[{name:'scratch',windows:2,panes:3}],
+     tasks:initialTasks(),notes:initialNotes(),history:[
+       {id:'ev1',t:'Mon 09:12',label:'project add notes',undone:false,before:null},{id:'ev2',t:'Mon 09:40',label:'project edit web (add window dev)',undone:false,before:null},{id:'ev3',t:'Tue 18:05',label:'adopt infra',undone:false,before:null}],
+     proj:null,win:0,pane:null,task:'t1',note:'n1',noteFilter:'all',q:'',newTask:false,finish:null,busy:false,
+     hib:15,toml:false,
+     settings:{configDir:'~/.config/cairn',stateDir:'~/.local/state/cairn',kbRoot:'~/knowledge',wtRoot:'~/worktrees',socket:''},
+     term:[{c:'i',s:'# demo log. Every click below shows the command the real tool would run.'}]};
+}
+const DEFAULTS={configDir:'~/.config/cairn',stateDir:'~/.local/state/cairn',kbRoot:'~/knowledge',wtRoot:'~/worktrees',socket:''};
+
+/* ---------- workspace model ---------- */
+const proj=id=>S.config.projects.find(p=>p.id===id);
+function buildTree(panes){
+  if(!panes.length)return null;
+  let root={leaf:panes[0].title};
+  const sub=(n,t,node)=>n.leaf!==undefined?(n.leaf===t?node:n):{dir:n.dir,a:sub(n.a,t,node),b:sub(n.b,t,node)};
+  for(let i=1;i<panes.length;i++){
+    const p=panes[i],target=p.from&&panes.some(x=>x.title===p.from)?p.from:panes[i-1].title;
+    root=sub(root,target,{dir:p.split||'right',a:{leaf:target},b:{leaf:p.title}});
+  }
+  return root;
+}
+function planFor(p){
+  const L=S.live[p.session],ops=[];
+  if(!L){ops.push({k:'create-session',d:p.session});}
+  p.windows.forEach(w=>{
+    const lw=L&&L.windows.find(x=>x.key===w.key);
+    if(!lw){ops.push({k:'create-window',d:p.session+'/'+w.key,w:w.key});}
+    w.panes.forEach(pn=>{
+      const lp=lw&&lw.panes.find(x=>x.title===pn.title);
+      if(!lp)ops.push({k:'create-pane',d:p.session+'/'+w.key+'/'+pn.title,w:w.key,pane:pn.title});
+      else if(lp.state==='dead'){
+        if(pn.restart!=='never')ops.push({k:'respawn-pane',d:p.session+'/'+w.key+'/'+pn.title+'  (exit '+lp.exit+', restart='+pn.restart+')',w:w.key,pane:pn.title,warn:true});
+        else ops.push({k:'report-dead',d:p.session+'/'+w.key+'/'+pn.title+'  (exit '+lp.exit+', restart=never, left alone)',info:true});
+      }
+    });
+    if(lw)lw.panes.filter(x=>!w.panes.some(pn=>pn.title===x.title)).forEach(x=>ops.push({k:'report-extra',d:p.session+'/'+w.key+'/'+x.title+'  (not in config, not touched)',info:true}));
+  });
+  if(L)L.windows.filter(x=>!p.windows.some(w=>w.key===x.key)).forEach(x=>ops.push({k:'report-extra',d:p.session+'/'+x.key+'  (not in config, not touched)',info:true}));
+  return ops;
+}
+const changesOf=p=>planFor(p).filter(o=>!o.info);
+function statusOf(p){
+  if(!S.live[p.session])return{cls:'crit',t:'missing'};
+  const dead=S.live[p.session].windows.some(w=>w.panes.some(x=>x.state==='dead'));
+  const n=changesOf(p).length;
+  if(n)return{cls:'warn',t:n+' to apply'};
+  return dead?{cls:'idle',t:'in sync, 1 stopped'}:{cls:'ok',t:'in sync'};
+}
+async function applyProject(p,quiet){
+  const ops=planFor(p).filter(o=>!o.info);
+  if(!ops.length){log('i','nothing to do for '+p.id);return 0;}
+  for(const o of ops){
+    await sleep(260);
+    if(o.k==='create-session'&&!S.live[p.session])S.live[p.session]={windows:[]};
+    if(o.k==='create-window'){S.live[p.session]=S.live[p.session]||{windows:[]};S.live[p.session].windows.push({key:o.w,panes:[]});}
+    if(o.k==='create-pane'){const lw=S.live[p.session].windows.find(x=>x.key===o.w);lw.panes.push({title:o.pane,state:'running'});}
+    if(o.k==='respawn-pane'){const lp=S.live[p.session].windows.find(x=>x.key===o.w).panes.find(x=>x.title===o.pane);lp.state='running';delete lp.exit;}
+    log('o','ok    '+o.k+'  '+o.d);
+    render(true);
+  }
+  return ops.length;
+}
+async function runUp(ids){
+  if(S.busy)return; S.busy=true;
+  const list=ids.map(proj).filter(Boolean);
+  log('c','$ cairn up'+(ids.length===1?' '+ids[0]:'')+(S.settings.socket?' --socket '+S.settings.socket:''));
+  let total=0; for(const p of list){total+=await applyProject(p);}
+  log('o',total?'done: '+total+' operations. Nothing was killed.':'nothing to do');
+  S.busy=false; render(); toast(total?'Workspaces restored':'Already in sync');
+}
+function pushHistory(label){S.history.push({id:nid('ev'),t:'now',label,undone:false,before:clone(S.config)});}
+
+/* ---------- log / toast ---------- */
+function log(c,s){S.term.push({c,s});if(S.term.length>200)S.term.shift();drawTerm();}
+function drawTerm(){const o=$('#termout');o.innerHTML=S.term.map(l=>'<div class="'+l.c+'">'+esc(l.s)+'</div>').join('');o.scrollTop=o.scrollHeight;}
+let toastTimer;function toast(m){const t=$('#toast');t.textContent=m;t.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{t.hidden=true},2200);}
+
+/* ---------- toml ---------- */
+function toToml(p){
+  let s='id = "'+p.id+'"\nroot = "'+p.root+'"\n';
+  p.windows.forEach(w=>{
+    s+='\n[[windows]]\nkey = "'+w.key+'"\n';
+    w.panes.forEach((pn,i)=>{
+      s+='\n  [[windows.panes]]\n  title = "'+pn.title+'"\n  role = "'+pn.role+'"\n';
+      if(pn.run)s+='  run = "'+pn.run.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"\n';
+      if(pn.restart!=='never')s+='  restart = "'+pn.restart+'"\n';
+      if(i>0){s+='  split = "'+pn.split+'"\n';if(pn.from&&pn.from!==w.panes[i-1].title)s+='  from = "'+pn.from+'"\n';}
+    });
+  });
+  return s;
+}
+
+/* ---------- views ---------- */
+const NAV=[['workspaces','Workspaces','built'],['tasks','Tasks','mock'],['knowledge','Knowledge','mock'],['host','Host','built'],['history','History','built'],['doctor','Doctor','built'],['settings','Settings','mock']];
+function drawNav(){
+  $('#navlist').innerHTML=NAV.map(([k,l,t])=>'<button class="navbtn" data-act="nav" data-v="'+k+'"'+(S.view===k?' aria-current="page"':'')+'>'+l+'<span class="tag '+t+'">'+t+'</span></button>').join('');
+}
+function head(title,sub,actions){return '<div class="head"><div><h1>'+title+'</h1><p>'+sub+'</p></div><div class="actions">'+(actions||'')+'<button class="btn tourbtn" data-act="tourtoggle">Пояснения</button></div></div>';}
+
+function vWorkspaces(){
+  if(S.proj&&proj(S.proj))return vProject(proj(S.proj));
+  const rows=S.config.projects.map(p=>{const st=statusOf(p);return '<tr class="row" data-act="openproj" data-id="'+esc(p.id)+'"><td><strong>'+esc(p.id)+'</strong><div class="faint mono">'+esc(p.root)+'</div></td><td class="mono">'+esc(p.session)+'</td><td>'+p.windows.length+' windows, '+p.windows.reduce((a,w)=>a+w.panes.length,0)+' panes</td><td><span class="pill '+st.cls+'">'+esc(st.t)+'</span></td></tr>';}).join('');
+  const un=S.unmanaged.length?'<div class="panel"><header>Not managed by cairn <small>hand-made sessions, never touched unless you adopt them</small></header><div class="scroll"><table class="table"><tbody>'+S.unmanaged.map(u=>'<tr><td class="mono"><strong>'+esc(u.name)+'</strong></td><td>'+u.windows+' windows, '+u.panes+' panes</td><td style="text-align:right"><button class="btn small" data-act="adopt" data-n="'+esc(u.name)+'">Adopt</button> <button class="btn small" data-act="capture" data-n="'+esc(u.name)+'">Capture config</button></td></tr>').join('')+'</tbody></table></div></div>':'';
+  return head('Workspaces','One project is one tmux session, described in one small file. Click a project to see and edit its layout.','<button class="btn primary" data-act="upall">Run cairn up</button>')
+   +'<div class="stack"><div class="panel"><div class="scroll"><table class="table"><thead><tr><th>Project</th><th>Session</th><th>Layout</th><th>State</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>'+un+'</div>';
+}
+function paneBox(p,w,pn){
+  const L=S.live[p.session],lw=L&&L.windows.find(x=>x.key===w.key),lp=lw&&lw.panes.find(x=>x.title===pn.title);
+  const cls=!lp?'missing':(lp.state==='dead'?'dead':'');
+  const st=!lp?'not created':(lp.state==='dead'?'exited '+lp.exit:'running');
+  return '<button class="pane '+cls+'" data-act="selpane" data-t="'+esc(pn.title)+'" aria-pressed="'+(S.pane===pn.title)+'"><span class="t"><span class="dot"></span>'+esc(pn.title)+'</span><span class="r">'+esc(pn.run||'$SHELL')+'</span><span class="s">'+st+' · restart '+esc(pn.restart)+'</span></button>';
+}
+function renderTree(n,p,w){
+  if(!n)return '';
+  if(n.leaf!==undefined)return paneBox(p,w,w.panes.find(x=>x.title===n.leaf));
+  return '<div class="split '+n.dir+'">'+renderTree(n.a,p,w)+renderTree(n.b,p,w)+'</div>';
+}
+function vProject(p){
+  if(S.win>=p.windows.length)S.win=0;
+  const w=p.windows[S.win]; if(!w){S.win=0;}
+  if(w&&!w.panes.some(x=>x.title===S.pane))S.pane=w.panes[0]?w.panes[0].title:null;
+  const sel=w&&w.panes.find(x=>x.title===S.pane);
+  const ops=planFor(p),changes=ops.filter(o=>!o.info),st=statusOf(p);
+  const tabs=p.windows.map((x,i)=>'<button class="tab" data-act="selwin" data-i="'+i+'" aria-selected="'+(i===S.win)+'">'+esc(x.key)+'</button>').join('')+'<button class="btn small" data-act="addwin">+ window</button>'+(p.windows.length>1?'<button class="btn small" data-act="rmwin">remove this window</button>':'');
+  const editor=sel?'<div class="panel"><header>Pane <span class="mono">'+esc(sel.title)+'</span></header><div class="pad">'
+    +'<div class="field"><label for="f-run">Command (empty starts your shell)</label><input type="text" id="f-run" data-f="run" value="'+esc(sel.run)+'"></div>'
+    +'<div class="field"><label for="f-restart">If it exits</label><select id="f-restart" data-f="restart">'+['never','on-failure','always'].map(r=>'<option'+(sel.restart===r?' selected':'')+'>'+r+'</option>').join('')+'</select><span class="hint">never: shells and editors. on-failure: services. always: must never stay dead.</span></div>'
+    +'<div class="field"><label for="f-role">Role</label><select id="f-role" data-f="role">'+['shell','editor','service','agent'].map(r=>'<option'+(sel.role===r?' selected':'')+'>'+r+'</option>').join('')+'</select></div>'
+    +'<div class="row2"><button class="btn small" data-act="split" data-d="right">Split right</button><button class="btn small" data-act="split" data-d="down">Split down</button><button class="btn small danger" data-act="rmpane"'+(w.panes.length<2?' disabled':'')+'>Remove pane</button></div></div></div>':'';
+  const opsHtml=ops.length?'<ul class="ops">'+ops.map(o=>'<li class="'+(o.warn?'warn':o.info?'info':'')+'"><span class="k">'+(o.info?'· ':o.k==='respawn-pane'?'↻ ':'+ ')+o.k+'</span><span>'+esc(o.d)+'</span></li>').join('')+'</ul>':'<div class="empty">Nothing to do. tmux matches the config.</div>';
+  return '<button class="back" data-act="back">← All workspaces</button>'
+   +head(esc(p.id)+' <span class="pill '+st.cls+'" style="vertical-align:middle;margin-left:6px">'+esc(st.t)+'</span>','<span class="mono">'+esc(p.root)+'</span> · session <span class="mono">'+esc(p.session)+'</span>',
+     '<button class="btn" data-act="plan">Plan</button><button class="btn primary" data-act="applyone"'+(changes.length?'':' disabled')+'>Apply '+(changes.length?changes.length+' changes':'')+'</button><button class="btn" data-act="openterm">Open in terminal</button>')
+   +'<div class="stack"><div class="cols"><div class="stack"><div class="panel"><header>Layout <small>click a pane to edit it</small></header><div class="pad stack" style="gap:12px"><div class="tabs">'+tabs+'</div><div class="layout">'+(w?renderTree(buildTree(w.panes),p,w):'')+'</div></div></div>'
+   +'<div class="panel"><header>Plan <small>what cairn apply would do now</small></header>'+opsHtml+'</div></div>'
+   +'<div class="stack">'+editor+'<div class="panel"><header>Config file <button class="btn small" data-act="tomltoggle">'+(S.toml?'hide':'show')+'</button></header>'+(S.toml?'<div class="pad"><pre class="code">'+esc(toToml(p))+'</pre></div>':'<div class="pad muted">~/.config/cairn/projects/'+esc(p.id)+'.toml, written when you edit here.</div>')+'</div></div></div></div>';
+}
+
+const AGENTS=['Claude Code','Codex','Antigravity'];
+function taskState(t){
+  const p=proj(t.project);
+  if(t.status==='done')return{cls:'ok',t:'done'};
+  if(p&&!S.live[p.session])return{cls:'crit',t:'session lost',lost:true};
+  return t.status==='waiting'?{cls:'warn',t:'waiting for you'}:{cls:'info',t:'working'};
+}
+function vTasks(){
+  const rows=S.tasks.map(t=>{const s=taskState(t);return '<li><button data-act="seltask" data-id="'+t.id+'" aria-current="'+(S.task===t.id)+'"><span class="ttl">'+esc(t.title)+'<span class="pill '+s.cls+'">'+s.t+'</span></span><div class="sub">'+esc(t.agent)+' · '+esc(t.project)+' · '+(t.worktree?'worktree':'main checkout')+' · '+esc(t.age)+'</div></button></li>';}).join('');
+  const nt=S.newTask?'<div class="panel"><header>New task</header><div class="pad">'
+   +'<div class="field"><label for="nt-title">What should the agent do?</label><input type="text" id="nt-title" placeholder="Fix flaky test in api"></div>'
+   +'<div class="row2"><div class="field" style="flex:1;min-width:140px"><label for="nt-proj">Project</label><select id="nt-proj">'+S.config.projects.map(p=>'<option>'+esc(p.id)+'</option>').join('')+'</select></div><div class="field" style="flex:1;min-width:140px"><label for="nt-agent">Agent</label><select id="nt-agent">'+AGENTS.map(a=>'<option>'+a+'</option>').join('')+'</select></div></div>'
+   +'<div class="field"><label><input type="checkbox" id="nt-wt" checked> Own worktree and branch</label><span class="hint">Created under '+esc(S.settings.wtRoot)+' (change in Settings). Turn off for a small job in the main checkout.</span></div>'
+   +'<div class="row2"><button class="btn primary" data-act="createtask">Start task</button><button class="btn" data-act="newtask">Cancel</button></div></div></div>':'';
+  const t=S.tasks.find(x=>x.id===S.task);
+  return head('Tasks','Every AI agent session is a task with its own window, branch and history. After a reboot you resume it, you do not rebuild it.','<button class="btn primary" data-act="newtask">New task</button>')
+   +'<div class="stack">'+nt+'<div class="cols"><div class="panel"><header>Tasks <small>'+S.tasks.length+'</small></header><ul class="list">'+rows+'</ul></div>'+(t?vTask(t):'')+'</div></div>';
+}
+function gateCheck(text){
+  const words=text.trim().split(/\s+/).filter(Boolean).length;
+  const banned=['robust','seamless','leverage','cutting-edge','state-of-the-art','best practices'].filter(b=>text.toLowerCase().includes(b));
+  const refs=(text.match(/[\w.-]+\/[\w./-]+|\b[0-9a-f]{7}\b|go test|pnpm|make \w+/g)||[]).length;
+  return[
+   {ok:words<=120,t:'Length '+words+' of 120 words'},
+   {ok:refs>=2,t:'Concrete references (files, commits, commands): '+refs+', need 2'},
+   {ok:!banned.length,t:banned.length?'Filler phrases: '+banned.join(', '):'No filler phrases'}];
+}
+function vTask(t){
+  const s=taskState(t),p=proj(t.project);
+  if(S.finish&&S.finish.id===t.id){
+    const g=gateCheck(S.finish.text),ok=g.every(x=>x.ok);
+    return '<div class="panel"><header>Finish: draft record <small>nothing is saved until you approve</small></header><div class="pad"><div class="field"><label for="draft">Draft from the diff and the conversation. Edit it.</label><textarea id="draft">'+esc(S.finish.text)+'</textarea></div>'
+     +'<ul class="gate" id="gate">'+g.map(x=>'<li class="'+(x.ok?'okc':'badc')+'">'+(x.ok?'✓ ':'✗ ')+esc(x.t)+'</li>').join('')+'</ul>'
+     +'<p class="muted" style="margin:10px 0">On approve: the record is saved to '+esc(S.settings.kbRoot)+'/'+esc(t.project)+'/, the worktree is removed, kept: report files. Removed: scratch files'+(t.worktree?', branch '+esc(t.branch)+' after merge':'')+'.</p>'
+     +'<div class="row2"><button class="btn primary" data-act="approve" id="approve"'+(ok?'':' disabled')+'>Approve and save</button><button class="btn" data-act="cancelfinish">Back</button></div></div></div>';
+  }
+  return '<div class="panel"><header>'+esc(t.title)+'<span class="pill '+s.cls+'">'+s.t+'</span></header><div class="pad stack" style="gap:14px">'
+   +'<dl class="kv"><dt>Agent</dt><dd>'+esc(t.agent)+'</dd><dt>Project</dt><dd>'+esc(t.project)+'</dd><dt>Checkout</dt><dd class="mono">'+(t.worktree?esc(t.worktree)+' ('+esc(t.branch)+')':'main checkout')+'</dd><dt>Conversation</dt><dd class="mono">'+esc(t.conv)+'</dd><dt>Changed files</dt><dd class="mono">'+t.files.map(esc).join('<br>')+'</dd></dl>'
+   +'<pre class="code">'+esc(t.log.join('\n'))+'</pre>'
+   +'<div class="row2">'+(s.lost?'<button class="btn primary" data-act="resume" data-id="'+t.id+'"'+(p&&S.live[p.session]?'':' disabled')+'>Resume conversation</button><span class="muted" style="align-self:center">Session is gone. Run cairn up first, then resume.</span>':'')
+   +(t.status!=='done'&&!s.lost?'<button class="btn" data-act="openterm">Open in terminal</button><button class="btn primary" data-act="finish" data-id="'+t.id+'">Finish</button>':'')
+   +(s.lost?'<button class="btn" data-act="upall">Run cairn up</button>':'')+'</div></div></div>';
+}
+
+const TYPES=['all','decision','runbook','how-to','task record','incident'];
+function vKnowledge(){
+  const q=S.q.toLowerCase();
+  const list=S.notes.filter(n=>(S.noteFilter==='all'||n.type===S.noteFilter)&&(!q||(n.title+' '+n.body+' '+n.anchors.join(' ')).toLowerCase().includes(q)));
+  const items=list.map(n=>'<li><button data-act="selnote" data-id="'+n.id+'" aria-current="'+(S.note===n.id)+'"><span class="ttl">'+esc(n.title)+(n.stale?'<span class="pill warn">check</span>':'')+'</span><div class="sub">'+esc(n.type)+' · '+esc(n.project)+'</div></button></li>').join('')||'<li><div class="empty">Nothing matches.</div></li>';
+  const n=S.notes.find(x=>x.id===S.note);
+  const detail=n?'<div class="panel"><header>'+esc(n.title)+'<span class="pill idle">'+esc(n.type)+'</span></header><div class="pad stack" style="gap:12px">'
+    +(n.stale?'<div class="pill warn" style="white-space:normal;border-radius:6px">Check if still true: '+esc(n.staleWhy)+'</div>':'')
+    +'<pre class="code" style="white-space:pre-wrap">'+esc(n.body)+'</pre><dl class="kv"><dt>Anchored to</dt><dd class="mono">'+n.anchors.map(esc).join('<br>')+'</dd><dt>Project</dt><dd>'+esc(n.project)+'</dd></dl>'
+    +(n.stale?'<div class="row2"><button class="btn primary" data-act="confirmnote" data-id="'+n.id+'">Still true</button></div>':'')+'</div></div>':'';
+  return head('Knowledge','Plain Markdown notes written when work finishes. Each note points at the code it describes and is flagged when that code changes.','<span class="mono muted" style="align-self:center">'+esc(S.settings.kbRoot)+'</span>')
+   +'<div class="stack"><div class="panel"><div class="pad stack" style="gap:10px"><div class="field" style="margin:0"><label for="q">Search notes and anchors</label><input type="text" id="q" value="'+esc(S.q)+'" placeholder="pool, runbook, internal/db"></div><div class="chips">'+TYPES.map(t=>'<button class="chip" data-act="filter" data-t="'+t+'" aria-pressed="'+(S.noteFilter===t)+'">'+t+'</button>').join('')+'</div></div></div>'
+   +'<div class="cols"><div class="panel"><ul class="list" id="notelist">'+items+'</ul></div>'+detail+'</div></div>';
+}
+
+function hostFiles(){
+  return[
+   {path:'/etc/systemd/sleep.conf.d/10-cairn.conf',body:'# managed by cairn host\n[Sleep]\nHibernateDelaySec='+S.hib+'min\nSuspendState=freeze mem\nHibernateMode=platform shutdown'},
+   {path:'/etc/systemd/logind.conf.d/10-cairn.conf',body:'# managed by cairn host\n[Login]\nHandleLidSwitch=suspend-then-hibernate\nHandleLidSwitchExternalPower=suspend\nHandleLidSwitchDocked=ignore'},
+   {path:'/etc/systemd/system/systemd-suspend-then-hibernate.service.d/10-cairn.conf',body:'# managed by cairn host\n[Service]\nExecStartPre=/usr/local/bin/cairn host sleep-check --record'}];
+}
+function vHost(){
+  const checks=[
+   {c:'ok',t:'Swap file present',e:'16 GiB at /swapfile, RAM is 16 GiB'},
+   {c:'ok',t:'Kernel knows where to resume',e:'resume=UUID=3c1f…  resume_offset=34816000 matches the swap file'},
+   {c:'ok',t:'initramfs has the resume hook',e:'"resume" found in HOOKS after "block"'},
+   {c:'warn',t:'NVIDIA suspend and resume services are not enabled',e:'nvidia-suspend.service, nvidia-resume.service',fix:'cairn host apply'},
+   {c:'ok',t:'Lid and battery policy matches',e:'lid on battery suspends then hibernates after '+S.hib+' min'}];
+  return head('Host','Optional. Makes a Linux laptop survive closing the lid and an empty battery: suspend first, hibernate later, refuse when hibernation cannot work.','<button class="btn" data-act="hostplan">Preview changes</button>')
+   +'<div class="stack"><div class="cols"><div class="panel"><header>Sleep policy</header><div class="pad"><div class="field"><label for="hib">Hibernate after suspending for <strong>'+S.hib+' minutes</strong></label><input type="range" id="hib" min="5" max="60" step="5" value="'+S.hib+'"><span class="hint">Default 15. Shorter means less battery used while the lid is closed.</span></div>'
+   +'<dl class="kv"><dt>Lid on battery</dt><dd>suspend then hibernate</dd><dt>Lid on power</dt><dd>suspend</dd><dt>Docked with monitor</dt><dd>ignore</dd><dt>If hibernate fails</dt><dd>suspend and alert you</dd></dl></div></div>'
+   +'<div class="panel"><header>Checks</header><ul class="checks">'+checks.map(k=>'<li><span class="pill '+k.c+'">'+(k.c==='ok'?'ok':'warn')+'</span><div><div>'+esc(k.t)+'</div><div class="ev">'+esc(k.e)+'</div></div>'+(k.fix?'<span class="fix">fix: '+esc(k.fix)+'</span>':'')+'</li>').join('')+'</ul></div></div>'
+   +'<div class="panel"><header>Files cairn would write <small>needs root, run in a terminal</small></header><div class="pad stack" style="gap:12px">'+hostFiles().map(f=>'<div><div class="mono muted" style="margin-bottom:4px">'+esc(f.path)+'</div><pre class="code">'+esc(f.body)+'</pre></div>').join('')+'<div class="row2"><button class="btn primary" data-act="hostapply">Apply</button></div></div></div></div>';
+}
+
+function vHistory(){
+  const ev=[...S.history].reverse(),latest=ev.find(e=>!e.undone&&e.before);
+  return head('History','Every config change is recorded. Undo restores the file as it was. Undo changes config only; run apply afterwards.','<button class="btn" data-act="undo"'+(latest?'':' disabled')+'>Undo latest</button>')
+   +'<div class="panel"><ul class="ops">'+ev.map(e=>'<li class="'+(e.undone?'info':'')+'"><span class="k" style="width:90px;color:var(--faint)">'+esc(e.t)+'</span><span style="flex:1">'+esc(e.label)+'</span>'+(e.undone?'<span class="pill idle">undone</span>':'')+(latest&&e.id===latest.id?'<span class="pill info">latest</span>':'')+'</li>').join('')+'</ul></div>';
+}
+
+function doctorChecks(){
+  const out=[];
+  out.push({c:'ok',t:'tmux available',e:'tmux 3.8'});
+  out.push({c:'ok',t:'Workspace config',e:S.config.projects.length+' projects loaded, no validation errors'});
+  const drift=S.config.projects.filter(p=>changesOf(p).length);
+  const missing=S.config.projects.filter(p=>!S.live[p.session]);
+  out.push(missing.length?{c:'crit',t:missing.length+' workspace(s) are not running',e:missing.map(p=>p.id).join(', '),fix:'cairn up'}:drift.length?{c:'warn',t:drift.length+' project(s) need apply',e:drift.map(p=>p.id).join(', '),fix:'cairn apply'}:{c:'ok',t:'Workspace in sync',e:'tmux matches the config'});
+  out.push({c:'warn',t:'tmux user service',e:'optional: keeps tmux alive across logouts and restores on login',fix:'cairn tmux service install --socket <name>'});
+  const lost=S.tasks.filter(t=>taskState(t).lost);
+  out.push(lost.length?{c:'warn',t:lost.length+' agent task(s) lost their session',e:lost.map(t=>t.title).join('; '),fix:'cairn up, then resume each task'}:{c:'ok',t:'Agent tasks',e:'every active task has a live session'});
+  const stale=S.notes.filter(n=>n.stale);
+  out.push(stale.length?{c:'warn',t:stale.length+' note(s) may be out of date',e:stale.map(n=>n.title).join('; '),fix:'review in Knowledge'}:{c:'ok',t:'Knowledge notes',e:'no note is flagged'});
+  out.push({c:'warn',t:'NVIDIA suspend and resume services are not enabled',e:'host module',fix:'cairn host apply'});
+  return out;
+}
+function vDoctor(){
+  const cs=doctorChecks(),worst=cs.some(c=>c.c==='crit')?'crit':cs.some(c=>c.c==='warn')?'warn':'ok';
+  return head('Doctor','Read-only health check. It never changes anything; each warning names the command that fixes it.','<span class="pill '+worst+'">'+(worst==='ok'?'all ok':worst==='warn'?'needs attention':'broken')+'</span>')
+   +'<div class="panel"><ul class="checks">'+cs.map(k=>'<li><span class="pill '+k.c+'">'+k.c+'</span><div><div>'+esc(k.t)+'</div><div class="ev">'+esc(k.e)+'</div></div>'+(k.fix?'<span class="fix">fix: '+esc(k.fix)+'</span>':'')+'</li>').join('')+'</ul></div>';
+}
+
+function vSettings(){
+  const F=[['configDir','Config directory','Projects, profiles and settings live here.'],['stateDir','State directory','History, caches and logs. Safe to delete.'],['kbRoot','Knowledge root','Where notes are written. Point it at an existing vault if you have one.'],['wtRoot','Worktrees root','Where tasks that ask for a worktree get one.'],['socket','tmux socket','Empty means your normal tmux server. A name uses a separate, isolated server.']];
+  return head('Settings','Every location has a default and can be changed. Nothing is hardcoded.','')
+   +'<div class="panel"><div class="pad">'+F.map(([k,l,h])=>'<div class="field"><label for="s-'+k+'">'+l+(S.settings[k]===DEFAULTS[k]?' <span class="tag">default</span>':' <span class="tag built">changed</span>')+'</label><div class="row2"><input type="text" id="s-'+k+'" data-s="'+k+'" value="'+esc(S.settings[k])+'" style="flex:1;min-width:200px" placeholder="(default server)"><button class="btn small" data-act="resetset" data-k="'+k+'">Reset</button></div><span class="hint">'+h+'</span></div>').join('')+'</div></div>';
+}
+
+/* ---------- tour (Russian) ---------- */
+const TOUR={
+ workspaces:{t:'Рабочие окружения',b:['Каждый проект это одна сессия tmux. Её описание лежит в маленьком файле, а не в памяти tmux.','Статус «missing» значит, что сессии нет. «to apply» значит, что реальность расходится с файлом.','Нажмите «Simulate power loss» слева, потом «Run cairn up». Всё вернётся таким же, как было описано. Это главное, ради чего всё затеяно.','Внизу «Not managed» ваши ручные сессии. «Adopt» берёт сессию под управление без перезапуска, «Capture» пишет по ней файл.'],c:'cairn project add api --root ~/code/api\ncairn up\ncairn open api\ncairn capture --list'},
+ project:{t:'Один проект',b:['Слева схема окна. Каждая клетка это панель: имя, команда, состояние.','Нажмите панель и поменяйте команду или политику перезапуска справа. Внизу появится «Plan»: что изменится.','«Apply» только добавляет и чинит. Ручные окна и панели cairn не трогает и не убивает.','«Config file» показывает файл, который реально запишется. Любая правка попадает в History и откатывается.'],c:'cairn plan\ncairn apply\ncairn project edit api'},
+ tasks:{t:'AI-задачи',b:['Это макет, в движке этого ещё нет (следующий этап). Задача это сессия агента: Claude, Codex или Antigravity.','У задачи своё окно, ветка и, по желанию, отдельный worktree. Папка для worktree настраивается в Settings.','После «power loss» задача показывает «session lost». Сначала «cairn up», потом «Resume»: агент продолжит ту же беседу.','«Finish» готовит короткую запись из diff и беседы. Фильтр качества не пропустит воду: попробуйте дописать в черновик «robust and seamless».'],c:'cairn task new "Fix pool" --agent claude --worktree\ncairn task resume t1\ncairn finish t1'},
+ knowledge:{t:'База знаний',b:['Макет. Обычные markdown-файлы в вашей папке (по умолчанию ~/knowledge), без своей базы данных.','Заметка привязана к файлам кода. Если код сильно изменился, заметка помечается «check».','Поиск работает по тексту и по привязкам. Позже тот же поиск получат и AI-агенты.'],c:'cairn kb search pool\ncairn kb stale'},
+ host:{t:'Host (ноутбук)',b:['Необязательный модуль. Пишет настройки сна: сначала suspend, через N минут hibernate.','Двигайте ползунок: справа сразу видно, какой файл будет записан. По умолчанию 15 минут.','Запись требует root, поэтому интерфейс её не делает сам. Он показывает команду, вы выполняете её в терминале.','Модуль написан и покрыт тестами, но на вашем ноутбуке ещё не проверен.'],c:'cairn host plan\nsudo cairn host apply\ncairn host doctor'},
+ history:{t:'История',b:['Каждое изменение конфига записывается. «Undo latest» возвращает файл как был.','Откат меняет только конфиг. Чтобы применить его к tmux, запустите apply.','Попробуйте: измените команду панели в Workspaces, вернитесь сюда и нажмите Undo.'],c:'cairn history\ncairn undo'},
+ doctor:{t:'Doctor',b:['Только читает, ничего не меняет.','У каждого предупреждения есть команда, которая его исправляет.','Нажмите «Simulate power loss»: появятся красные пункты и подсказка «cairn up».'],c:'cairn doctor\ncairn doctor workspace'},
+ settings:{t:'Настройки',b:['Макет. Все пути имеют значение по умолчанию и меняются. Ничего не зашито под вашу систему.','Пустой tmux socket означает ваш обычный сервер. Имя сокета значит отдельный изолированный сервер для проб.'],c:'cairn config'}
+};
+function drawTour(){
+  const k=(S.view==='workspaces'&&S.proj)?'project':S.view,t=TOUR[k]||TOUR.workspaces;
+  $('#tour').innerHTML='<h2>Что я вижу</h2><h3>'+t.t+'</h3><ul>'+t.b.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul><div><h2 style="margin-bottom:6px">Команды в терминале</h2><div class="cli">'+esc(t.c)+'</div></div>'
+   +'<div class="legend"><span class="tag built">built</span> есть в коде, работает в терминале. <span class="tag">mock</span> только макет, ещё не написано. Сам веб-интерфейс тоже ещё макет.</div>';
+}
+
+/* ---------- render ---------- */
+const VIEWS={workspaces:vWorkspaces,tasks:vTasks,knowledge:vKnowledge,host:vHost,history:vHistory,doctor:vDoctor,settings:vSettings};
+function render(keepFocus){
+  if(!VIEWS[S.view])S.view='workspaces';
+  const ae=document.activeElement,id=ae&&ae.id,pos=ae&&ae.selectionStart;
+  $('#view').innerHTML=VIEWS[S.view]();
+  drawNav();drawTour();
+  if(keepFocus&&id){const el=document.getElementById(id);if(el){el.focus();try{if(pos!=null)el.setSelectionRange(pos,pos)}catch(e){}}}
+}
+
+/* ---------- events ---------- */
+document.addEventListener('click',async e=>{
+  const b=e.target.closest('[data-act]'); if(!b||b.disabled)return;
+  const a=b.dataset.act, p=S.proj&&proj(S.proj), w=p&&p.windows[S.win];
+  switch(a){
+   case 'nav':S.view=b.dataset.v;S.proj=null;location.hash=S.view;break;
+   case 'power':
+     if(S.busy)return; S.live={};S.unmanaged=[];log('e','# power lost. tmux server is gone, every session with it.');log('i','# your hand-made "scratch" session is lost for good. Managed ones come back.');toast('All sessions are gone');break;
+   case 'upall':runUp(S.config.projects.map(x=>x.id));return;
+   case 'reset':initState();location.hash='workspaces';toast('Demo reset');break;
+   case 'termtoggle':{const t=$('#term');t.classList.toggle('closed');$('#termbtn').textContent=t.classList.contains('closed')?'show':'hide';return;}
+   case 'tourtoggle':{const t=$('#tour');t.classList.toggle('closed');store.set('tour',t.classList.contains('closed')?'0':'1');return;}
+   case 'openproj':S.proj=b.dataset.id;S.win=0;S.pane=null;break;
+   case 'back':S.proj=null;break;
+   case 'selwin':S.win=+b.dataset.i;S.pane=null;break;
+   case 'selpane':S.pane=b.dataset.t;break;
+   case 'plan':log('c','$ cairn plan '+p.id);planFor(p).forEach(o=>log(o.info?'i':'o',(o.info?'  ':'+ ')+o.k+'  '+o.d));if(!planFor(p).length)log('i','nothing to do');toast('Plan printed in the log');return;
+   case 'applyone':await runUp([p.id]);return;
+   case 'openterm':log('c','$ cairn open '+(p?p.id:'api'));log('i','# in the real tool this switches your terminal to the session');toast('Would attach in your terminal');return;
+   case 'tomltoggle':S.toml=!S.toml;break;
+   case 'addwin':{const key=nid('win');pushHistory('project edit '+p.id+' (add window '+key+')');p.windows.push({key,panes:[P('shell','shell','')]});S.win=p.windows.length-1;S.pane=null;log('c','$ cairn project edit '+p.id);log('o','ok    added window '+key+', run apply to create it');break;}
+   case 'rmwin':{pushHistory('project edit '+p.id+' (remove window '+w.key+')');log('c','$ cairn project edit '+p.id);log('o','ok    removed window '+w.key+' from the config; apply will not kill it');p.windows.splice(S.win,1);S.win=0;S.pane=null;break;}
+   case 'split':{const d=b.dataset.d,from=S.pane;let n=1;while(w.panes.some(x=>x.title==='pane'+n))n++;const t='pane'+n;pushHistory('project edit '+p.id+' (split '+from+' '+d+')');w.panes.push(P(t,'shell','','never',d,from));S.pane=t;log('c','$ cairn project edit '+p.id);log('o','ok    added pane '+t+' ('+d+' of '+from+')');break;}
+   case 'rmpane':{pushHistory('project edit '+p.id+' (remove pane '+S.pane+')');w.panes=w.panes.filter(x=>x.title!==S.pane);w.panes.forEach(x=>{if(x.from===S.pane)x.from=null;});S.pane=null;log('c','$ cairn project edit '+p.id);log('o','ok    removed pane from the config; apply will not kill it');break;}
+   case 'adopt':{const n=b.dataset.n;S.unmanaged=S.unmanaged.filter(x=>x.name!==n);pushHistory('adopt '+n);S.config.projects.push({id:n,root:'~/scratch',session:n,windows:[{key:'main',panes:[P('shell','shell',''),P('shell2','shell','','never','right')]}]});S.live[n]={windows:[{key:'main',panes:[{title:'shell',state:'running'},{title:'shell2',state:'running'}]}]};log('c','$ cairn adopt '+n);log('o','ok    '+n+' is managed now. Nothing was restarted, pane ids are unchanged.');toast('Adopted '+n);break;}
+   case 'capture':log('c','$ cairn capture '+b.dataset.n);log('i','id = "'+b.dataset.n+'"\nroot = "~/scratch"\n\n[[windows]]\nkey = "main"\n  [[windows.panes]]\n  title = "shell"\n  role = "shell"\n  [[windows.panes]]\n  title = "shell2"\n  split = "right"');toast('Config printed in the log');return;
+   case 'seltask':S.task=b.dataset.id;S.finish=null;break;
+   case 'newtask':S.newTask=!S.newTask;break;
+   case 'createtask':{const title=$('#nt-title').value.trim()||'Untitled task',pj=$('#nt-proj').value,ag=$('#nt-agent').value,wt=$('#nt-wt').checked;
+     const slug=title.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,24)||'task';const id=nid('t');
+     S.tasks.unshift({id,title,agent:ag,project:pj,worktree:wt?S.settings.wtRoot+'/'+pj+'-'+slug:'',branch:wt?'task/'+slug:'main',status:'working',age:'just now',conv:'c-'+Math.random().toString(16).slice(2,6),log:['you: '+title,'agent: starting...'],files:[]});
+     S.task=id;S.newTask=false;log('c','$ cairn task new "'+title+'" --project '+pj+' --agent '+ag+(wt?' --worktree':''));if(wt)log('o','ok    worktree '+S.settings.wtRoot+'/'+pj+'-'+slug+' on branch task/'+slug);log('o','ok    window created in session '+pj+', agent started');toast('Task started');break;}
+   case 'resume':{const t=S.tasks.find(x=>x.id===b.dataset.id);t.status='working';t.age='just now';t.log.push('agent: resumed conversation '+t.conv+', continuing where it stopped.');log('c','$ cairn task resume '+t.id);log('o','ok    started: '+(t.agent==='Claude Code'?'claude --resume ':'agent resume ')+t.conv);toast('Conversation resumed');break;}
+   case 'finish':{const t=S.tasks.find(x=>x.id===b.dataset.id);S.finish={id:t.id,text:'Goal: stop API 502s when the DB pool is exhausted.\nChanged: internal/db/pool.go (max 20 conns, 2s acquire timeout), internal/http/server.go (503 + Retry-After instead of 502).\nDecision: fail fast instead of queueing requests, see note "pgxpool max 20 connections".\nVerify: go test ./internal/db -run TestPoolExhaustion\nLinks: branch '+t.branch+', commits 3f2a9c1..b81d0e4'};log('c','$ cairn finish '+t.id);log('i','# draft written from the diff and the conversation, waiting for your approval');break;}
+   case 'cancelfinish':S.finish=null;break;
+   case 'approve':{const t=S.tasks.find(x=>x.id===S.finish.id);const g=gateCheck(S.finish.text);if(!g.every(x=>x.ok))return;t.status='done';S.notes.unshift({id:nid('n'),type:'task record',title:t.title,body:S.finish.text,anchors:t.files.slice(0,2),stale:false,project:t.project});S.finish=null;log('o','ok    saved '+S.settings.kbRoot+'/'+t.project+'/'+t.title.toLowerCase().replace(/[^a-z0-9]+/g,'-')+'.md');log('o','ok    removed worktree and scratch files; kept the record');toast('Record saved to Knowledge');break;}
+   case 'selnote':S.note=b.dataset.id;break;
+   case 'filter':S.noteFilter=b.dataset.t;break;
+   case 'confirmnote':{const n=S.notes.find(x=>x.id===b.dataset.id);n.stale=false;log('o','ok    note confirmed: '+n.title);toast('Marked as still true');break;}
+   case 'hostplan':log('c','$ cairn host plan');hostFiles().forEach(f=>log('o','+ write '+f.path));log('i','# no changes were made');toast('Plan printed in the log');return;
+   case 'hostapply':log('c','$ sudo cairn host apply');log('i','# root is needed. Run this in a terminal; the interface never asks for your password.');toast('Run it in a terminal (needs sudo)');return;
+   case 'undo':{const ev=[...S.history].reverse().find(x=>!x.undone&&x.before);if(!ev)return;S.config=clone(ev.before);ev.undone=true;S.pane=null;S.win=0;log('c','$ cairn undo');log('o','ok    restored the config as it was before: '+ev.label);log('i','# run cairn apply to bring tmux in line');toast('Config restored');break;}
+   case 'resetset':S.settings[b.dataset.k]=DEFAULTS[b.dataset.k];break;
+  }
+  render();
+});
+let lastEdit={key:'',at:0};
+document.addEventListener('input',e=>{
+  const t=e.target;
+  if(t.dataset.f){const p=proj(S.proj),w=p.windows[S.win],pn=w.panes.find(x=>x.title===S.pane);
+    const key=p.id+'/'+w.key+'/'+pn.title+'/'+t.dataset.f,now=Date.now();
+    if(lastEdit.key!==key||now-lastEdit.at>2500)pushHistory('project edit '+p.id+' ('+pn.title+'.'+t.dataset.f+')');
+    lastEdit={key,at:now};
+    pn[t.dataset.f]=t.value;render(true);return;}
+  if(t.id==='draft'){S.finish.text=t.value;const g=gateCheck(t.value);$('#gate').innerHTML=g.map(x=>'<li class="'+(x.ok?'okc':'badc')+'">'+(x.ok?'✓ ':'✗ ')+esc(x.t)+'</li>').join('');$('#approve').disabled=!g.every(x=>x.ok);return;}
+  if(t.id==='q'){S.q=t.value;render(true);return;}
+  if(t.id==='hib'){S.hib=+t.value;render(true);return;}
+  if(t.dataset.s){S.settings[t.dataset.s]=t.value;}
+});
+document.addEventListener('change',e=>{if(e.target.dataset.s)render();});
+window.addEventListener('hashchange',()=>{const v=location.hash.slice(1);if(VIEWS[v]&&v!==S.view){S.view=v;S.proj=null;render();}});
+
+initState();
+if(store.get('tour')==='0')$('#tour').classList.add('closed');
+if(innerWidth<=1180&&store.get('tour')!=='1')$('#tour').classList.add('closed');
+drawTerm();render();
+</script>

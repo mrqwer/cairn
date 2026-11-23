@@ -4,8 +4,8 @@ Status: **design** · Module dir: `host/` · Date: 2026-11-11
 
 ## 1. Intent
 
-A developer's work must not depend on a laptop sleeping and waking correctly. Today, on the
-reference machine, closing the lid can end in a dead battery and a cold boot; a failed
+A developer's work must not depend on a laptop sleeping and waking correctly. On a typical
+Linux laptop, closing the lid can end in a dead battery and a cold boot; a failed
 hibernate silently turns into an indefinite suspend; the root disk fills up until logs and
 GPU sleep data have nowhere to go; nothing is backed up; uncommitted work exists only in
 working trees. `host` makes the machine underneath cairn dependable and self-maintaining,
@@ -87,7 +87,7 @@ host config (TOML, layered)      providers (detected)              generated art
 | Enabling existing units | `paccache.timer`, vendor GPU sleep units | record previous state | restore previous state |
 | One-time repairs (`cairn host repair`) | boot entries (`resume=`, `resume_offset`), boot-loader default, broken fallback entries, initramfs `resume` hook + regeneration, swapfile creation/resizing, removing a conflicting pre-existing unit | explicit command, separate plan, each file backed up to `/var/lib/cairn/host/backup/` | **not** reverted automatically (could leave the machine unbootable); `uninstall` lists them and how to restore from the backups |
 
-Supported boot loaders for repairs in v1: systemd-boot (the reference machine), with Type
+Supported boot loaders for repairs in v1: systemd-boot, with Type
 #1 entries for the running kernel. GRUB, UKIs and other boot loaders are report-only in
 v1: repair prints the exact `resume=` / `resume_offset=` values to set by hand. Repairs
 are recorded in the system inventory (class `repaired`, with their backup) so `uninstall`
@@ -192,10 +192,11 @@ At boot, a user unit compares the last event of the previous boot with the curre
 Notifications use the desktop notification bus when available and are always recorded in
 the event log so `doctor` can show them later.
 
-### 5.5 Removed by `host` (reference machine)
+### 5.5 Pre-existing fallback units
 
-The custom "fall back to suspend when hibernate fails" unit is replaced by 5.1/5.4; it is
-removed by `cairn host repair` (backed up first), not by `apply`.
+A user-made "fall back to suspend when hibernate fails" unit (an `OnFailure=` drop-in on the
+hibernate service and the unit it names) is replaced by 5.1/5.4; `cairn host repair` removes
+it (backed up first), never `apply`.
 
 ## 6. Disk hygiene
 
@@ -307,10 +308,10 @@ hibernate_after = "15min"
 critical_battery = "hibernate"
 
 [sleep.hibernation_swap]
-path = "/home/.swap/swapfile"      # profile value; detected by `cairn init` if absent
+path = "/swap/hibernate.swap"      # profile value; detected by `cairn init` if absent
 
 [gpu.nvidia]
-temporary_file_path = "/home/.nvidia-suspend"
+temporary_file_path = "/home/nvidia-suspend"
 
 [disk.watch]
 warn = "85%"
@@ -336,22 +337,26 @@ interval = "5min"
 Everything has a default; `cairn init` writes only what it detected and what differs from
 defaults.
 
-## 11. Reference machine profile (`profiles/<author>/host.toml`)
+## 11. Example profile
 
-Findings that drive the profile values (from the investigation on 2026-11-11):
+A worked example lives in `profiles/examples/arch-nvidia-laptop/` (anonymised). It shows the
+values that differ from the defaults on a common setup — an Arch laptop with an NVIDIA GPU, a
+swap file on ext4, systemd-boot and GNOME:
 
-- Lid close is plain `suspend`; hibernate failures fall back to plain suspend → replaced.
-- NVIDIA (`nvidia-open` 615.x) options in `/etc/modprobe.d/` are overridden by
-  `/usr/lib/modprobe.d/nvidia-utils.conf`; VRAM is dumped to `/var/tmp` on a small root fs.
-- Two 24 GB swapfiles (`runtime-swapfile`, pri 20; `swapfile`, pri -1/-10) plus zram;
-  which file `resume_offset` points to is unverified → the profile names `swapfile` as the
-  hibernation swap and `apply` recomputes the offset and updates boot entries if needed.
-- Boot loader: fallback entries reference missing initramfs images; no default entry set.
-- Root fs reached 97%; journal retained only ~3 days; no backups; no WIP snapshots.
+- the hibernation swap path and the NVIDIA temporary directory (on a filesystem with room for
+  the whole video memory);
+- the problems `doctor` typically finds on such a machine: lid close is plain `suspend`, a
+  user-made fallback unit turns failed hibernation into suspend, the NVIDIA options in
+  `/etc/modprobe.d/` are overridden by the vendor file in `/usr/lib/modprobe.d/` so video
+  memory is saved to a small root filesystem, several swap files make the resume target
+  ambiguous, the boot loader has no default entry;
+- and what `apply` / `repair` do about each.
+
+A person's real values live only in their own `~/.config/cairn/`, never in this repository.
 
 ## 12. Verification plan
 
-Run on the reference machine after `apply`, each step logged:
+Run on a test machine after `apply`, each step logged:
 
 1. `cairn doctor host` all green (or every red explained).
 2. Hibernate dry runs: `pm_test` levels `freezer`, `devices`, `platform`; then

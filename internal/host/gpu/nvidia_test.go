@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	cfgPath = "/home/.nvidia-suspend"
+	cfgPath = "/home/nvidia-suspend"
 	gib     = 1 << 30
 )
 
@@ -52,7 +52,7 @@ func TestMaskReplacesTemporaryPath(t *testing.T) {
 		fsx.Header(Policy),
 		"blacklist nouveau",
 		"softdep nvidia post: nvidia-uvm nvidia-drm",
-		"options nvidia NVreg_TemporaryFilePath=/home/.nvidia-suspend NVreg_PreserveVideoMemoryAllocations=1",
+		"options nvidia NVreg_TemporaryFilePath=/home/nvidia-suspend NVreg_PreserveVideoMemoryAllocations=1",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("missing %q in:\n%s", want, s)

@@ -14,10 +14,14 @@ import (
 	"github.com/mrqwer/cairn/internal/detect"
 	"github.com/mrqwer/cairn/internal/doctor"
 	"github.com/mrqwer/cairn/internal/execx"
+	"github.com/mrqwer/cairn/internal/host"
 	"github.com/mrqwer/cairn/internal/host/gpu"
 	"github.com/mrqwer/cairn/internal/host/sleep"
 	"github.com/mrqwer/cairn/internal/inventory"
 	"github.com/mrqwer/cairn/internal/plan"
+	"github.com/mrqwer/cairn/internal/tmux"
+	"github.com/mrqwer/cairn/internal/workspace"
+	"github.com/mrqwer/cairn/internal/workspace/wsdoctor"
 )
 
 // ExitError asks main to terminate the process with Code.
@@ -54,6 +58,45 @@ var hostChecks = func(ctx context.Context) ([]doctor.Check, error) {
 	}
 	checks = append(checks, nvidiaChecks(ctx, cfg.Host.GPU.Nvidia, sys, inv)...)
 	return append(checks, gpu.UnitsCheck(sysRoot, func(u string) string { return unitState(ctx, u) })), nil
+}
+
+// Seam for tests: the tmux client the workspace checks read through.
+var newTmuxClient = tmux.NewClient
+
+// workspaceChecks builds the workspace checks. Everything it runs is read-only:
+// `tmux -V`, the tmux list-* queries of a snapshot (a missing server reads as
+// empty) and `systemctl --user is-enabled|is-active`.
+var workspaceChecks = func(ctx context.Context, socket string) ([]doctor.Check, error) {
+	ws, err := loadWorkspace()
+	if err != nil {
+		return nil, err
+	}
+	client := newTmuxClient(socket)
+	version := ""
+	if out, err := client.R.Run(ctx, "tmux", "-V"); err == nil {
+		version = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "tmux"))
+	}
+	var (
+		snap    tmux.Snapshot
+		snapErr error
+	)
+	if version != "" {
+		snap, snapErr = client.Snapshot(ctx)
+	}
+	checks := wsdoctor.Checks(ws.projects, ws.loadErrs, snap, version, wsRoot.Exists)
+	if snapErr != nil {
+		// Without a snapshot there is nothing to compare: say so, skip drift.
+		kept := []doctor.Check{wsdoctor.Failed(wsdoctor.IDTmux, "tmux available", doctor.Warn,
+			fmt.Errorf("cannot read tmux state: %w", snapErr))}
+		for _, c := range checks {
+			if c.ID() != wsdoctor.IDTmux && c.ID() != wsdoctor.IDDrift {
+				kept = append(kept, c)
+			}
+		}
+		checks = kept
+	}
+	units := workspace.QueryUnits(ctx, hostRunner, wsRoot, host.UserUnitDir(ws.dirs))
+	return append(checks, wsdoctor.ServiceCheck(units)), nil
 }
 
 // unitState returns the `systemctl is-enabled` answer for a system unit (a
@@ -142,18 +185,31 @@ type jsonResult struct {
 func newDoctorCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:       "doctor [host]",
-		Short:     "Run health checks",
+		Use:       "doctor [host|workspace]",
+		Short:     "Run health checks (host, workspace, or both)",
 		Args:      cobra.MatchAll(cobra.MaximumNArgs(1), cobra.OnlyValidArgs),
-		ValidArgs: []string{"host"},
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			checks, err := hostChecks(cmd.Context())
-			if err != nil {
-				return err
+		ValidArgs: []string{"host", "workspace"},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := ctxOf(cmd)
+			scope, title := "", "cairn doctor"
+			if len(args) == 1 {
+				scope = args[0]
+				title += " · " + scope
 			}
-			ctx := cmd.Context()
-			if ctx == nil {
-				ctx = context.Background()
+			var checks []doctor.Check
+			if scope != "workspace" {
+				hc, err := hostChecks(cmd.Context())
+				if err != nil {
+					return err
+				}
+				checks = append(checks, hc...)
+			}
+			if scope != "host" {
+				wc, err := workspaceChecks(ctx, socketName(cmd))
+				if err != nil {
+					wc = []doctor.Check{wsdoctor.Failed(wsdoctor.IDConfig, "Workspace config", doctor.Crit, err)}
+				}
+				checks = append(checks, wc...)
 			}
 			rs := doctor.Run(ctx, checks)
 			if asJSON {
@@ -169,7 +225,7 @@ func newDoctorCmd() *cobra.Command {
 			} else if len(rs) == 0 {
 				cmd.Println("no checks registered")
 			} else if st, ok := styleFor(cmd.OutOrStdout()); ok {
-				doctor.RenderStyled(cmd.OutOrStdout(), rs, st, "cairn doctor · host")
+				doctor.RenderStyled(cmd.OutOrStdout(), rs, st, title)
 			} else {
 				doctor.Render(cmd.OutOrStdout(), rs)
 			}

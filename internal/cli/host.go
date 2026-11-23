@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -84,19 +83,8 @@ func ctxOf(cmd *cobra.Command) context.Context {
 	return context.Background()
 }
 
-// unsafeSelfChars may not appear in the cairn binary path: it is embedded in
-// unit files (where % is a specifier and whitespace splits arguments) and in
-// shell and pacman hook lines.
-const unsafeSelfChars = " \t\n\r\v\f%\"'\\$`;"
-
 // checkSelfPath rejects binary paths that cannot be embedded safely.
-func checkSelfPath(p string) error {
-	if i := strings.IndexAny(p, unsafeSelfChars); i >= 0 {
-		return fmt.Errorf("cairn binary path %q contains %q, which cannot be used in unit files and hooks; "+
-			"install cairn to a path without whitespace, %%, quotes, backslash, $, backtick or ;", p, p[i])
-	}
-	return nil
-}
+func checkSelfPath(p string) error { return plan.CheckSelfPath(p) }
 
 func selfPath() (string, error) {
 	exe, err := exePath()
@@ -252,11 +240,9 @@ func (hs *hostState) renderSleepBlockers(ctx context.Context, w io.Writer) {
 	}
 }
 
-func confirm(in io.Reader, out io.Writer) bool {
-	_, _ = fmt.Fprint(out, "Apply these changes? [y/N] ")
-	line, _ := bufio.NewReader(in).ReadString('\n')
-	ans := strings.ToLower(strings.TrimSpace(line))
-	return ans == "y" || ans == "yes"
+// confirm asks whether to apply; see ask for the Ctrl-C behaviour.
+func confirm(ctx context.Context, in io.Reader, out io.Writer) (bool, error) {
+	return ask(ctx, in, out, "Apply these changes?")
 }
 
 // sudoApplyRoot runs `sudo <self> host apply-root --mode <m> [--yes]
@@ -273,7 +259,10 @@ func sudoApplyRoot(ctx context.Context, cmd *cobra.Command, self, mode string, y
 	if force {
 		args = append(args, "--force")
 	}
-	c := exec.CommandContext(ctx, "sudo", args...)
+	// Never killed through ctx: a SIGTERM to cairn must not cut the root
+	// side off halfway. sudo stays in the terminal's foreground process
+	// group, so a Ctrl-C reaches it (and apply-root) directly, as before.
+	c := exec.CommandContext(context.WithoutCancel(ctx), "sudo", args...)
 	c.Stdin, c.Stdout, c.Stderr = bytes.NewReader(request), cmd.OutOrStdout(), cmd.ErrOrStderr()
 	if err := c.Run(); err != nil {
 		return fmt.Errorf("sudo %s host apply-root: %w", self, err)
@@ -350,9 +339,15 @@ func runHostOp(cmd *cobra.Command, mode string, yes, force bool) error {
 			return err
 		}
 	}
-	if userNeeded && !yes && !confirm(cmd.InOrStdin(), cmd.OutOrStdout()) {
-		cmd.Println("aborted")
-		return nil
+	if userNeeded && !yes {
+		ok, err := confirm(ctx, cmd.InOrStdin(), cmd.OutOrStdout())
+		if err != nil {
+			return err
+		}
+		if !ok {
+			cmd.Println("aborted")
+			return nil
+		}
 	}
 	var priv host.Privileged
 	if rootNeeded {

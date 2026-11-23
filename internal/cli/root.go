@@ -15,6 +15,12 @@ func NewRootCmd() *cobra.Command {
 		Short:         "cairn: declarative host and tooling management",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// main cancels the context on SIGINT/SIGTERM; a command that has
+		// not started yet does not start.
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			running.Store(cmd)
+			return ctxOf(cmd).Err()
+		},
 	}
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
@@ -28,5 +34,8 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newHostCmd())
 	root.AddCommand(newInitCmd())
+	root.PersistentFlags().String("socket", "", "tmux server socket name (tmux -L); default $CAIRN_TMUX_SOCKET, else tmux's default server")
+	root.AddCommand(newProjectCmd(), newWsPlanCmd(), newWsApplyCmd(), newWsUpCmd(), newWsOpenCmd(),
+		newWsStatusCmd(), newHistoryCmd(), newUndoCmd(), newCaptureCmd(), newAdoptCmd(), newTmuxCmd())
 	return root
 }

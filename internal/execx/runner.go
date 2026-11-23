@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Runner runs a command and returns its combined output.
@@ -13,11 +14,21 @@ type Runner interface {
 	Run(ctx context.Context, name string, args ...string) ([]byte, error)
 }
 
-// OSRunner runs real commands.
-type OSRunner struct{}
+// OSRunner runs real commands. Env, when non-nil, is the complete
+// environment of the child ("KEY=value" pairs); nil inherits the caller's.
+type OSRunner struct {
+	Env []string
+}
 
-func (OSRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+func (r OSRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	// A grandchild holding the output pipe open must not block Run forever
+	// after ctx is cancelled.
+	cmd.WaitDelay = 5 * time.Second
+	if r.Env != nil {
+		cmd.Env = r.Env
+	}
+	return cmd.CombinedOutput()
 }
 
 // Response is a canned result for FakeRunner.

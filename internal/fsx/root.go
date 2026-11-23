@@ -6,9 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // Root anchors absolute paths under Dir. Dir "/" is the real system.
@@ -22,6 +24,9 @@ func (r Root) Path(p string) string {
 func (r Root) ReadFile(p string) ([]byte, error) { return os.ReadFile(r.Path(p)) }
 
 func (r Root) Stat(p string) (fs.FileInfo, error) { return os.Stat(r.Path(p)) }
+
+// Lstat is Stat without following a final symlink.
+func (r Root) Lstat(p string) (fs.FileInfo, error) { return os.Lstat(r.Path(p)) }
 
 func (r Root) MkdirAll(p string, perm fs.FileMode) error { return os.MkdirAll(r.Path(p), perm) }
 
@@ -80,6 +85,72 @@ func (r Root) WriteAtomic(p string, data []byte, perm fs.FileMode) error {
 	}
 	defer func() { _ = d.Close() }()
 	return d.Sync()
+}
+
+// CreateExclusive creates p with data only when nothing exists at p: the
+// content is written and fsynced to a temp file in the same directory, then
+// hard-linked to p (which fails atomically when p exists), the temp file is
+// removed and the directory fsynced. An existing p gives an error matching
+// fs.ErrExist and is left untouched.
+func (r Root) CreateExclusive(p string, data []byte, perm fs.FileMode) error {
+	full := r.Path(p)
+	dir := filepath.Dir(full)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(full)+".tmp*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer func() { _ = os.Remove(name) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := link(name, full); err != nil {
+		return linkError(full, err)
+	}
+	if err := os.Remove(name); err != nil {
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	return d.Sync()
+}
+
+// link is os.Link; tests replace it to simulate a filesystem without hard links.
+var link = os.Link
+
+// linkError turns the errors of a filesystem that cannot hard-link into one
+// that says so. There is deliberately no fallback: creating p with O_EXCL and
+// writing into it would expose a partly written file after a crash, and a
+// rename would silently replace an existing p. An existing p (fs.ErrExist)
+// and other errors pass through unchanged.
+func linkError(p string, err error) error {
+	if errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	for _, e := range []error{syscall.EPERM, syscall.ENOTSUP, syscall.EOPNOTSUPP, syscall.EXDEV} {
+		if errors.Is(err, e) {
+			return fmt.Errorf("cannot create %s without overwriting: the filesystem does not support hard links (%w); put the config directory on a filesystem that does, or create the file by hand", p, err)
+		}
+	}
+	return err
 }
 
 // Header returns the marker line placed at the top of files managed by cairn.

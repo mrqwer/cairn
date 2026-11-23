@@ -1,0 +1,12 @@
+id = "bad"
+name = "Bad"
+root = "/home/u/bad"
+
+[[windows]]
+key = "main"
+name = "main"
+
+[[windows.panes]]
+
+[[windows.panes]]
+splitt = "h"

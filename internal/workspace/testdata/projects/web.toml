@@ -1,0 +1,7 @@
+id = "web"
+name = "Web"
+root = "~/web"
+tags = ["frontend"]
+
+[[windows]]
+name = "Main Shell"

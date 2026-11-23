@@ -20,7 +20,7 @@ const (
 	hibD     = "/etc/systemd/system/systemd-hibernate.service.d"
 	entry    = "/boot/loader/entries/arch.conf"
 	fallback = "/boot/loader/entries/arch-fallback.conf"
-	swapPath = "/hibernate-swap/swapfile"
+	swapPath = "/swap/hibernate.swap"
 	kernel   = "6.1.0-test"
 )
 
@@ -152,14 +152,14 @@ func TestRepairUpdatesResumeOffset(t *testing.T) {
 	put(t, root, entry, orig)
 	put(t, root, "/boot/loader/entries/other.conf", "title Other\nlinux /vmlinuz-linux-lts\noptions rw resume_offset=5\n")
 
-	p := Plan(root, sys, config.Sleep{}, offsetFn(61112320))
+	p := Plan(root, sys, config.Sleep{}, offsetFn(20971520))
 	if len(p.Actions) != 1 || p.Actions[0].Path != entry {
 		t.Fatalf("actions %+v", p.Actions)
 	}
 	inv := apply(t, root, p)
 
 	got, _ := root.ReadFile(entry)
-	want := strings.Replace(orig, "resume_offset=1", "resume_offset=61112320", 1)
+	want := strings.Replace(orig, "resume_offset=1", "resume_offset=20971520", 1)
 	if string(got) != want {
 		t.Fatalf("entry:\n%s\nwant:\n%s", got, want)
 	}
@@ -173,7 +173,7 @@ func TestRepairUpdatesResumeOffset(t *testing.T) {
 		t.Fatal("entry for another kernel changed")
 	}
 	// Second run: nothing to change.
-	if p := Plan(root, sys, config.Sleep{}, offsetFn(61112320)); len(p.Actions) != 0 {
+	if p := Plan(root, sys, config.Sleep{}, offsetFn(20971520)); len(p.Actions) != 0 {
 		t.Fatalf("second plan %+v", p.Actions)
 	}
 }
@@ -220,8 +220,8 @@ func TestRepairNoDeviceIsReported(t *testing.T) {
 func TestRepairOtherBootLoaderNote(t *testing.T) {
 	root, sys, _ := fixture(t)
 	sys.BootLoader = "grub"
-	p := Plan(root, sys, config.Sleep{}, offsetFn(61112320))
-	want := "boot loader grub: set resume=UUID=x resume_offset=61112320 on the kernel command line manually"
+	p := Plan(root, sys, config.Sleep{}, offsetFn(20971520))
+	want := "boot loader grub: set resume=UUID=x resume_offset=20971520 on the kernel command line manually"
 	if len(p.Actions) != 0 || !strings.Contains(strings.Join(p.Notes, "\n"), want) {
 		t.Fatalf("actions %+v notes %q", p.Actions, p.Notes)
 	}
@@ -255,7 +255,7 @@ func TestRepairPartitionSwap(t *testing.T) {
 	put(t, root, "/sys/dev/block/259:3/uevent", "MAJOR=259\nMINOR=3\nDEVNAME=nvme0n1p3\nDEVTYPE=partition\n")
 	fr.Responses["blkid -s UUID -o value /dev/nvme0n1p3"] = execx.Response{Out: []byte("part\n")}
 	sys.Swaps = []detect.Swap{{Path: "/dev/zram0", Type: "partition", Priority: -100}, {Path: "/dev/nvme0n1p3", Type: "partition", Priority: -2}}
-	put(t, root, entry, "linux /vmlinuz-linux\noptions rw resume_offset=61112320\n")
+	put(t, root, entry, "linux /vmlinuz-linux\noptions rw resume_offset=20971520\n")
 	p := Plan(root, sys, config.Sleep{}, offsetFn(5))
 	if len(p.Actions) != 1 || string(p.Actions[0].Content) != "linux /vmlinuz-linux\noptions rw resume_offset=0 resume=UUID=part\n" {
 		t.Fatalf("actions %+v notes %q", p.Actions, p.Notes)

@@ -1,0 +1,13 @@
+# Example profile: Arch Linux laptop, NVIDIA GPU, swap file on ext4, systemd-boot, GNOME.
+# Copy to ~/.config/cairn/cairn.toml and adjust. Everything not set here uses the defaults.
+
+[host.sleep]
+lid = "suspend-then-hibernate"
+hibernate_after = "15min"
+
+[host.sleep.hibernation_swap]
+path = "/swap/hibernate.swap"        # `cairn init --host` detects this
+
+[host.gpu.nvidia]
+manage = true
+temporary_file_path = "/home/nvidia-suspend"   # needs room for the GPU's whole video memory

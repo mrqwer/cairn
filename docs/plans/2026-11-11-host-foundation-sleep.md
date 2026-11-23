@@ -212,7 +212,7 @@ testdata/                         fixture system trees per task
   Sources: `systemctl --version` (first number), `/etc/os-release` `ID`, package manager by binary presence (`pacman`, `apt-get`, `dnf`), GPU `nvidia` if `/sys/module/nvidia` exists, boot loader `systemd-boot` if `/boot/loader/loader.conf` exists else `grub` if `/boot/grub/grub.cfg` else `unknown`, desktop from `XDG_CURRENT_DESKTOP` (lowercased, `gnome` if it contains GNOME), kernel `uname -r`, modules present = `/usr/lib/modules/<kernel>` exists, initramfs resume: mkinitcpio `HOOKS` contains `resume` or `systemd` → Yes, `/etc/dracut.conf` present → Yes, else Unknown.
 
 - [ ] **Step 1: Write failing tests**
-  - `TestDetectArchNvidia` on the fixture with FakeRunner (`systemctl --version` → `systemd 262 (262.1-1-arch)`, `uname -r` → `7.2.11-arch1-1`): expect Distro `arch`, SystemdVersion 262, PkgManager `pacman`, GPU `nvidia`, BootLoader `systemd-boot`, 3 swaps, Resume `{259:3 61112320}`, MemSleepDeep true, InitramfsResume Yes, `NvidiaParams["TemporaryFilePath"] == "\"/var/tmp\""`, UPowerDropIns true.
+  - `TestDetectArchNvidia` on the fixture with FakeRunner (`systemctl --version` → `systemd 262 (262.1-1-arch)`, `uname -r` → `7.2.11-arch1-1`): expect Distro `arch`, SystemdVersion 262, PkgManager `pacman`, GPU `nvidia`, BootLoader `systemd-boot`, 3 swaps, Resume `{259:3 20971520}`, MemSleepDeep true, InitramfsResume Yes, `NvidiaParams["TemporaryFilePath"] == "\"/var/tmp\""`, UPowerDropIns true.
   - `TestKernelModulesMissing`: no `/usr/lib/modules/7.2.11-arch1-1` in fixture → `KernelModulesPresent == false`.
 - [ ] **Step 2: Run** — Expected: FAIL.
 - [ ] **Step 3: Implement.**
@@ -244,7 +244,7 @@ testdata/                         fixture system trees per task
   - `TestApplyIsIdempotent` (Review Focus 1): apply a plan, re-resolve the same desired actions → `Pending()` empty; `Render` prints `nothing to do`.
   - `TestApplyRefusesModifiedByUser` (Review Focus 2): returns `ErrModifiedByUser`; with `Force` overwrites and updates sha.
   - `TestForeignFileBackedUp`: original content saved under `var/lib/cairn/host/backup/` and `Entry.Backup` set.
-  - `TestAllowedRootPath`: allows `/etc/systemd/sleep.conf.d/50-cairn.conf` and `/home/.nvidia-suspend` when passed in `extra`; rejects `/etc/passwd`, `/etc/systemd/sleep.conf.d/../../passwd`, `/etc/systemd/system/sshd.service`.
+  - `TestAllowedRootPath`: allows `/etc/systemd/sleep.conf.d/50-cairn.conf` and `/home/nvidia-suspend` when passed in `extra`; rejects `/etc/passwd`, `/etc/systemd/sleep.conf.d/../../passwd`, `/etc/systemd/system/sshd.service`.
   - `TestCheckSelfOwnership` (Review Focus 5): binary in a temp dir owned by the test user → error mentioning `sudo install`; skip the positive case unless running as root.
 - [ ] **Step 2: Run** `go test ./internal/plan/` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
@@ -300,8 +300,8 @@ testdata/                         fixture system trees per task
   - CLI `cairn host sleep-check [--record]`: runs checks, prints doctor table; with `--record` writes `/var/lib/cairn/host/sleep-check.json` and, on any Crit, appends `sleep.check.failed` (data: failed IDs) and exits 1 (makes `ExecStartPre` fail → `OnFailure` fallback). The same checks are registered with `cairn doctor host`; when not root, `sleep.resume.match` reads the result from `sleep-check.json` (age shown in evidence) instead of calling FIEMAP.
 
 - [ ] **Step 1: Write failing tests**
-  - `TestChecksAllGreen`: fixture system, offset func returns 61112320, devOf returns `259:3` → all OK.
-  - `TestResumeOffsetMismatch`: offset returns 999 → `sleep.resume.match` Crit, evidence contains `61112320` and `999`.
+  - `TestChecksAllGreen`: fixture system, offset func returns 20971520, devOf returns `259:3` → all OK.
+  - `TestResumeOffsetMismatch`: offset returns 999 → `sleep.resume.match` Crit, evidence contains `20971520` and `999`.
   - `TestKernelMismatchCrit`.
   - `TestSwapTooSmall`: image_size 8 GiB, swap free 4 GiB → Crit.
   - `TestFirstPhysicalOffsetOnRealFile`: create a 1 MiB file in `t.TempDir()`, `fsync`; `FirstPhysicalOffset` returns > 0 or `t.Skip` if the filesystem returns `ENOTSUP`/`EOPNOTSUPP` (e.g. tmpfs).
@@ -366,7 +366,7 @@ binary.LittleEndian.PutUint32(buf[24:], 1)             // fm_extent_count = 1
   - VRAM size from `nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits` (MiB) via the runner; Unknown if unavailable.
 
 - [ ] **Step 1: Write failing tests**
-  - `TestMaskReplacesTemporaryPath`: vendor fixture → generated file contains `blacklist nouveau`, `softdep nvidia post: nvidia-uvm nvidia-drm`, and `options nvidia NVreg_TemporaryFilePath=/home/.nvidia-suspend NVreg_PreserveVideoMemoryAllocations=1`, and no `=/var/tmp`.
+  - `TestMaskReplacesTemporaryPath`: vendor fixture → generated file contains `blacklist nouveau`, `softdep nvidia post: nvidia-uvm nvidia-drm`, and `options nvidia NVreg_TemporaryFilePath=/home/nvidia-suspend NVreg_PreserveVideoMemoryAllocations=1`, and no `=/var/tmp`.
   - `TestForeignMaskBackedUpAndRestored` (Review Focus 3): pre-existing `/etc/modprobe.d/nvidia-utils.conf` in temp root → after apply, backup exists; after `uninstall` (Task 13) original content is back. (Write the uninstall half in Task 13's tests; here assert backup + inventory entry.)
   - `TestParamsMismatchWarnsReboot`, `TestNotEnoughSpaceCrit`.
 - [ ] **Step 2: Run** — Expected: FAIL.
@@ -399,8 +399,8 @@ binary.LittleEndian.PutUint32(buf[24:], 1)             // fm_extent_count = 1
 - [ ] **Step 1: Write failing tests**
   - `TestRoundTrip` (e2e in a temp root with FakeRunner): fixture system → `apply` → all generated files present, inventory complete → second plan has no pending actions → `uninstall` → every generated file gone, foreign `nvidia-utils.conf` restored byte-for-byte, gsetting restored to its previous value, `plan` shows only `create` actions again.
   - `TestRepairRemovesConflictingFallback`: fixture with `systemd-hibernate.service.d/fallback.conf` (`OnFailure=sleep-fallback.service`) and `sleep-fallback.service` → both backed up and removed; `50-cairn.conf` untouched.
-  - `TestInitWritesOnlyDetectedSwap`: fixture with two file swaps (pri 20 and -10) → written config contains `path = "/hibernate-swap/swapfile"` and nothing else under `[host]`; second run leaves the file untouched.
-  - `TestRepairUpdatesResumeOffset`: entry `options ... resume=UUID=x resume_offset=1` with offset func returning 61112320 → options line ends with `resume_offset=61112320`, other options unchanged, backup present.
+  - `TestInitWritesOnlyDetectedSwap`: fixture with two file swaps (pri 20 and -10) → written config contains `path = "/swap/hibernate.swap"` and nothing else under `[host]`; second run leaves the file untouched.
+  - `TestRepairUpdatesResumeOffset`: entry `options ... resume=UUID=x resume_offset=1` with offset func returning 20971520 → options line ends with `resume_offset=20971520`, other options unchanged, backup present.
 - [ ] **Step 2: Run** `go test ./...` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `go test ./... && just lint` — Expected: PASS, no lint errors.

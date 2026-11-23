@@ -1,0 +1,6 @@
+id = "other"
+name = "Mismatch"
+root = "/home/u/x"
+
+[[windows]]
+key = "main"
