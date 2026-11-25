@@ -17,6 +17,9 @@ const (
 	Warn
 	Crit
 	Unknown
+	// Skip: not applicable or not checkable here (a tool not installed).
+	// Never fails.
+	Skip
 )
 
 func (s Status) String() string {
@@ -27,6 +30,8 @@ func (s Status) String() string {
 		return "warn"
 	case Crit:
 		return "CRIT"
+	case Skip:
+		return "skip"
 	default:
 		return "?"
 	}
@@ -79,7 +84,7 @@ func Render(w io.Writer, rs []Result) {
 	for _, r := range rs {
 		line := fmt.Sprintf("%-4s  %s  %s", r.Status, r.Title, r.Evidence)
 		_, _ = fmt.Fprintln(w, strings.TrimRight(line, " "))
-		if r.Status != OK && r.Fix != "" {
+		if r.Status != OK && r.Status != Skip && r.Fix != "" {
 			_, _ = fmt.Fprintf(w, "      fix: %s\n", r.Fix)
 		}
 	}

@@ -14,6 +14,14 @@ const (
 	RoleEditor  = "editor"
 	RoleCommand = "command"
 	RoleService = "service"
+	// RoleAgent is a pane bound to an agent conversation; its command is
+	// implied ("cairn agents pane <agent>") and never written as run.
+	RoleAgent = "agent"
+
+	// AgentWindow is the window key agent panes are added to by default.
+	AgentWindow = "agents"
+	// TaskWindowPrefix starts the window key of a task ("task-<slug>").
+	TaskWindowPrefix = "task-"
 
 	RestartNever     = "never"
 	RestartOnFailure = "on-failure"
@@ -39,6 +47,8 @@ type Pane struct {
 	From    int      `toml:"from"`
 	Size    int      `toml:"size"`
 	Title   string   `toml:"title"`
+	// Agent is the conversation id shown by a pane with role "agent".
+	Agent string `toml:"agent"`
 }
 
 // Window is one tmux window; panes are created by a split sequence.
@@ -50,13 +60,23 @@ type Window struct {
 
 // Project is the config of one managed tmux session.
 type Project struct {
-	ID      string   `toml:"id"`
-	Name    string   `toml:"name"`
-	Root    string   `toml:"root"`
-	Session string   `toml:"session"`
-	Status  string   `toml:"status"`
-	Tags    []string `toml:"tags"`
-	Windows []Window `toml:"windows"`
+	ID      string        `toml:"id"`
+	Name    string        `toml:"name"`
+	Root    string        `toml:"root"`
+	Session string        `toml:"session"`
+	Status  string        `toml:"status"`
+	Tags    []string      `toml:"tags"`
+	Windows []Window      `toml:"windows"`
+	Agents  ProjectAgents `toml:"agents"`
+}
+
+// ProjectAgents are the agent settings of a project ([agents]): the
+// profile used when neither the conversation nor its task names one, and
+// the acknowledgement that lets profiles pass flags that skip a tool's
+// permission checks (only per project, never global; spec §9.7).
+type ProjectAgents struct {
+	DefaultProfile     string `toml:"default_profile"`
+	IUnderstandTheRisk bool   `toml:"i_understand_the_risk"`
 }
 
 var (

@@ -13,7 +13,10 @@ import (
 // string; longer argv runs directly without a shell. Panes with Argv (or with
 // RemainOnExit) keep their dead pane when the program exits.
 type PaneSpec struct {
-	Key, Cwd     string
+	Key, Cwd string
+	// Agent is the conversation id of an agent pane, set as @cairn_agent:
+	// the pane's identity, independent of its positional key.
+	Agent        string
 	Argv         []string
 	Env          map[string]string
 	RemainOnExit bool
@@ -64,6 +67,9 @@ func checkArgv(argv []string) error {
 func checkPane(p PaneSpec) error {
 	if p.Key != "" && !threeParts(p.Key) {
 		return fmt.Errorf("tmux: pane key %q must be <project>/<window>/<n>", p.Key)
+	}
+	if p.Agent != "" && !ValidAgentID(p.Agent) {
+		return fmt.Errorf("tmux: agent id %q is not valid", p.Agent)
 	}
 	return checkArgv(p.Argv)
 }
@@ -142,7 +148,13 @@ func (c Client) paneMarker(ctx context.Context, id string, p PaneSpec) error {
 	if p.Key == "" {
 		return nil
 	}
-	return c.SetOption(ctx, "pane", id, "@cairn_p", p.Key)
+	if err := c.SetOption(ctx, "pane", id, "@cairn_p", p.Key); err != nil {
+		return err
+	}
+	if p.Agent == "" {
+		return nil
+	}
+	return c.SetOption(ctx, "pane", id, AgentOption, p.Agent)
 }
 
 func (c Client) setupWindow(ctx context.Context, id string, win WindowSpec) error {

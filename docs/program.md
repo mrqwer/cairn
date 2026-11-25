@@ -11,7 +11,7 @@ The workspace is the product, so it comes first; `host` is an optional add-on.
 | # | Project | Dir | Depends on | Status |
 |---|---|---|---|---|
 | 1 | Workspace engine (M1) | `engine/` | foundation | implemented, e2e verified |
-| 2 | AI agent sessions (M2–M5) | `agents/` | 1 | design |
+| 2 | AI agent sessions (M2–M5) | `agents/` | 1 | building: M2 implemented (conversations, tasks, finish records, doctor, find/import, profiles, usage); notifications, daemon, fork and quota status not yet |
 | 3 | Knowledge & playbooks | `knowledge/` | 2 (task records) | idea |
 | 4 | Config hub | `confighub/` | 1 | idea |
 | 5 | Surfaces (TUI + web) | `ui/` | 1, 2, 3, 4 | idea |

@@ -154,12 +154,28 @@ func (l *loader) applyEnv(getenv func(string) string) error {
 			continue
 		}
 		var v any = raw
-		if _, isBool := defaults[k].(bool); isBool {
+		switch defaults[k].(type) {
+		case []any:
+			// A list: comma separated, blanks dropped.
+			list := []any{}
+			for _, e := range strings.Split(raw, ",") {
+				if e = strings.TrimSpace(e); e != "" {
+					list = append(list, e)
+				}
+			}
+			v = list
+		case bool:
 			b, err := strconv.ParseBool(raw)
 			if err != nil {
 				return fmt.Errorf("config: %s: %q is not a boolean", name, raw)
 			}
 			v = b
+		case int64:
+			n, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				return fmt.Errorf("config: %s: %q is not an integer", name, raw)
+			}
+			v = n
 		}
 		l.set(k, v, Origin{Layer: "env", File: name})
 	}

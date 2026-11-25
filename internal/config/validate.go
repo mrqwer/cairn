@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -13,6 +14,17 @@ import (
 type FieldError struct{ Key, Msg string }
 
 func (e FieldError) Error() string { return e.Key + ": " + e.Msg }
+
+var remoteRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// ValidRemoteName reports whether name is a git remote name cairn passes
+// to git (tasks.pr_remote): [A-Za-z0-9._-], not starting with - or ., no "..".
+func ValidRemoteName(name string) bool {
+	return remoteRe.MatchString(name) && !strings.Contains(name, "..")
+}
+
+// branchPrefixRe matches task.ValidBranchPrefix.
+var branchPrefixRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*(/[A-Za-z0-9][A-Za-z0-9_-]*)*$`)
 
 const (
 	minHibernateAfter = time.Minute
@@ -30,6 +42,60 @@ func oneOf(key, val string, allowed ...string) *FieldError {
 
 // Validate checks value ranges and enumerations.
 func (c *Config) Validate() []FieldError {
+	return append(c.ValidateHost(), c.validateAgents()...)
+}
+
+// validateAgents checks the tasks and agents keys.
+func (c *Config) validateAgents() []FieldError {
+	var errs []FieldError
+	if e := oneOf("tasks.default_isolation", c.Tasks.DefaultIsolation, "ask", "worktree", "here"); e != nil {
+		errs = append(errs, *e)
+	}
+	if !branchPrefixRe.MatchString(c.Tasks.BranchPrefix) {
+		errs = append(errs, FieldError{"tasks.branch_prefix",
+			fmt.Sprintf("%q must be /-separated parts of [A-Za-z0-9_-], each starting with a letter or digit", c.Tasks.BranchPrefix)})
+	}
+	if r := c.Tasks.WorktreeRoot; r != "" {
+		p := r
+		if strings.HasPrefix(r, "~/") {
+			p = "/" + r[2:]
+		}
+		if msg := checkPath(p); msg != "" || p == "/" {
+			errs = append(errs, FieldError{"tasks.worktree_root", fmt.Sprintf("%q must be an absolute clean path or start with ~/", r)})
+		}
+	}
+	if v := c.Tasks.DiffViewer; len(strings.Fields(v)) == 0 || strings.ContainsFunc(v, func(r rune) bool { return r < ' ' && r != '\t' || r == 0x7f }) {
+		errs = append(errs, FieldError{"tasks.diff_viewer", fmt.Sprintf("%q must be a command (split on spaces, no shell)", v)})
+	}
+	if e := oneOf("tasks.pr_tool", c.Tasks.PRTool, "", "gh", "glab"); e != nil {
+		errs = append(errs, *e)
+	}
+	if !ValidRemoteName(c.Tasks.PRRemote) {
+		errs = append(errs, FieldError{"tasks.pr_remote", fmt.Sprintf("%q must be a git remote name ([A-Za-z0-9._-], not starting with - or .)", c.Tasks.PRRemote)})
+	}
+	for _, b := range c.Tasks.GateBanned {
+		if strings.TrimSpace(b) == "" {
+			errs = append(errs, FieldError{"tasks.gate_banned", "a phrase is empty or blank: it would match every record"})
+			break
+		}
+	}
+	if r := c.Knowledge.Root; r != "" {
+		p := r
+		if strings.HasPrefix(r, "~/") {
+			p = "/" + r[2:]
+		}
+		if msg := checkPath(p); msg != "" || p == "/" {
+			errs = append(errs, FieldError{"knowledge.root", fmt.Sprintf("%q must be an absolute clean path or start with ~/", r)})
+		}
+	}
+	if c.Agents.MaxRunning < 0 {
+		errs = append(errs, FieldError{"agents.max_running", fmt.Sprintf("%d is negative (0 is no limit)", c.Agents.MaxRunning)})
+	}
+	return errs
+}
+
+// ValidateHost checks the host keys only (what the root side receives).
+func (c *Config) ValidateHost() []FieldError {
 	var errs []FieldError
 	add := func(e *FieldError) {
 		if e != nil {

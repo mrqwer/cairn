@@ -185,10 +185,10 @@ type jsonResult struct {
 func newDoctorCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:       "doctor [host|workspace]",
-		Short:     "Run health checks (host, workspace, or both)",
+		Use:       "doctor [host|workspace|agents]",
+		Short:     "Run health checks (host, workspace, agents, or all)",
 		Args:      cobra.MatchAll(cobra.MaximumNArgs(1), cobra.OnlyValidArgs),
-		ValidArgs: []string{"host", "workspace"},
+		ValidArgs: []string{"host", "workspace", "agents"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
 			scope, title := "", "cairn doctor"
@@ -197,19 +197,28 @@ func newDoctorCmd() *cobra.Command {
 				title += " · " + scope
 			}
 			var checks []doctor.Check
-			if scope != "workspace" {
+			if scope == "" || scope == "host" {
 				hc, err := hostChecks(cmd.Context())
 				if err != nil {
 					return err
 				}
 				checks = append(checks, hc...)
 			}
-			if scope != "host" {
+			if scope == "" || scope == "workspace" {
 				wc, err := workspaceChecks(ctx, socketName(cmd))
 				if err != nil {
 					wc = []doctor.Check{wsdoctor.Failed(wsdoctor.IDConfig, "Workspace config", doctor.Crit, err)}
 				}
 				checks = append(checks, wc...)
+			}
+			if scope == "" || scope == "agents" {
+				ac, err := agentsChecks(ctx)
+				if err != nil {
+					ac = []doctor.Check{check{"agents.config", "Agent adapters", func(context.Context) doctor.Result {
+						return doctor.Result{Status: doctor.Crit, Evidence: err.Error()}
+					}}}
+				}
+				checks = append(checks, ac...)
 			}
 			rs := doctor.Run(ctx, checks)
 			if asJSON {

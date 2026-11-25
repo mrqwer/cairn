@@ -1,0 +1,58 @@
+name = "claude"
+binary = "claude"
+version_check = ["claude", "--version"]
+# Help commands `cairn agents doctor` reads to check the flags used exist.
+probe_flags = [["claude", "--help"], ["claude", "agents", "--help"]]
+# Flags that skip permission checks: a profile or command using one is
+# allowed only in a project with i_understand_the_risk = true.
+risky_flags = ["--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--permission-mode bypassPermissions"]
+
+# agents usage asks ccusage (optional) for this tool's sessions.
+usage = "ccusage"
+
+[capabilities]
+name_at_start = true
+preassign_id = true
+resume_by_id = true
+resume_by_name = true
+fork = true
+list_json = true
+hooks = "settings-file"
+
+[commands]
+start = ["claude", "--session-id", "{id}", "--name", "{name}", "{profile_args...}"]
+resume = ["claude", "--resume", "{id}", "{profile_args...}"]
+fork = ["claude", "--resume", "{id}", "--fork-session", "--session-id", "{new_id}"]
+list = ["claude", "agents", "--json", "--all"]
+
+[profile_flags]
+model = ["--model", "{value}"]
+effort = ["--effort", "{value}"]
+permission_mode = ["--permission-mode", "{value}"]
+
+# Values the tool takes; a profile with another value is refused (give
+# per-tool values in [profiles.<name>.claude]).
+[profile_values]
+permission_mode = ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "manual", "plan"]
+
+[env]
+unset = ["ANTHROPIC_API_KEY"]
+
+[history]
+locator = "~/.claude/projects/*/{native_id}.jsonl"
+parser = "claude-jsonl@1"
+
+# Hooks go in a cairn-owned settings file passed with --settings at launch;
+# the user's own ~/.claude settings are never edited. Each event runs
+# `cairn event --conversation <id> --kind <kind>`.
+[hooks]
+flag = "--settings"
+format = "claude-settings@1"
+
+[hooks.events]
+SessionStart = "ready"
+UserPromptSubmit = "working"
+PostToolUse = "working"
+Notification = "waiting"
+Stop = "idle"
+SessionEnd = "stopped"

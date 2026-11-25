@@ -251,3 +251,105 @@ func TestTestdataFixture(t *testing.T) {
 		t.Errorf("cfg = %+v", cfg.Host.Sleep)
 	}
 }
+
+func TestTaskAndAgentKeys(t *testing.T) {
+	root := fsx.Root{Dir: t.TempDir()}
+	cfg, prov, err := config.Load(root, testDirs, env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tasks.DefaultIsolation != "ask" || cfg.Tasks.BranchPrefix != "task" || cfg.Tasks.WorktreeRoot != "" || cfg.Agents.MaxRunning != 4 {
+		t.Fatalf("defaults %+v %+v", cfg.Tasks, cfg.Agents)
+	}
+	if got, _ := config.Explain(cfg, prov, "agents.max_running"); got != "4  defaults  (embedded)" {
+		t.Fatalf("explain %q", got)
+	}
+	cfg, _, err = config.Load(root, testDirs, env(map[string]string{
+		"CAIRN_AGENTS_MAX_RUNNING": "2", "CAIRN_TASKS_DEFAULT_ISOLATION": "here"}))
+	if err != nil || cfg.Agents.MaxRunning != 2 || cfg.Tasks.DefaultIsolation != "here" {
+		t.Fatalf("env: %+v %v", cfg, err)
+	}
+	if _, _, err := config.Load(root, testDirs, env(map[string]string{"CAIRN_AGENTS_MAX_RUNNING": "many"})); err == nil ||
+		!strings.Contains(err.Error(), "CAIRN_AGENTS_MAX_RUNNING") {
+		t.Fatalf("bad int: %v", err)
+	}
+	cfg = loadUser(t, `[tasks]
+default_isolation = "sometimes"
+branch_prefix = "-x"
+worktree_root = "rel/dir"
+[agents]
+max_running = -1
+`)
+	got := keys(cfg.Validate())
+	for _, k := range []string{"tasks.default_isolation", "tasks.branch_prefix", "tasks.worktree_root", "agents.max_running"} {
+		if !got[k] {
+			t.Errorf("no error for %s: %v", k, got)
+		}
+	}
+	cfg = loadUser(t, "[tasks]\nworktree_root = \"~/worktrees\"\nbranch_prefix = \"me/task\"\n")
+	if errs := cfg.Validate(); len(errs) != 0 {
+		t.Fatalf("valid values refused: %v", errs)
+	}
+}
+
+func TestTaskFinishKeys(t *testing.T) {
+	root := fsx.Root{Dir: t.TempDir()}
+	cfg, _, err := config.Load(root, testDirs, env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tasks.DiffViewer != "git diff" || cfg.Tasks.PRTool != "" || cfg.Tasks.PRRemote != "origin" {
+		t.Fatalf("defaults %+v", cfg.Tasks)
+	}
+	cfg = loadUser(t, "[tasks]\ndiff_viewer = \" \"\npr_tool = \"curl\"\npr_remote = \"--upload-pack=x\"\n")
+	got := keys(cfg.Validate())
+	for _, k := range []string{"tasks.diff_viewer", "tasks.pr_tool", "tasks.pr_remote"} {
+		if !got[k] {
+			t.Errorf("no error for %s: %v", k, got)
+		}
+	}
+	cfg = loadUser(t, "[tasks]\ndiff_viewer = \"delta --side-by-side\"\npr_tool = \"glab\"\npr_remote = \"upstream\"\n")
+	if errs := cfg.Validate(); len(errs) != 0 {
+		t.Fatalf("valid values refused: %v", errs)
+	}
+}
+
+func TestRecordKeys(t *testing.T) {
+	root := fsx.Root{Dir: t.TempDir()}
+	cfg, _, err := config.Load(root, testDirs, env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Knowledge.Root != "" || len(cfg.Tasks.GateBanned) != 0 {
+		t.Fatalf("defaults %+v %+v", cfg.Knowledge, cfg.Tasks.GateBanned)
+	}
+	cfg = loadUser(t, "[knowledge]\nroot = \"~/kb\"\n[tasks]\ngate_banned = [\"holistic\", \"надёжный\"]\n")
+	if errs := cfg.Validate(); len(errs) != 0 || cfg.Knowledge.Root != "~/kb" || len(cfg.Tasks.GateBanned) != 2 {
+		t.Fatalf("%+v %v", cfg, errs)
+	}
+	if v, ok := cfg.Value("tasks.gate_banned"); !ok || v != "holistic, надёжный" {
+		t.Fatalf("value %q %v", v, ok)
+	}
+	if v, ok := cfg.Value("knowledge.root"); !ok || v != "~/kb" {
+		t.Fatalf("value %q %v", v, ok)
+	}
+	cfg, _, err = config.Load(root, testDirs, env(map[string]string{"CAIRN_TASKS_GATE_BANNED": "a, b,,c"}))
+	if err != nil || strings.Join(cfg.Tasks.GateBanned, "|") != "a|b|c" {
+		t.Fatalf("env: %+v %v", cfg.Tasks.GateBanned, err)
+	}
+	cfg = loadUser(t, "[knowledge]\nroot = \"rel/kb\"\n[tasks]\ngate_banned = [\"ok\", \" \"]\n")
+	got := keys(cfg.Validate())
+	if !got["knowledge.root"] || !got["tasks.gate_banned"] {
+		t.Fatalf("no error: %v", got)
+	}
+}
+
+// The acknowledgement of risky agent flags exists per project only; the
+// global config must refuse it (spec §9.7).
+func TestGlobalRiskAcknowledgementRefused(t *testing.T) {
+	root := fsx.Root{Dir: t.TempDir()}
+	write(t, root, filepath.Join(testDirs.Config, "cairn.toml"), "[agents]\ni_understand_the_risk = true\n")
+	if _, _, err := config.Load(root, testDirs, env(nil)); err == nil || !strings.Contains(err.Error(), "i_understand_the_risk") {
+		t.Fatalf("a global i_understand_the_risk must be an error, got %v", err)
+	}
+}

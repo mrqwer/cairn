@@ -71,3 +71,17 @@ func TestStatusString(t *testing.T) {
 		}
 	}
 }
+
+func TestSkipIsDistinctAndNeverFails(t *testing.T) {
+	if Skip.String() != "skip" {
+		t.Fatalf("got %q", Skip.String())
+	}
+	if ExitCode([]Result{{Status: Skip}}) != 0 {
+		t.Fatal("skip must not fail")
+	}
+	var buf bytes.Buffer
+	Render(&buf, []Result{{Title: "Tool", Status: Skip, Evidence: "not installed", Fix: "x"}})
+	if buf.String() != "skip  Tool  not installed\n" {
+		t.Fatalf("got %q", buf.String())
+	}
+}

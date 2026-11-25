@@ -10,6 +10,7 @@ import (
 // Pane is one tmux pane. Key is its @cairn_p marker ("" when unmanaged).
 type Pane struct {
 	ID, Key                     string
+	Agent                       string // @cairn_agent ("" when not an agent pane)
 	Index, PID, Left, Top, W, H int
 	Dead                        bool
 	DeadStatus                  int
@@ -41,7 +42,7 @@ type Snapshot struct {
 const (
 	sessionFormat = "#{session_id}\t#{session_name}\t#{@cairn_s}\t#{session_attached}"
 	windowFormat  = "#{session_id}\t#{window_id}\t#{window_index}\t#{window_name}\t#{@cairn_w}\t#{window_width}\t#{window_height}"
-	paneFormat    = "#{window_id}\t#{pane_id}\t#{pane_index}\t#{@cairn_p}\t#{pane_pid}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{pane_current_path}\t#{pane_current_command}"
+	paneFormat    = "#{window_id}\t#{pane_id}\t#{pane_index}\t#{@cairn_p}\t#{pane_pid}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{@cairn_agent}\t#{pane_current_path}\t#{pane_current_command}"
 )
 
 // noServer reports whether tmux output says there is no server to talk to.
@@ -99,7 +100,7 @@ func (c Client) Snapshot(ctx context.Context) (Snapshot, error) {
 
 	panes := map[string][]Pane{}
 	for _, l := range pl {
-		f, n, ok := parseLine(l, 14, 2, 4, 5, 6, 7, 8, 10, 11)
+		f, n, ok := parseLine(l, 15, 2, 4, 5, 6, 7, 8, 10, 11)
 		if !ok {
 			snap.Skipped = append(snap.Skipped, l)
 			continue
@@ -109,9 +110,9 @@ func (c Client) Snapshot(ctx context.Context) (Snapshot, error) {
 			status = 128 + n[7] // killed by a signal: tmux has no status, report it as the shell does
 		}
 		panes[f[0]] = append(panes[f[0]], Pane{
-			ID: f[1], Key: markerKey(f[3], 2), Index: n[0], PID: n[1],
+			ID: f[1], Key: markerKey(f[3], 2), Agent: agentMarker(f[12]), Index: n[0], PID: n[1],
 			Left: n[2], Top: n[3], W: n[4], H: n[5],
-			Dead: f[9] == "1", DeadStatus: status, Cwd: f[12], Cmd: f[13],
+			Dead: f[9] == "1", DeadStatus: status, Cwd: f[13], Cmd: f[14],
 		})
 	}
 

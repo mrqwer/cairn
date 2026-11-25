@@ -134,6 +134,15 @@ func Marshal(p Project) ([]byte, error) {
 	if len(p.Tags) > 0 {
 		kv("tags", quoteList(p.Tags))
 	}
+	if p.Agents != (ProjectAgents{}) {
+		b.WriteString("\n[agents]\n")
+		if p.Agents.DefaultProfile != "" {
+			kv("default_profile", quote(p.Agents.DefaultProfile))
+		}
+		if p.Agents.IUnderstandTheRisk {
+			kv("i_understand_the_risk", "true")
+		}
+	}
 	for _, w := range p.Windows {
 		b.WriteString("\n[[windows]]\n")
 		kv("key", quote(w.Key))
@@ -163,6 +172,9 @@ func Marshal(p Project) ([]byte, error) {
 			}
 			if pn.Title != "" {
 				kv("title", quote(pn.Title))
+			}
+			if pn.Agent != "" {
+				kv("agent", quote(pn.Agent))
 			}
 		}
 	}

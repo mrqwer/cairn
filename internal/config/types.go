@@ -11,8 +11,48 @@ import (
 
 // Config is the fully merged configuration.
 type Config struct {
-	Profile string `toml:"profile"`
-	Host    Host   `toml:"host"`
+	Profile   string    `toml:"profile"`
+	Host      Host      `toml:"host"`
+	Tasks     Tasks     `toml:"tasks"`
+	Agents    Agents    `toml:"agents"`
+	Knowledge Knowledge `toml:"knowledge"`
+}
+
+// Knowledge configures where finish records are written for the
+// knowledge module.
+type Knowledge struct {
+	// Root is the directory of records, <root>/<project>/<slug>.md; empty
+	// is <State>/records; "~/" is the home directory.
+	Root string `toml:"root"`
+}
+
+// Tasks configures cairn task new, review and finish.
+type Tasks struct {
+	// DefaultIsolation is here, worktree or ask (asked on a terminal).
+	DefaultIsolation string `toml:"default_isolation"`
+	// BranchPrefix: task branches are <prefix>/<slug>.
+	BranchPrefix string `toml:"branch_prefix"`
+	// WorktreeRoot holds worktrees as <root>/<project>/<slug>; empty is
+	// <State>/worktrees; "~/" is the home directory.
+	WorktreeRoot string `toml:"worktree_root"`
+	// DiffViewer is the command of cairn task review, split on spaces (no
+	// shell); see the guide for its placeholders.
+	DiffViewer string `toml:"diff_viewer"`
+	// PRTool opens pull requests for cairn task finish --pr: "" (none:
+	// finish --pr stops with instructions), gh or glab.
+	PRTool string `toml:"pr_tool"`
+	// PRRemote is the remote finish --pr pushes to.
+	PRRemote string `toml:"pr_remote"`
+	// GateBanned adds filler phrases to those the finish record gate
+	// rejects (case-insensitive).
+	GateBanned []string `toml:"gate_banned"`
+}
+
+// Agents configures agent conversations.
+type Agents struct {
+	// MaxRunning is the most agents running at once; more starts queue.
+	// 0 is no limit.
+	MaxRunning int `toml:"max_running"`
 }
 
 // Host holds settings for the host module.

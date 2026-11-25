@@ -13,10 +13,12 @@ import (
 )
 
 // Client runs "tmux [-L Socket] ..." through R. An empty Socket means the
-// default server.
+// default server. SocketFile, when set, is used as "-S SocketFile" instead
+// (the server a pane runs in, read from its TMUX variable).
 type Client struct {
-	R      execx.Runner
-	Socket string
+	R          execx.Runner
+	Socket     string
+	SocketFile string
 }
 
 // NewClient returns a Client running the real tmux with an environment
@@ -57,6 +59,9 @@ func (c Client) runner() execx.Runner {
 // systemd user unit, cron) tmux otherwise replaces the tab separators of list
 // output with "_" and nothing parses.
 func (c Client) base() []string {
+	if c.SocketFile != "" {
+		return []string{"-u", "-S", c.SocketFile}
+	}
 	if c.Socket == "" {
 		return []string{"-u"}
 	}

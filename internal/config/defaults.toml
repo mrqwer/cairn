@@ -13,3 +13,18 @@ path = ""
 [host.gpu.nvidia]
 manage = true
 temporary_file_path = "/var/tmp"
+
+[tasks]
+default_isolation = "ask"
+branch_prefix = "task"
+worktree_root = ""
+diff_viewer = "git diff"
+pr_tool = ""
+pr_remote = "origin"
+gate_banned = []
+
+[knowledge]
+root = ""
+
+[agents]
+max_running = 4

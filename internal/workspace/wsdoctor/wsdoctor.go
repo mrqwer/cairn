@@ -110,8 +110,11 @@ func driftResult(ps []workspace.Project, snap tmux.Snapshot, haveTmux bool, root
 		return doctor.Result{Status: doctor.Unknown, Evidence: "tmux is missing, nothing to compare"}
 	}
 	drifting, attention := map[string]bool{}, map[string]bool{}
+	orphans := 0
 	for _, op := range reconcile.Plan(ps, snap, reconcile.Options{RootExists: rootExists}) {
 		switch {
+		case op.Kind == reconcile.KindReportExtra && op.Agent != "":
+			orphans++
 		case !op.IsNote():
 			drifting[op.Project] = true
 		case op.Kind == reconcile.KindSkipNameClash || op.Kind == reconcile.KindSkipLayout:
@@ -128,6 +131,13 @@ func driftResult(ps []workspace.Project, snap tmux.Snapshot, haveTmux bool, root
 	}
 	if n := len(attention); n > 0 {
 		evidence = append(evidence, fmt.Sprintf("%d %s attention: cairn plan", n, plural(n, "project needs", "projects need")))
+		if len(fix) == 0 {
+			fix = append(fix, "cairn plan")
+		}
+	}
+	if orphans > 0 {
+		evidence = append(evidence, fmt.Sprintf("%d %s a conversation that is not in the config (see cairn plan; close it or cairn agents resume it)",
+			orphans, plural(orphans, "agent pane shows", "agent panes show")))
 		if len(fix) == 0 {
 			fix = append(fix, "cairn plan")
 		}

@@ -103,10 +103,15 @@ func newHistoryCmd() *cobra.Command {
 }
 
 func newUndoCmd() *cobra.Command {
-	return &cobra.Command{
+	var force bool
+	cmd := &cobra.Command{
 		Use:   "undo [<id>]",
 		Short: "Undo a config change (the latest one by default)",
-		Args:  cobra.MaximumNArgs(1),
+		Long: "Undo a config change (the latest one by default).\n\n" +
+			"Undoing a task new also removes its worktree (only when nothing in it is work) and its branch\n" +
+			"(only without new commits). --force lets ignored files in the worktree go as well (they are\n" +
+			"listed); with an already undone task new it retries that removal.",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := openHistory()
 			if err != nil {
@@ -135,6 +140,10 @@ func newUndoCmd() *cobra.Command {
 			e, err := s.Undo(id)
 			switch {
 			case errors.Is(err, history.ErrAlreadyApplied):
+				if force && undoing.Kind == "task.new" {
+					afterTaskUndo(cmd, undoing, true)
+					return nil
+				}
 				_, _ = fmt.Fprintf(out, "event %s is already undone; nothing to do\n", id)
 				return nil
 			case errors.Is(err, history.ErrConflict):
@@ -147,6 +156,12 @@ func newUndoCmd() *cobra.Command {
 				return err
 			}
 			_, _ = fmt.Fprintf(out, "%s\nRun: cairn apply   (config only; tmux was not changed)\n", e.Summary)
+			if undoing.Kind == "task.new" {
+				afterTaskUndo(cmd, undoing, force)
+			}
+			if undoing.Kind == "task.finish" {
+				_, _ = fmt.Fprintln(out, "only the task's status is back: its merge, push or pull request is not undoable, and a removed worktree or branch is not restored")
+			}
 			if undoing.Kind == "adopt" && len(undoing.Files) == 1 {
 				project := strings.TrimSuffix(filepath.Base(undoing.Files[0].Path), ".toml")
 				_, _ = fmt.Fprintf(out, "markers on the live session remain; run: cairn adopt --release %s\n", project)
@@ -154,4 +169,6 @@ func newUndoCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&force, "force", false, "for a task new: also remove ignored files in its worktree (listed)")
+	return cmd
 }

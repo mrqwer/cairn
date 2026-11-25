@@ -213,3 +213,41 @@ func TestLoadIgnoresStaleTempFiles(t *testing.T) {
 		t.Fatalf("got %+v %v %v", ps, lerrs, err)
 	}
 }
+
+func TestAgentsTableRoundTrip(t *testing.T) {
+	src := `id = "api"
+name = "api"
+root = "/home/u/api"
+
+[agents]
+default_profile = "careful"
+i_understand_the_risk = true
+
+[[windows]]
+key = "main"
+`
+	p, err := workspace.Decode([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Agents.DefaultProfile != "careful" || !p.Agents.IUnderstandTheRisk {
+		t.Fatalf("agents %+v", p.Agents)
+	}
+	out, err := workspace.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := workspace.Decode(out)
+	if err != nil || !reflect.DeepEqual(p, q) {
+		t.Fatalf("round trip:\n%s\n%+v %v", out, q, err)
+	}
+	p.ApplyDefaults("/home/u")
+	p.Agents.DefaultProfile = "Bad Name"
+	found := false
+	for _, fe := range p.Validate() {
+		found = found || fe.Key == "agents.default_profile"
+	}
+	if !found {
+		t.Fatalf("an invalid default_profile must be reported: %v", p.Validate())
+	}
+}

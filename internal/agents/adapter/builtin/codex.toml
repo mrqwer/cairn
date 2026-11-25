@@ -1,0 +1,48 @@
+# Codex assigns its own session id; cairn discovers it after launch (directory
+# diff / start time) and keeps the conversation name itself.
+name = "codex"
+binary = "codex"
+version_check = ["codex", "--version"]
+# Help commands `cairn agents doctor` reads to check the flags used exist.
+probe_flags = [["codex", "--help"], ["codex", "resume", "--help"]]
+# Flags that skip approvals or the sandbox: allowed only in a project with
+# i_understand_the_risk = true.
+risky_flags = ["--dangerously-bypass-approvals-and-sandbox", "--yolo", "--sandbox danger-full-access"]
+
+[capabilities]
+resume_by_id = true
+hooks = "config-override"
+discovery = "dir-diff"
+
+[commands]
+start = ["codex", "{profile_args...}"]
+resume = ["codex", "resume", "{native_id}", "{profile_args...}"]
+
+[profile_flags]
+model = ["--model", "{value}"]
+permission_mode = ["--ask-for-approval", "{value}"]
+sandbox = ["--sandbox", "{value}"]
+
+# Values the tool takes; a profile with another value is refused (give
+# per-tool values in [profiles.<name>.codex]).
+[profile_values]
+permission_mode = ["untrusted", "on-failure", "on-request", "never"]
+sandbox = ["read-only", "workspace-write", "danger-full-access"]
+
+# --sandbox is passed only when a profile sets it; otherwise codex decides
+# (sandbox_mode in its config, per-project trust). agents doctor reports it.
+[sandbox_config]
+file = "~/.codex/config.toml"
+key = "sandbox_mode"
+
+[history]
+locator = "~/.codex/sessions/*/*/*/*-{native_id}.jsonl"
+parser = "codex-jsonl@1"
+
+# Per-process override `-c notify=[...]`: codex runs the program when a turn
+# completes (it appends a JSON payload, which cairn event ignores). It
+# replaces a notify program from the user's config for this process only.
+[hooks]
+flag = "-c"
+key = "notify"
+kind = "idle"

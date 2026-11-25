@@ -16,6 +16,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
 
+	"github.com/mrqwer/cairn/internal/agents/task"
+	"github.com/mrqwer/cairn/internal/config"
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/history"
 	"github.com/mrqwer/cairn/internal/tmux"
@@ -40,6 +42,7 @@ type wsDriver interface {
 	SessionIDByKey(ctx context.Context, key string) (string, bool, error)
 	SocketPath(ctx context.Context) (string, error)
 	SwitchClientHere(ctx context.Context, sessionID, tmuxEnv, tmuxPane string) error
+	SelectPane(ctx context.Context, paneID string) error
 }
 
 var errNoTmux = errors.New("tmux not found in PATH")
@@ -170,8 +173,18 @@ func checkID(id string) error {
 	return nil
 }
 
+// historyStore is the config history. Undo may write project files and the
+// curated overlays of agent conversations (names, tags, archive, removal).
 func historyStore(d xdg.Dirs) history.Store {
-	return history.Store{Root: wsRoot, Path: filepath.Join(d.State, "history.jsonl"), AllowedRoots: []string{projectsDir(d)}}
+	roots := []string{projectsDir(d), agentStore(d).CuratedDir(), task.Dir(d), knowledgeDir(d, "")}
+	// Finish records are history events too: their directory is allowed
+	// as configured now (an unreadable configuration allows the default only).
+	if cfg, _, err := config.Load(wsRoot, d, os.Getenv); err == nil && cfg.Knowledge.Root != "" && len(cfg.Validate()) == 0 {
+		if kb := knowledgeDir(d, cfg.Knowledge.Root); checkKnowledgeRoot(d, kb) == nil {
+			roots = append(roots, kb)
+		}
+	}
+	return history.Store{Root: wsRoot, Path: filepath.Join(d.State, "history.jsonl"), AllowedRoots: roots}
 }
 
 // prompting is true while ask waits for an answer; main does not announce
@@ -219,7 +232,9 @@ func mayBeMidApply(c *cobra.Command) bool {
 	switch c.CommandPath() {
 	case "cairn up", "cairn apply", "cairn open", "cairn adopt", "cairn undo",
 		"cairn history restore", "cairn host apply", "cairn host uninstall", "cairn host repair",
-		"cairn tmux service install", "cairn tmux service uninstall", "cairn init":
+		"cairn tmux service install", "cairn tmux service uninstall", "cairn init",
+		"cairn agents new", "cairn agents resume", "cairn agents archive", "cairn agents rm",
+		"cairn task new", "cairn task open", "cairn task recover", "cairn task finish":
 		return true
 	case "cairn capture":
 		w, _ := c.Flags().GetBool("write")

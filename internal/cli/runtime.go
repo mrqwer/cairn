@@ -91,7 +91,7 @@ func opSymbol(st ui.Style, styled bool, op reconcile.Op) string {
 		sym, paint = "+", st.Green
 	case op.Kind == reconcile.KindRespawnPane:
 		sym, paint = "↻", st.Cyan
-	case op.Kind == reconcile.KindSetLayout:
+	case op.Kind == reconcile.KindSetLayout || op.Kind == reconcile.KindRekeyPanes:
 		sym, paint = "~", st.Cyan
 	case strings.HasPrefix(op.Kind, "skip-"):
 		sym, paint = "⊘", st.Dim
@@ -540,34 +540,41 @@ func newWsOpenCmd() *cobra.Command {
 				_, _ = fmt.Fprintf(errOut, "the session of %s was not found after apply; see: cairn plan %s\n", id, id)
 				return &ExitError{Code: 1}
 			}
-			// Inside tmux: never nest (Review Focus 5). Switch the invoking
-			// client, identified by its own TMUX/TMUX_PANE, to the session id
-			// — only when it is a client of the target server; a client of
-			// another server is never touched.
-			if here := tmuxClientSocket(); here != "" {
-				target, err := drv.SocketPath(ctx)
-				if err != nil {
-					return err
-				}
-				if filepath.Clean(here) != filepath.Clean(target) {
-					attach := "tmux "
-					if socket != "" {
-						attach += "-L " + socket + " "
-					}
-					_, _ = fmt.Fprintf(errOut, "you are inside another tmux server (%s); run: %sattach -t =%s\n", here, attach, p.Session)
-					return &ExitError{Code: 1}
-				}
-				return drv.SwitchClientHere(ctx, sid, os.Getenv("TMUX"), os.Getenv("TMUX_PANE"))
-			}
-			return execProcess(tmux.AttachCommand(socket, sid))
+			return switchOrAttach(cmd, drv, socket, p.Session, sid)
 		},
 	}
+}
+
+// switchOrAttach brings the user to session sid. Inside tmux: never nest
+// (Review Focus 5). Switch the invoking client, identified by its own
+// TMUX/TMUX_PANE, to the session id — only when it is a client of the
+// target server; a client of another server is never touched. Outside tmux
+// the process is replaced by tmux attach.
+func switchOrAttach(cmd *cobra.Command, drv wsDriver, socket, session, sid string) error {
+	ctx := ctxOf(cmd)
+	if here := tmuxClientSocket(); here != "" {
+		target, err := drv.SocketPath(ctx)
+		if err != nil {
+			return err
+		}
+		if filepath.Clean(here) != filepath.Clean(target) {
+			attach := "tmux "
+			if socket != "" {
+				attach += "-L " + socket + " "
+			}
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "you are inside another tmux server (%s); run: %sattach -t =%s\n", here, attach, session)
+			return &ExitError{Code: 1}
+		}
+		return drv.SwitchClientHere(ctx, sid, os.Getenv("TMUX"), os.Getenv("TMUX_PANE"))
+	}
+	return execProcess(tmux.AttachCommand(socket, sid))
 }
 
 // statusJSON is the output of status --json.
 type statusJSON struct {
 	Projects   []statusRow     `json:"projects"`
 	LoadErrors []loadErrorJSON `json:"load_errors"`
+	Agents     agentsStatus    `json:"agents"`
 }
 
 // statusRow is one project in status --json.
@@ -584,12 +591,19 @@ type statusRow struct {
 }
 
 func newWsStatusCmd() *cobra.Command {
-	var asJSON bool
+	var asJSON, forTmux bool
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show the live state of every active project",
-		Args:  cobra.NoArgs,
+		Short: "Show the live state of every active project and agent conversation",
+		Long: "Shows each active project's session and the agent conversations waiting or working.\n" +
+			"--tmux prints only the agent badge (\"2 waiting · 3 working\", empty when none) for a tmux\n" +
+			"status line: it reads cairn's records only, never tmux, and is fast enough for #(cairn status --tmux).",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if forTmux {
+				printStatusTmux(cmd.OutOrStdout(), cmd.ErrOrStderr())
+				return nil
+			}
 			r, err := prepare(cmd)
 			if err != nil {
 				return err
@@ -626,10 +640,16 @@ func newWsStatusCmd() *cobra.Command {
 				rows = append(rows, row)
 			}
 			out := cmd.OutOrStdout()
+			ast, err := readAgentsStatus(agentStore(r.ws.dirs), false)
+			if err != nil {
+				// The workspace status does not depend on the agents store.
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "agents: cannot read the conversation records: %v\n", err)
+			}
 			if asJSON {
-				return writeJSON(out, statusJSON{Projects: rows, LoadErrors: loadErrorsJSON(r.ws)})
+				return writeJSON(out, statusJSON{Projects: rows, LoadErrors: loadErrorsJSON(r.ws), Agents: ast})
 			}
 			printLoadErrors(cmd.ErrOrStderr(), r.ws.loadErrs)
+			defer printAgentsStatus(out, ast)
 			if len(rows) == 0 {
 				_, _ = fmt.Fprintln(out, "no active projects")
 				return nil
@@ -662,5 +682,6 @@ func newWsStatusCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "machine-readable output")
+	cmd.Flags().BoolVar(&forTmux, "tmux", false, "print only the agent badge for a tmux status line")
 	return cmd
 }

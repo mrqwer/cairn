@@ -159,3 +159,20 @@ func TestFailed(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+// An agent pane of a conversation that is no longer configured keeps
+// running; the doctor points at it.
+func TestDriftReportsOrphanAgentPane(t *testing.T) {
+	api := proj("api", "/srv/api")
+	snap := tmux.Snapshot{Sessions: []tmux.Session{{
+		ID: "$1", Name: "api", Key: "api",
+		Windows: []tmux.Window{{ID: "@1", Key: "api/main", Name: "main", W: 200, H: 50, Panes: []tmux.Pane{
+			{ID: "%1", Key: "api/main/1", W: 100, H: 50, Cwd: "/srv/api", Cmd: "bash"},
+			{ID: "%2", Key: "api/main/orphan-2", Agent: "01JOLD", W: 99, H: 50, Cwd: "/srv/api", Cmd: "cairn"},
+		}}},
+	}}}
+	r := byID(t, Checks([]workspace.Project{api}, nil, snap, "3.4", exists), IDDrift)
+	if r.Status != doctor.Warn || !strings.Contains(r.Evidence, "agent pane") {
+		t.Fatalf("orphan agent pane not reported: %+v", r)
+	}
+}

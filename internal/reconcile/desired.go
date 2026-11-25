@@ -6,6 +6,7 @@ package reconcile
 import (
 	"fmt"
 
+	"github.com/mrqwer/cairn/internal/agents"
 	"github.com/mrqwer/cairn/internal/fsx"
 	"github.com/mrqwer/cairn/internal/tmux"
 	"github.com/mrqwer/cairn/internal/workspace"
@@ -15,6 +16,11 @@ import (
 // NewSize is the size of the detached sessions (and so of their windows)
 // apply creates.
 var NewSize = layout.Size{W: tmux.DefaultWidth, H: tmux.DefaultHeight}
+
+// AgentCommand returns the cairn executable an agent pane runs as
+// "<AgentCommand()> agents pane <conversation id>". The CLI sets it once, at
+// init, to a function returning its own path.
+var AgentCommand = func() string { return "cairn" }
 
 // DesiredPane is one configured pane with its computed values.
 type DesiredPane struct {
@@ -118,10 +124,17 @@ func Desired(p workspace.Project, size layout.Size, rootExists func(string) bool
 			if i > 0 && sz == 0 {
 				sz = workspace.DefaultSize
 			}
+			argv := append([]string(nil), pn.Run...)
+			if pn.Role == workspace.RoleAgent {
+				argv = agents.PaneArgv(AgentCommand(), pn.Agent)
+			}
 			dp := DesiredPane{
 				Key: fmt.Sprintf("%s/%d", wkey, i+1), Pos: i + 1, Restart: pn.Restart,
 				Split: pn.Split, From: from, Size: sz,
-				Spec: tmux.PaneSpec{Cwd: pn.Cwd, Argv: append([]string(nil), pn.Run...)},
+				Spec: tmux.PaneSpec{Cwd: pn.Cwd, Argv: argv},
+			}
+			if pn.Role == workspace.RoleAgent {
+				dp.Spec.Agent = pn.Agent
 			}
 			if i == 0 {
 				dp.Split, dp.From, dp.Size = "", 0, 0

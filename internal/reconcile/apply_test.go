@@ -44,6 +44,7 @@ type fWindow struct {
 
 type fPane struct {
 	id, key string
+	agent   string
 	pid     int
 	dead    bool
 	status  int
@@ -73,7 +74,7 @@ func (f *fakeDriver) newPane(p tmux.PaneSpec) *fPane {
 	if len(p.Argv) > 0 {
 		cmd = p.Argv[0]
 	}
-	return &fPane{id: fmt.Sprintf("%%%d", n), key: p.Key, pid: 100 + n, cmd: cmd, argv: p.Argv}
+	return &fPane{id: fmt.Sprintf("%%%d", n), key: p.Key, agent: p.Agent, pid: 100 + n, cmd: cmd, argv: p.Argv}
 }
 
 func (f *fakeDriver) findPane(id string) (*fWindow, int) {
@@ -99,7 +100,7 @@ func (f *fakeDriver) Snapshot(context.Context) (tmux.Snapshot, error) {
 		for wi, w := range s.windows {
 			tw := tmux.Window{ID: w.id, Key: w.key, Name: w.name, Index: wi, W: w.w, H: w.h}
 			for pi, p := range w.panes {
-				tw.Panes = append(tw.Panes, tmux.Pane{ID: p.id, Key: p.key, Index: pi, PID: p.pid, Dead: p.dead, DeadStatus: p.status, Cmd: p.cmd})
+				tw.Panes = append(tw.Panes, tmux.Pane{ID: p.id, Key: p.key, Agent: p.agent, Index: pi, PID: p.pid, Dead: p.dead, DeadStatus: p.status, Cmd: p.cmd})
 			}
 			ts.Windows = append(ts.Windows, tw)
 		}
@@ -165,7 +166,20 @@ func (f *fakeDriver) SelectLayout(_ context.Context, windowID, s string) error {
 }
 
 func (f *fakeDriver) SetOption(_ context.Context, scope, target, name, value string) error {
-	return f.rec("SetOption %s %s %s %s", scope, target, name, value)
+	if err := f.rec("SetOption %s %s %s %s", scope, target, name, value); err != nil {
+		return err
+	}
+	if scope == "pane" {
+		if w, i := f.findPane(target); w != nil {
+			switch name {
+			case "@cairn_p":
+				w.panes[i].key = value
+			case tmux.AgentOption:
+				w.panes[i].agent = value
+			}
+		}
+	}
+	return nil
 }
 
 func (f *fakeDriver) RespawnPane(_ context.Context, paneID string, argv []string) error {

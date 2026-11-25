@@ -1,0 +1,19 @@
+# agy has no conversation names; cairn keeps them. The id is read from the
+# tool's conversation store after launch.
+name = "agy"
+binary = "agy"
+version_check = ["agy", "--version"]
+# Help commands `cairn agents doctor` reads to check the flags used exist.
+probe_flags = [["agy", "--help"]]
+
+[capabilities]
+resume_by_id = true
+hooks = "none"
+discovery = "state-file"
+
+[commands]
+start = ["agy", "{profile_args...}"]
+resume = ["agy", "--conversation", "{native_id}", "{profile_args...}"]
+
+[profile_flags]
+model = ["--model", "{value}"]

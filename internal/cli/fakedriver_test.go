@@ -30,6 +30,8 @@ type fakeDriver struct {
 	// failOption makes SetOption on this target fail, failUnset
 	// UnsetOption; afterSet runs after every SetOption.
 	failOption, failUnset string
+	failKill              bool
+	failNewWindow         bool
 	afterSet              func()
 }
 
@@ -48,6 +50,8 @@ type fPane struct {
 	pid     int
 	dead    bool
 	cmd     string
+	argv    []string
+	agent   string
 }
 
 func (f *fakeDriver) next() int { f.seq++; return f.seq }
@@ -77,7 +81,7 @@ func (f *fakeDriver) newPane(p tmux.PaneSpec) *fPane {
 	if len(p.Argv) > 0 {
 		cmd = p.Argv[0]
 	}
-	return &fPane{id: fmt.Sprintf("%%%d", n), key: p.Key, pid: 100 + n, cmd: cmd}
+	return &fPane{id: fmt.Sprintf("%%%d", n), key: p.Key, pid: 100 + n, cmd: cmd, argv: slices.Clone(p.Argv), agent: p.Agent}
 }
 
 func (f *fakeDriver) Snapshot(context.Context) (tmux.Snapshot, error) {
@@ -101,7 +105,7 @@ func (f *fakeDriver) Snapshot(context.Context) (tmux.Snapshot, error) {
 		for wi, w := range s.windows {
 			tw := tmux.Window{ID: w.id, Key: w.key, Name: w.name, Index: wi, W: tmux.DefaultWidth, H: tmux.DefaultHeight}
 			for pi, p := range w.panes {
-				tw.Panes = append(tw.Panes, tmux.Pane{ID: p.id, Key: p.key, Index: pi, PID: p.pid, Dead: p.dead, Cmd: p.cmd})
+				tw.Panes = append(tw.Panes, tmux.Pane{ID: p.id, Key: p.key, Agent: p.agent, Index: pi, PID: p.pid, Dead: p.dead, Cmd: p.cmd})
 			}
 			ts.Windows = append(ts.Windows, tw)
 		}
@@ -123,6 +127,9 @@ func (f *fakeDriver) NewSession(_ context.Context, name string, _, _ int, win tm
 
 func (f *fakeDriver) NewWindow(_ context.Context, sessionID string, win tmux.WindowSpec) (string, string, error) {
 	f.rec("NewWindow %s %s", sessionID, win.Key)
+	if f.failNewWindow {
+		return "", "", fmt.Errorf("tmux new-window: %s: simulated failure", win.Key)
+	}
 	for _, s := range f.sessions {
 		if s.id == sessionID {
 			p := f.newPane(win.PaneSpec)
@@ -165,6 +172,23 @@ func (f *fakeDriver) SetOption(_ context.Context, scope, target, name, value str
 	}
 	if k := f.liveKey(scope, target); k != nil {
 		*k = value
+	}
+	if scope == "pane" {
+		for _, s := range f.sessions {
+			for _, w := range s.windows {
+				for _, p := range w.panes {
+					if p.id != target {
+						continue
+					}
+					switch name {
+					case "@cairn_p":
+						p.key = value
+					case tmux.AgentOption:
+						p.agent = value
+					}
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -211,6 +235,25 @@ func (f *fakeDriver) RespawnPane(_ context.Context, paneID string, argv []string
 	return nil
 }
 
+func (f *fakeDriver) SelectPane(_ context.Context, id string) error {
+	f.rec("SelectPane %s", id)
+	return nil
+}
+
+// pane returns the fake pane marked key, or nil.
+func (f *fakeDriver) pane(key string) *fPane {
+	for _, s := range f.sessions {
+		for _, w := range s.windows {
+			for _, p := range w.panes {
+				if p.key == key {
+					return p
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func (f *fakeDriver) SwapPanes(_ context.Context, a, b string) error {
 	f.rec("SwapPanes %s %s", a, b)
 	return nil
@@ -226,10 +269,15 @@ func (f *fakeDriver) KillWindow(_ context.Context, id string) error {
 
 func (f *fakeDriver) KillPane(_ context.Context, id string) error {
 	f.rec("KillPane %s", id)
+	if f.failKill {
+		return fmt.Errorf("tmux kill-pane: %s: simulated failure", id)
+	}
 	for _, s := range f.sessions {
 		for _, w := range s.windows {
 			w.panes = slices.DeleteFunc(w.panes, func(p *fPane) bool { return p.id == id })
 		}
+		// As in tmux, a window whose last pane is killed goes too.
+		s.windows = slices.DeleteFunc(s.windows, func(w *fWindow) bool { return len(w.panes) == 0 })
 	}
 	return nil
 }

@@ -3,9 +3,13 @@ package execx_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/mrqwer/cairn/internal/execx"
 )
@@ -55,5 +59,37 @@ func TestOSRunnerNilEnvInherits(t *testing.T) {
 	out, err := execx.OSRunner{}.Run(context.Background(), "env")
 	if err != nil || !strings.Contains(string(out), "CAIRN_INHERIT=yes\n") {
 		t.Fatalf("%q %v", out, err)
+	}
+}
+
+func TestOSRunnerDir(t *testing.T) {
+	dir := t.TempDir()
+	out, err := execx.OSRunner{Dir: dir}.Run(context.Background(), "pwd")
+	if err != nil || strings.TrimSpace(string(out)) != dir {
+		t.Fatalf("%q %v", out, err)
+	}
+}
+
+func TestOSRunnerStreams(t *testing.T) {
+	var out, errOut strings.Builder
+	r := execx.OSRunner{Stdin: strings.NewReader("in\n"), Stdout: &out, Stderr: &errOut}
+	b, err := r.Run(context.Background(), "sh", "-c", "cat; echo e >&2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) != 0 || out.String() != "in\n" || errOut.String() != "e\n" {
+		t.Fatalf("returned %q, out %q, err %q", b, out.String(), errOut.String())
+	}
+}
+
+func TestOSRunnerInterruptSignal(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	r := execx.OSRunner{Interrupt: syscall.SIGTERM, Dir: dir}
+	_, _ = r.Run(ctx, "sh", "-c", "trap 'echo term > got; exit 1' TERM; sleep 5 >/dev/null 2>&1 & wait")
+	b, _ := os.ReadFile(filepath.Join(dir, "got"))
+	if strings.TrimSpace(string(b)) != "term" {
+		t.Fatalf("child was not sent the signal: %q", b)
 	}
 }
